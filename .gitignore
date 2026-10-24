@@ -7,3 +7,6 @@ dist/
 icebase/.generated/
 *.log
 .DS_Store
+.dart_tool/
+packages/dart/*/pubspec.lock
+packages/dart/*/build/

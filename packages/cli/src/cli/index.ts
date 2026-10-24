@@ -18,6 +18,7 @@ const HELP = `icebase <command>
                                 (--only: firestore, database, storage, auth, functions, hosting, rules, indexes)
   indexes check [--project tsconfig.json]
                                 Type-check and list queries whose composite index is not declared (exit 1 if any)
+  gen dart [--out FILE]         Write the Dart types, schema and config (models, Fields, enums) for the Dart SDK
   drivers --env X               Print the mode of each service, the wiring between them, and warnings
 `;
 
@@ -74,6 +75,18 @@ async function main(argv: string[]): Promise<number> {
       for (const p of w.problems) log(`error: ${p}`);
       for (const x of w.warnings) log(`warn:  ${x}`);
       return w.problems.length ? 1 : 0;
+    }
+    case 'gen': {
+      if (pos[1] !== 'dart') throw new Error('usage: icebase gen dart [--out lib/icebase.g.dart] [--package icebase]');
+      const { config } = await loadConfig(cwd);
+      const { genDart } = await import('./gen-dart.ts');
+      const out = str(f.out) ?? 'lib/icebase.g.dart';
+      const { mkdirSync, writeFileSync } = await import('node:fs');
+      const { dirname, resolve } = await import('node:path');
+      mkdirSync(dirname(resolve(cwd, out)), { recursive: true });
+      writeFileSync(resolve(cwd, out), genDart(config, { ...(str(f.package) ? { package: str(f.package)! } : {}) }));
+      log(`wrote ${out}`);
+      return 0;
     }
     case 'login': {
       // Firebase login for firebase-mode services; IceBase's admin calls reuse it (CLI-3).

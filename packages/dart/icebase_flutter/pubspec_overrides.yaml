@@ -1,0 +1,3 @@
+dependency_overrides:
+  icebase:
+    path: ../icebase

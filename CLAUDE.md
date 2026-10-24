@@ -69,6 +69,12 @@ Three packages, published to JSR (and built to `dist/` for Node):
 - `packages/tests` — `*.test.ts` run with no emulator (unit + the IceBase emulator in-process);
   `*.emu.test.ts` need Firebase's emulators; `suites/` hold the shared conformance suites (the
   same assertions against Firebase and IceBase). `fixtures/functions-app` is a functions source.
+- `packages/dart/icebase` — the Dart client SDK (pub package `icebase`): the same schema checks,
+  index planner and wire format as `packages/client`, emulator drivers for every service built
+  in; `src/cli/gen-dart.ts` writes the typed `icebase.g.dart` from a config. Tests start the
+  emulator from `tool/emulator.ts` (Node + tsx from this repository).
+- `packages/dart/icebase_flutter` — firebase mode for Dart over FlutterFire
+  (`IceBaseFlutter.register()`); `pubspec_overrides.yaml` points at the local `icebase`.
 - `example-app/` — the PRD's example project; `tsc -p example-app` proves the compile-time
   checks (each `@ts-expect-error` must fail for its stated reason); `scripts/smoke.ts` runs it
   end to end under `icebase dev`.
@@ -91,6 +97,10 @@ suite and publishes the three packages to JSR (linked to this repository, OIDC, 
 - `cd example-app && node ../packages/cli/dist/cli/index.js dev` (or `deno run -A
   --unstable-sloppy-imports ../packages/cli/src/cli/index.ts dev`) then `npx tsx scripts/smoke.ts`
   — end to end under `icebase dev` (build first: `npm run build`).
+- Dart: `npm run build`, then `cd packages/dart/icebase && dart analyze --fatal-infos && dart test`
+  (regenerate the fixture with `node --import tsx ../../../../cli/src/cli/index.ts gen dart --out
+  icebase.g.dart` in `test/fixture`); `cd packages/dart/icebase_flutter && flutter analyze && flutter test`.
+  Not on pub.dev yet: publishing needs Panth's pub.dev account.
 - Management APIs: `ICEBASE_LIVE_PROJECT=icebase-test-p977 npx tsx test/live/manage.live.ts`
   in `packages/tests` (uses `gcloud auth print-access-token`; the project is IceBase's own
   test project, Spark plan: Auth "Get started" and the default Storage bucket need the console

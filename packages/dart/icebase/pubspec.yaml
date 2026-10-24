@@ -1,0 +1,20 @@
+name: icebase
+description: >-
+  IceBase for Dart: Firebase's client API (Firestore, Auth, Realtime Database, Storage,
+  Functions) with an explicit schema, declared indexes, and modes per service. Pure Dart;
+  the emulator drivers talk to the IceBase server. Firebase mode is in icebase_flutter.
+version: 0.1.0
+homepage: https://github.com/Panth977/icebase
+repository: https://github.com/Panth977/icebase/tree/main/packages/dart/icebase
+license: Apache-2.0
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  http: ^1.2.0
+  web_socket_channel: ^3.0.0
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.0

@@ -49,6 +49,11 @@ deno run -A --unstable-sloppy-imports --config deno.json jsr:@panth977/icebase-c
 In a Node project: `npx jsr add @panth977/icebase @panth977/icebase-server` (plus `firebase`,
 `firebase-admin`, `firebase-functions`).
 
+For Dart and Flutter: [`packages/dart/icebase`](packages/dart/icebase) (the client SDK; emulator
+mode built in) and [`packages/dart/icebase_flutter`](packages/dart/icebase_flutter) (firebase
+mode over FlutterFire). `icebase gen dart` writes the typed models, fields and config from
+`icebase.config.ts`.
+
 `icebase.config.ts` is the one config: schema, rules files, functions, hosting, auth, and per
 environment which mode each service runs in.
 
@@ -76,6 +81,7 @@ export default defineConfig({
 | `icebase deploy --env X [--only …]` | Firestore indexes/TTL/exemptions from the schema, rules, auth providers, functions (bundled, with the custom-auth endpoint), hosting |
 | `icebase indexes check` | Every query that needs an undeclared composite index, with file:line (exit 1 if any) |
 | `icebase drivers --env X` | The mode of each service and the wiring problems between them |
+| `icebase gen dart [--out FILE]` | The Dart side of the config: model classes, typed fields, enums, dbPath/filePath holders, the schema and environments |
 | `icebase login` | Firebase login; deploy and the management APIs use it |
 
 ## Status
