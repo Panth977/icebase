@@ -101,6 +101,11 @@ needs its indexes declared, and the backend is whatever mode the environment pic
   `autoIndex: true`.
 - **Keys that are data:** index paths may use `'*'` for them (`index(['members', '*'])`).
 
+**npm projects that install IceBase from JSR** (npm.jsr.io): the JSR build lists the
+Firebase SDKs as dependencies. Keep one copy of each: pin them to the app's own with
+overrides, e.g. pnpm's `"@jsr/panth977__icebase-server>firebase-admin": "^14.4.0"`. Two copies
+of firebase-admin cannot share an app.
+
 `startEmulator({ listen: false, name })` runs the IceBase server inside a backend process with
 no port. Admin apps reach it with `{ emulator: { embedded: name, adminToken } }`. A single
 VM's backend uses this to keep its data in IceBase (SQLite).
