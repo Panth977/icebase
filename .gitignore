@@ -10,3 +10,4 @@ icebase/.generated/
 .dart_tool/
 packages/dart/*/pubspec.lock
 packages/dart/*/build/
+.flutter-plugins*
