@@ -79,6 +79,10 @@ Three packages, published to JSR (and built to `dist/` for Node):
   checks (each `@ts-expect-error` must fail for its stated reason); `scripts/smoke.ts` runs it
   end to end under `icebase dev`.
 
+- `packages/server/src/compat.ts` is the firebase-admin-compatible Firestore. In it, string
+  field paths are split on dots, as firebase-admin does. `packages/client/src/zod.ts` holds
+  `fromZod`. TaskManager runs on both (ORCH-26, branch `icebase`).
+
 Rules the code keeps: every index a query uses is declared with `index(…)` (single-field ones
 too); fields are key paths (`['address', 'city']`) and strings are never split on dots.
 

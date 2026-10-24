@@ -72,6 +72,39 @@ export default defineConfig({
 });
 ```
 
+## Moving an existing firebase-admin codebase
+
+`@panth977/icebase-server/compat` is firebase-admin's Firestore API over IceBase:
+
+- `collection('a').doc('b').get()`
+- `where('counts.open', '>', 0)`
+- `FieldValue.increment(1)`
+- batches, transactions and `bulkWriter`
+- numeric gRPC error codes
+
+Every call still goes through IceBase. Each write is checked against the schema, each query
+needs its indexes declared, and the backend is whatever mode the environment picks.
+
+- **Declaring an existing schema:** `fromZod(Schema)` / `zodDocument(Schema)` (from
+  `@panth977/icebase/zod`) turn existing zod schemas into IceBase fields.
+- **Field types for real data:**
+  - `f.record` for maps keyed by ids
+  - `f.union`
+  - `f.literal`
+  - `f.nullable`
+  - `f.any`
+  - open documents (`rest`)
+- **Discovering what the codebase needs:** learning mode (`getFirestore(app, { learn })`)
+  reports every undeclared collection, missing index and non-matching write instead of refusing
+  it. Run the test suite once in that mode to collect them.
+- **Data whose shape users define:** collections such as `'artifacts/{a}/db/{path=**}'` with
+  `autoIndex: true`.
+- **Keys that are data:** index paths may use `'*'` for them (`index(['members', '*'])`).
+
+`startEmulator({ listen: false, name })` runs the IceBase server inside a backend process with
+no port. Admin apps reach it with `{ emulator: { embedded: name, adminToken } }`. A single
+VM's backend uses this to keep its data in IceBase (SQLite).
+
 ## CLI
 
 | Command | What it does |
