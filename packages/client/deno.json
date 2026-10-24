@@ -1,0 +1,36 @@
+{
+  "name": "@panth977/icebase",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": "./src/mod.ts",
+    "./app": "./src/app.ts",
+    "./config": "./src/config.ts",
+    "./schema": "./src/schema.ts",
+    "./firestore": "./src/firestore.ts",
+    "./auth": "./src/auth.ts",
+    "./database": "./src/database.ts",
+    "./storage": "./src/storage.ts",
+    "./functions": "./src/functions.ts",
+    "./errors": "./src/errors.ts",
+    "./internal": "./src/internal.ts"
+  },
+  "imports": {
+    "firebase/": "npm:/firebase@^13.1.0/"
+  },
+  "publish": {
+    "include": [
+      "src/**/*.ts",
+      "README.md",
+      "LICENSE"
+    ]
+  },
+  "compilerOptions": {
+    "lib": [
+      "deno.ns",
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ]
+  }
+}

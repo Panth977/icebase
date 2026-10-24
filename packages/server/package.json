@@ -1,0 +1,64 @@
+{
+  "name": "@panth977/icebase-server",
+  "version": "0.1.0",
+  "description": "IceBase on the server: admin (firebase-admin), functions (firebase-functions v2, typed triggers) and the custom-auth endpoint.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Panth977/icebase.git",
+    "directory": "packages/server"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/admin.ts",
+      "default": "./dist/admin.js"
+    },
+    "./admin": {
+      "types": "./src/admin.ts",
+      "default": "./dist/admin.js"
+    },
+    "./functions": {
+      "types": "./src/functions.ts",
+      "default": "./dist/functions.js"
+    },
+    "./auth": {
+      "types": "./src/auth.ts",
+      "default": "./dist/auth.js"
+    },
+    "./internal": {
+      "types": "./src/internal.ts",
+      "default": "./dist/internal.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@panth977/icebase": "0.1.0"
+  },
+  "peerDependencies": {
+    "firebase": "^13.1.0",
+    "firebase-admin": "^14.5.0",
+    "firebase-functions": "^7.4.0"
+  },
+  "peerDependenciesMeta": {
+    "firebase": {
+      "optional": true
+    },
+    "firebase-admin": {
+      "optional": true
+    },
+    "firebase-functions": {
+      "optional": true
+    }
+  }
+}

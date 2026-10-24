@@ -1,4 +1,4 @@
-import { collection, desc, f, index } from 'icebase/schema';
+import { collection, desc, f, index } from '@panth977/icebase/schema';
 
 export const users = collection('users', {
   fields: {

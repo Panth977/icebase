@@ -1,6 +1,6 @@
 // `icebase dev` runs this once on an empty emulator (SQLite) database.
-import { getAdminFirestore, initializeAdminApp } from 'icebase/admin';
-import { collection, doc, writeBatch } from 'icebase/firestore';
+import { getAdminFirestore, initializeAdminApp } from '@panth977/icebase-server/admin';
+import { collection, doc, writeBatch } from '@panth977/icebase/firestore';
 import config from '../../icebase.config';
 import { products } from '../schema';
 

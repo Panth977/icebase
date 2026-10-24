@@ -20,9 +20,9 @@ import {
   updateDoc,
   where,
   writeBatch,
-} from 'icebase/firestore';
-import { signInWithEmailAndPassword } from 'icebase/auth';
-import { httpsCallable } from 'icebase/functions';
+} from '@panth977/icebase/firestore';
+import { signInWithEmailAndPassword } from '@panth977/icebase/auth';
+import { httpsCallable } from '@panth977/icebase/functions';
 import type { cancelOrder as cancelOrderFn } from '../../icebase/functions/src/orders';
 import { auth, db, functions } from '../lib/icebase';
 import { orders, products, users } from '../../icebase/schema';

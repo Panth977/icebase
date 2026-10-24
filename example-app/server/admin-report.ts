@@ -1,6 +1,6 @@
 // Optional backend (your own API / scripts) — same typed API, admin mode bypasses rules.
-import { getAdminFirestore, initializeAdminApp } from 'icebase/admin';
-import { collectionGroup, getDocs, query, where } from 'icebase/firestore';
+import { getAdminFirestore, initializeAdminApp } from '@panth977/icebase-server/admin';
+import { collectionGroup, getDocs, query, where } from '@panth977/icebase/firestore';
 import config from '../icebase.config';
 import { orders } from '../icebase/schema';
 

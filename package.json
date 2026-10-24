@@ -7,12 +7,13 @@
     "example-app"
   ],
   "scripts": {
-    "build": "npm run build -w icebase",
-    "typecheck": "tsc -p packages/icebase && tsc -p example-app",
-    "test": "npm test -w icebase",
-    "test:firebase": "scripts/emu.sh firestore,auth,database,storage \"cd packages/icebase && ICEBASE_EMU=1 npx vitest run --exclude test/functions.emu.test.ts\"",
-    "test:functions": "scripts/emu-fixture.sh \"npx vitest run test/functions.emu.test.ts\"",
-    "test:all": "npm run typecheck && npm test && npm run test:firebase && npm run test:functions"
+    "build": "npm run build -w @panth977/icebase && npm run build -w @panth977/icebase-server && npm run build -w @panth977/icebase-cli",
+    "typecheck": "tsc -p packages/client && tsc -p packages/server && tsc -p packages/cli && tsc -p packages/tests && tsc -p example-app",
+    "test": "npm test -w @icebase/tests",
+    "test:firebase": "scripts/emu.sh firestore,auth,database,storage \"cd packages/tests && ICEBASE_EMU=1 npx vitest run --exclude functions.emu.test.ts\"",
+    "test:functions": "scripts/emu-fixture.sh \"npx vitest run functions.emu.test.ts\"",
+    "test:all": "npm run build && npm run typecheck && npm test && npm run test:firebase && npm run test:functions",
+    "jsr:check": "deno publish --dry-run"
   },
   "engines": {
     "node": ">=22"

@@ -1,0 +1,71 @@
+{
+  "name": "@panth977/icebase-cli",
+  "version": "0.1.0",
+  "description": "The icebase CLI (init, dev, deploy, indexes check), the management APIs (create databases, deploy indexes, rules, hosting from code) and the IceBase emulator server.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Panth977/icebase.git",
+    "directory": "packages/cli"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/manage.ts",
+      "default": "./dist/manage.js"
+    },
+    "./manage": {
+      "types": "./src/manage.ts",
+      "default": "./dist/manage.js"
+    },
+    "./emulator": {
+      "types": "./src/emulator/server.ts",
+      "default": "./dist/emulator/server.js"
+    },
+    "./internal": {
+      "types": "./src/internal.ts",
+      "default": "./dist/internal.js"
+    },
+    "./cli": {
+      "types": "./src/cli/index.ts",
+      "default": "./dist/cli/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@panth977/icebase": "0.1.0",
+    "@panth977/icebase-server": "0.1.0",
+    "ws": "^8.18.0",
+    "tsx": "^4.20.0",
+    "esbuild": "^0.25.0"
+  },
+  "peerDependencies": {
+    "firebase": "^13.1.0",
+    "firebase-admin": "^14.5.0",
+    "firebase-functions": "^7.4.0"
+  },
+  "peerDependenciesMeta": {
+    "firebase": {
+      "optional": true
+    },
+    "firebase-admin": {
+      "optional": true
+    },
+    "firebase-functions": {
+      "optional": true
+    }
+  },
+  "bin": {
+    "icebase": "./dist/cli/index.js"
+  }
+}

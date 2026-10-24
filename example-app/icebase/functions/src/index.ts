@@ -1,5 +1,5 @@
 // Every export is a deployed function — same file deploys to Cloud Functions (mode firebase) or runs on the IceBase server.
-import { onRequest, onSchedule } from 'icebase/functions/v2';
+import { onRequest, onSchedule } from '@panth977/icebase-server/functions';
 
 export { onOrderCreated, cancelOrder, lowStock } from './orders';
 

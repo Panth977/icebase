@@ -4,7 +4,7 @@ Firebase's API with an explicit schema, declared composite indexes, and a local 
 that enforces both — so you can build on Firebase without being locked into it.
 
 ```ts
-import { collection, getDocs, orderBy, query, where } from 'icebase/firestore';
+import { collection, getDocs, orderBy, query, where } from '@panth977/icebase/firestore';
 import { db } from './lib/icebase';
 import { products } from '../icebase/schema';
 
@@ -12,9 +12,9 @@ const q = query(collection(db, products), where('category', '==', 'shoes'), orde
 const snap = await getDocs(q);           // snap.docs[0].data() is typed from the schema
 ```
 
-- **Same API as Firebase.** `icebase/firestore`, `icebase/auth`, `icebase/database`,
-  `icebase/storage`, `icebase/functions` and `icebase/functions/v2` keep Firebase's function
-  names and call shapes. `icebase/admin` is firebase-admin's counterpart.
+- **Same API as Firebase.** `@panth977/icebase/firestore`, `@panth977/icebase/auth`, `@panth977/icebase/database`,
+  `@panth977/icebase/storage`, `@panth977/icebase/functions` and `@panth977/icebase-server/functions` keep Firebase's function
+  names and call shapes. `@panth977/icebase-server/admin` is firebase-admin's counterpart.
 - **Schema.** Every collection, Realtime Database path and storage path is declared once.
   Writes are type-checked at compile time and validated at runtime in every mode; reads are typed.
 - **Composite indexes are declared.** A query that needs an undeclared composite index is a
@@ -27,7 +27,7 @@ const snap = await getDocs(q);           // snap.docs[0].data() is typed from th
   SQLite, for development and CI), and later `vm` (the same server on Postgres, self-hosted).
 - **No auth lock-in.** Custom email, phone and Google sign-in with your own SMTP / WhatsApp /
   SMS / OAuth client, even in firebase mode — the session afterwards is a normal Firebase one.
-- **Set a project up from code.** `icebase/manage` creates databases and buckets, deploys
+- **Set a project up from code.** `@panth977/icebase-cli/manage` creates databases and buckets, deploys
   indexes and rules, enables sign-in providers, deploys hosting and connects domains.
 
 ## Start
@@ -47,7 +47,7 @@ export default defineConfig({
   name: 'acme-shop',
   schema,
   rules: { firestore: 'icebase/rules/firestore.rules', storage: 'icebase/rules/storage.rules' },
-  functions: { source: 'icebase/functions' },
+  functions: { source: '@panth977/icebase/functions' },
   hosting: { public: 'dist', spa: true, rewrites: [{ source: '/api/**', function: 'api' }] },
   firebase: { projectId: 'acme-shop', webConfigEnv: 'FIREBASE_WEB_CONFIG' },
   environments: {

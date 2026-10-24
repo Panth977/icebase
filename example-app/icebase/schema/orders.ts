@@ -1,4 +1,4 @@
-import { collection, desc, f, index } from 'icebase/schema';
+import { collection, desc, f, index } from '@panth977/icebase/schema';
 import { products } from './products';
 
 // Subcollection: users/{uid}/orders/{orderId}. `group: true` because server/ queries it with collectionGroup().

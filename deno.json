@@ -1,0 +1,8 @@
+{
+  "workspace": [
+    "./packages/client",
+    "./packages/server",
+    "./packages/cli"
+  ],
+  "lock": false
+}

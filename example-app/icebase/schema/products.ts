@@ -1,4 +1,4 @@
-import { collection, contains, desc, f, index } from 'icebase/schema';
+import { collection, contains, desc, f, index } from '@panth977/icebase/schema';
 
 export const products = collection('products', {
   fields: {

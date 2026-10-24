@@ -1,4 +1,4 @@
-import { defineConfig } from 'icebase/config';
+import { defineConfig } from '@panth977/icebase/config';
 import { schema } from './icebase/schema';
 
 export default defineConfig({
@@ -11,7 +11,7 @@ export default defineConfig({
     storage: 'icebase/rules/storage.rules',
   },
 
-  functions: { source: 'icebase/functions', runtime: 'nodejs22', region: 'us-central1' },
+  functions: { source: '@panth977/icebase/functions', runtime: 'nodejs22', region: 'us-central1' },
   hosting: { public: 'dist', spa: true, rewrites: [{ source: '/api/**', function: 'api' }] },
   auth: { providers: ['password', 'google'], claims: {} },
   storage: { maxUploadMb: 20 },

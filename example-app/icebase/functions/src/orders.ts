@@ -1,6 +1,6 @@
-import { getAdminFirestore, initializeAdminApp } from 'icebase/admin';
-import { collection, doc, getDocs, increment, query, runTransaction, updateDoc, where } from 'icebase/firestore';
-import { HttpsError, onCall, onDocumentCreated } from 'icebase/functions/v2';
+import { getAdminFirestore, initializeAdminApp } from '@panth977/icebase-server/admin';
+import { collection, doc, getDocs, increment, query, runTransaction, updateDoc, where } from '@panth977/icebase/firestore';
+import { HttpsError, onCall, onDocumentCreated } from '@panth977/icebase-server/functions';
 import config from '../../../icebase.config';
 import { orders, products } from '../../schema';
 

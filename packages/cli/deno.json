@@ -1,0 +1,27 @@
+{
+  "name": "@panth977/icebase-cli",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": "./src/manage.ts",
+    "./manage": "./src/manage.ts",
+    "./emulator": "./src/emulator/server.ts",
+    "./internal": "./src/internal.ts",
+    "./cli": "./src/cli/index.ts"
+  },
+  "imports": {
+    "firebase/": "npm:/firebase@^13.1.0/",
+    "firebase-admin/": "npm:/firebase-admin@^14.5.0/",
+    "firebase-functions/": "npm:/firebase-functions@^7.4.0/",
+    "ws": "npm:ws@^8.18.0",
+    "tsx/esm/api": "npm:tsx@^4.20.0/esm/api",
+    "esbuild": "npm:esbuild@^0.25.0"
+  },
+  "publish": {
+    "include": [
+      "src/**/*.ts",
+      "README.md",
+      "LICENSE"
+    ]
+  }
+}

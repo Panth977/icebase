@@ -1,0 +1,73 @@
+{
+  "name": "@panth977/icebase",
+  "version": "0.1.0",
+  "description": "Firebase's client API with an explicit schema, declared indexes and modes per service (firebase | emulator).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Panth977/icebase.git",
+    "directory": "packages/client"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/mod.ts",
+      "default": "./dist/mod.js"
+    },
+    "./app": {
+      "types": "./src/app.ts",
+      "default": "./dist/app.js"
+    },
+    "./config": {
+      "types": "./src/config.ts",
+      "default": "./dist/config.js"
+    },
+    "./schema": {
+      "types": "./src/schema.ts",
+      "default": "./dist/schema.js"
+    },
+    "./firestore": {
+      "types": "./src/firestore.ts",
+      "default": "./dist/firestore.js"
+    },
+    "./auth": {
+      "types": "./src/auth.ts",
+      "default": "./dist/auth.js"
+    },
+    "./database": {
+      "types": "./src/database.ts",
+      "default": "./dist/database.js"
+    },
+    "./storage": {
+      "types": "./src/storage.ts",
+      "default": "./dist/storage.js"
+    },
+    "./functions": {
+      "types": "./src/functions.ts",
+      "default": "./dist/functions.js"
+    },
+    "./errors": {
+      "types": "./src/errors.ts",
+      "default": "./dist/errors.js"
+    },
+    "./internal": {
+      "types": "./src/internal.ts",
+      "default": "./dist/internal.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p ."
+  },
+  "peerDependencies": {
+    "firebase": "^13.1.0"
+  },
+  "peerDependenciesMeta": {}
+}

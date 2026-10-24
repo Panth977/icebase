@@ -7,5 +7,5 @@
     "ui": { "enabled": false },
     "singleProjectMode": true
   },
-  "storage": { "rules": "packages/icebase/test/fixtures/storage.rules" }
+  "storage": { "rules": "packages/tests/fixtures/storage.rules" }
 }

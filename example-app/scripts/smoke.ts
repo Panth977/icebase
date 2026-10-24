@@ -1,9 +1,9 @@
 // Smoke test against `icebase dev`: the example app's own code paths, emulator mode.
-import { initializeApp } from 'icebase/app';
-import { createUserWithEmailAndPassword, getAuth } from 'icebase/auth';
-import { addDoc, collection, doc, getCountFromServer, getDoc, getFirestore, serverTimestamp, setDoc } from 'icebase/firestore';
-import { getFunctions, httpsCallable } from 'icebase/functions';
-import { getStorage, ref, uploadBytes, getDownloadURL } from 'icebase/storage';
+import { initializeApp } from '@panth977/icebase/app';
+import { createUserWithEmailAndPassword, getAuth } from '@panth977/icebase/auth';
+import { addDoc, collection, doc, getCountFromServer, getDoc, getFirestore, serverTimestamp, setDoc } from '@panth977/icebase/firestore';
+import { getFunctions, httpsCallable } from '@panth977/icebase/functions';
+import { getStorage, ref, uploadBytes, getDownloadURL } from '@panth977/icebase/storage';
 import config from '../icebase.config';
 import { orders, products, users } from '../icebase/schema';
 import type { cancelOrder as CancelOrder, lowStock as LowStock } from '../icebase/functions/src/orders';

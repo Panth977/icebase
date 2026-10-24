@@ -5,5 +5,9 @@
   "scripts": {
     "typecheck": "tsc -p ."
   },
-  "dependencies": { "icebase": "*" }
+  "dependencies": {
+    "@panth977/icebase": "0.1.0",
+    "@panth977/icebase-server": "0.1.0",
+    "@panth977/icebase-cli": "0.1.0"
+  }
 }
