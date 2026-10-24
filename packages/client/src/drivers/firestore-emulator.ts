@@ -1,7 +1,7 @@
 // emulator mode: icebase/firestore talking to the IceBase server (client and admin alike;
 // admin sends the owner token, which skips rules).
 
-import { emulatorOrigin, service, type IceBaseApp } from '../app.ts';
+import { emulatorFetch, emulatorOrigin, service, type IceBaseApp } from '../app.ts';
 import { IceBaseError } from '../errors.ts';
 import type { FirestoreDriver, RawChange, RawDoc, RawQueryResult, TxDriver } from '../internal/firestore-driver.ts';
 import { fullOrder, isName, type QuerySpec } from '../internal/plan.ts';
@@ -20,7 +20,7 @@ interface WireDoc {
 
 /** The caller's token: 'owner' for admin apps, else the signed-in user's ID token (if auth is in use). */
 export async function callerToken(app: IceBaseApp): Promise<string | null> {
-  if (app.kind === 'admin') return 'owner';
+  if (app.kind === 'admin') return app.options.emulator?.adminToken ?? (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.ICEBASE_ADMIN_TOKEN ?? 'owner';
   const auth = app._services.get('auth') as { currentUser?: { getIdToken(): Promise<string> } | null } | undefined;
   return auth?.currentUser ? auth.currentUser.getIdToken() : null;
 }
@@ -37,7 +37,7 @@ export async function post<T>(app: IceBaseApp, path: string, body: unknown): Pro
   const token = await callerToken(app);
   let res: Response;
   try {
-    res = await fetch(`${emulatorOrigin(app)}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
+    res = await emulatorFetch(`${emulatorOrigin(app)}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
   } catch (e) {
     throw new IceBaseError('unavailable', `cannot reach the IceBase emulator at ${emulatorOrigin(app)} (is \`icebase dev\` running?): ${(e as Error).message}`);
   }
@@ -76,7 +76,9 @@ export function createEmulatorDriver(db: Firestore, h: DriverHelpers): Firestore
 
   const writeOf = (op: 'set' | 'delete' | 'create', path: string, data?: Record<string, unknown>, merge?: boolean) => ({ op, path, ...(data ? { data: encode(data) } : {}), ...(merge ? { merge } : {}) });
   const updateOf = (path: string, fields: [string[], unknown][]) => ({ op: 'update', path, fields: fields.map(([p, v]) => ({ path: p, value: encode(v) })) });
-  const commit = (writes: unknown[], preconditions: { path: string; version: number }[] = []) => post(app, '/v1/fs/commit', { writes, preconditions }).then(() => undefined);
+  // An admin app made with { emulator: { unchecked: true } } writes without the server's schema check.
+  const unchecked = app.kind === 'admin' && !!(app.options.emulator as { unchecked?: boolean } | undefined)?.unchecked;
+  const commit = (writes: unknown[], preconditions: { path: string; version: number }[] = []) => post(app, '/v1/fs/commit', { writes, preconditions, ...(unchecked ? { unchecked } : {}) }).then(() => undefined);
 
   const diff = (prev: Map<string, { i: number; v: number }>, docs: WireDoc[]): RawChange[] => {
     const changes: RawChange[] = [];

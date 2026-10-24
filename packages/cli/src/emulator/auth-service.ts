@@ -173,7 +173,7 @@ export function authService(ctx: EmulatorContext): Service {
   // Rules (and every other service) learn who is calling from here.
   ctx.verify = async (token) => {
     if (!token) return { admin: false, auth: null };
-    if (token === 'owner') return { admin: true, auth: null };
+    if (token === ctx.adminToken) return { admin: true, auth: null };
     const c = claimsOf(token);
     if (!c || typeof c.user_id !== 'string' || (c.exp as number) * 1000 < now()) return { admin: false, auth: null };
     return { admin: false, auth: { uid: c.user_id, token: c } };

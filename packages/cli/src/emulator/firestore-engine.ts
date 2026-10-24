@@ -196,6 +196,7 @@ export class FirestoreEngine {
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
+      PRAGMA busy_timeout = 10000;
       CREATE TABLE IF NOT EXISTS docs (
         path TEXT PRIMARY KEY,
         coll TEXT NOT NULL,
@@ -470,6 +471,9 @@ export class FirestoreEngine {
     const changes: Change[] = [];
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      // Another process may share the file: continue from the version it left (under the write lock).
+      const stored = this.db.prepare(`SELECT v FROM meta WHERE k = 'version'`).get() as { v: string } | undefined;
+      if (stored) this.version = Math.max(this.version, Number(stored.v));
       for (const p of preconditions) {
         const cur = this.get(p.path);
         if ((cur?.version ?? 0) !== p.version) throw new IceBaseError('aborted', `Transaction lost a race on ${p.path}; retrying`, {});
@@ -494,6 +498,7 @@ export class FirestoreEngine {
         if (!d) this.stmts.del!.run(path);
         else this.stmts.put!.run(path, collIdOf(path), parentOf(path), d.id, JSON.stringify(d.data), d.createTime.s, d.createTime.n, d.updateTime.s, d.updateTime.n, d.version);
       }
+      this.db.prepare(`INSERT INTO meta (k, v) VALUES ('version', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`).run(String(this.version));
       this.db.exec('COMMIT');
     } catch (e) {
       this.db.exec('ROLLBACK');

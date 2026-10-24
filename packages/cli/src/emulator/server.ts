@@ -16,6 +16,7 @@ import { join, resolve } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { AnyConfig } from '@panth977/icebase/config';
 import { IceBaseError } from '@panth977/icebase/errors';
+import { registerEmbedded } from '@panth977/icebase/app';
 import { nodeListener } from '@panth977/icebase-server/internal';
 import { FirestoreEngine } from './firestore-engine.ts';
 
@@ -58,6 +59,8 @@ export interface EmulatorContext {
   firestore: FirestoreEngine;
   /** The functions source's exports, once loaded (custom auth's 'handler' senders live there). */
   functionExports: Record<string, unknown>;
+  /** The token that makes a caller an admin. */
+  adminToken: string;
 }
 
 export interface EmulatorOptions {
@@ -73,11 +76,26 @@ export interface EmulatorOptions {
   /** Services to leave out (all on by default). */
   without?: string[];
   log?: (line: string) => void;
+  /**
+   * false: no port — the server runs in this process only, for admin apps initialized with
+   * { emulator: { embedded: name } } (a backend that keeps its data with IceBase, say).
+   */
+  listen?: boolean;
+  /** The name an embedded server is reached by (default config.name). */
+  name?: string;
+  /**
+   * The token that makes a caller an admin (rules skipped). Default ICEBASE_ADMIN_TOKEN, else
+   * 'owner' — fine on a developer machine, never on a server others can reach.
+   */
+  adminToken?: string;
 }
 
 export interface RunningEmulator {
   url: string;
+  /** 0 for an embedded server. */
   port: number;
+  /** The server as a fetch handler. */
+  handler: (req: Request) => Promise<Response>;
   context: EmulatorContext;
   close(): Promise<void>;
 }
@@ -108,6 +126,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
   if (!memory) mkdirSync(dataDir, { recursive: true });
   const log = opts.log ?? ((l: string) => console.log(l));
   const projectId = config.firebase?.projectId ?? `demo-${config.name}`;
+  const adminToken = opts.adminToken ?? (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.ICEBASE_ADMIN_TOKEN ?? 'owner';
 
   const firestore = new FirestoreEngine({ file: memory ? ':memory:' : join(dataDir, 'firestore.sqlite'), schema: config.schema });
   const services = new Map<string, Service>();
@@ -121,8 +140,9 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
     services,
     firestore,
     functionExports: {},
-    // Until the auth service is up, only the owner token is understood.
-    verify: async (token) => ({ admin: token === 'owner', auth: null }),
+    adminToken,
+    // Until the auth service is up, only the admin token is understood.
+    verify: async (token) => ({ admin: token === adminToken, auth: null }),
   };
 
   const without = new Set(opts.without ?? []);
@@ -167,6 +187,25 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
       return r;
     }
   };
+
+  if (opts.listen === false) {
+    const name = opts.name ?? config.name;
+    ctx.origin = `http://embedded.icebase/${encodeURIComponent(name)}`;
+    registerEmbedded(name, handler);
+    for (const s of services.values()) s.started?.();
+    log(`IceBase server embedded as '${name}' · ${[...services.keys()].join(', ')} · data ${memory ? 'in memory' : dataDir}`);
+    return {
+      url: ctx.origin,
+      port: 0,
+      handler,
+      context: ctx,
+      async close() {
+        registerEmbedded(name, null);
+        for (const s of services.values()) await s.close?.();
+        firestore.close();
+      },
+    };
+  }
 
   const server: Server = createServer(nodeListener(handler));
   const wss = new WebSocketServer({ noServer: true });
@@ -219,6 +258,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
   return {
     url: ctx.origin,
     port,
+    handler,
     context: ctx,
     async close() {
       for (const c of wss.clients) c.terminate();

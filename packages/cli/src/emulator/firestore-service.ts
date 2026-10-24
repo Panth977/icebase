@@ -92,8 +92,9 @@ export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
     else validateWrite(c, decode(w.data, toRef), w.op === 'create' ? 'create' : w.merge ? 'merge' : 'set');
   };
 
-  const commit = async (caller: Caller, writes: Write[], pre: Precondition[]) => {
-    for (const w of writes) checkSchema(w);
+  const commit = async (caller: Caller, writes: Write[], pre: Precondition[], unchecked = false) => {
+    // An admin may write without the schema check (seeding legacy-shaped data); no one else.
+    if (!(unchecked && caller.admin)) for (const w of writes) checkSchema(w);
     if (!caller.admin && rules) {
       const preview = { s: 0, n: 0 };
       for (const w of writes) {
@@ -180,7 +181,7 @@ export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
           return json({ result: engine.aggregate(spec, b.aggs as Record<string, never>) });
         }
         case 'commit':
-          return json({ time: (await commit(caller, b.writes as Write[], (b.preconditions as Precondition[]) ?? [])).time });
+          return json({ time: (await commit(caller, b.writes as Write[], (b.preconditions as Precondition[]) ?? [], b.unchecked === true)).time });
         case 'listCollections':
           if (!caller.admin) throw new IceBaseError('permission-denied', 'listCollections is admin only');
           return json({ ids: engine.listCollections((b.path as string | null) ?? null) });

@@ -9,8 +9,12 @@ export interface IceBaseAppOptions {
   name?: string;
   /** Firebase web config, overriding config.firebase.webConfig / webConfigEnv. */
   firebase?: FirebaseWebConfig;
-  /** Where the IceBase emulator server listens (default config.emulator, then localhost:4400). */
-  emulator?: { host?: string; port?: number };
+  /**
+   * Where the IceBase server listens (default config.emulator, then localhost:4400) — or
+   * `{ embedded: name }` for one started in this process with startEmulator({ listen: false, name }).
+   * `adminToken`: what an admin app sends (default ICEBASE_ADMIN_TOKEN, else 'owner' for a dev server).
+   */
+  emulator?: { host?: string; port?: number; embedded?: string; adminToken?: string; /** Admin apps: writes skip the server's schema check (seeding legacy data). */ unchecked?: boolean };
 }
 
 export interface IceBaseApp<Cfg extends AnyConfig = AnyConfig> {
@@ -109,6 +113,7 @@ export function webConfigOf(app: IceBaseApp): FirebaseWebConfig {
 
 /** @internal the emulator server address for this app. */
 export function emulatorOrigin(app: IceBaseApp): string {
+  if (app.options.emulator?.embedded) return `http://embedded.icebase/${encodeURIComponent(app.options.emulator.embedded)}`;
   // Set by the IceBase server for the functions it runs, like FIREBASE_*_EMULATOR_HOST.
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.ICEBASE_EMULATOR_HOST;
   if (env && !app.options.emulator) return `http://${env.replace(/^https?:\/\//, '')}`;
@@ -118,3 +123,22 @@ export function emulatorOrigin(app: IceBaseApp): string {
 }
 
 export const SDK_VERSION = '0.1.0';
+
+// ─── embedded servers ───────────────────────────────────────────────────────────
+
+type Handler = (req: Request) => Promise<Response>;
+const embedded = new Map<string, Handler>();
+
+/** @internal the IceBase server registers itself when started with listen: false. */
+export function registerEmbedded(name: string, handler: Handler | null): void {
+  const origin = `http://embedded.icebase/${encodeURIComponent(name)}`;
+  if (handler) embedded.set(origin, handler);
+  else embedded.delete(origin);
+}
+
+/** @internal fetch, or the in-process server when the origin is an embedded one. */
+export function emulatorFetch(url: string, init: RequestInit): Promise<Response> {
+  // The server sees its own paths (/v1/fs/…), not the name in the origin.
+  for (const [origin, h] of embedded) if (url.startsWith(origin + '/')) return h(new Request(`http://embedded.icebase${url.slice(origin.length)}`, init));
+  return fetch(url, init);
+}

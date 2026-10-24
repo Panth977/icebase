@@ -23,6 +23,8 @@ const unb64 = (s: string): Uint8Array => Uint8Array.from(atob(s), (c) => c.charC
 export function encode(v: unknown): unknown {
   if (v === null || v === undefined || typeof v !== 'object') return v;
   if (v instanceof Timestamp) return { __ib: 'ts', s: v.seconds, n: v.nanoseconds, k: tsKey(v.seconds, v.nanoseconds) };
+  // A Date is stored as a timestamp, as Firestore does.
+  if (v instanceof Date && !Number.isNaN(v.getTime())) return encode(Timestamp.fromDate(v));
   if (v instanceof GeoPoint) return { __ib: 'geo', lat: v.latitude, lng: v.longitude };
   if (v instanceof FieldValue) return { __ib: 'fv', op: v.op, ...(v.operand !== undefined ? { v: encode(v.operand) } : {}) };
   if (v instanceof Uint8Array) return { __ib: 'bytes', b: b64(v) };

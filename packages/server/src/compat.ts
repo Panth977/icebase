@@ -9,7 +9,7 @@
 
 import { IceBaseError } from '@panth977/icebase/errors';
 import type { IceBaseApp } from '@panth977/icebase/app';
-import { assertIndexed, autoId, FieldValue as IbFieldValue, GeoPoint as IbGeoPoint, isPlainObject, Timestamp as IbTimestamp, type FilterNode, type FirestoreDriver, type QuerySpec, type RawDoc, type TxDriver, type WhereOp } from '@panth977/icebase/internal';
+import { assertIndexed, autoId, fullOrder, isName, FieldValue as IbFieldValue, GeoPoint as IbGeoPoint, isPlainObject, Timestamp as IbTimestamp, type FilterNode, type FirestoreDriver, type QuerySpec, type RawDoc, type TxDriver, type WhereOp } from '@panth977/icebase/internal';
 import { matchCollectionPath, validateQueryValue, validateUpdate, validateWrite, type AnyCollection } from '@panth977/icebase/schema';
 import { getAdminFirestore } from './admin.ts';
 
@@ -134,6 +134,8 @@ const toTs = (t: { seconds: number; nanoseconds: number } | undefined) => (t ? n
 
 /** firebase-admin's ignoreUndefinedProperties: undefined fields are dropped, at every depth. */
 function dropUndefined(v: unknown): unknown {
+  // A Date is stored as a Timestamp, as firebase-admin does.
+  if (v instanceof Date && !Number.isNaN(v.getTime())) return Timestamp.fromDate(v);
   if (Array.isArray(v)) return v.filter((x) => x !== undefined).map(dropUndefined);
   if (isPlainObject(v)) return Object.fromEntries(Object.entries(v).filter(([, x]) => x !== undefined).map(([k, x]) => [k, dropUndefined(x)]));
   if (v instanceof IbFieldValue && (v.op === 'arrayUnion' || v.op === 'arrayRemove')) return new IbFieldValue(v.op, (v.operand as unknown[]).map(dropUndefined));
@@ -555,9 +557,19 @@ export class Query<T = DocumentData> {
       ? snap._raw.native
         ? { values: [], inclusive, snapshot: snap._raw.native }
         : { values: this._valuesOf(snap), inclusive }
-      : { values: args.map((a) => (a instanceof DocumentReference ? { type: 'document', path: a.path } : a)), inclusive };
+      : { values: this._cursorValues(args), inclusive };
     const key = kind === 'startAt' || kind === 'startAfter' ? 'start' : 'end';
     return this._with({ [key]: pos });
+  }
+  /** @internal cursor values, aligned with the query's order: a document id for __name__ becomes its reference. */
+  _cursorValues(args: unknown[]): unknown[] {
+    const order = fullOrder(this._spec);
+    return args.map((a, i) => {
+      if (a instanceof DocumentReference) return { type: 'document', path: a.path };
+      const o = order[i];
+      if (o && isName(o.field) && typeof a === 'string') return { type: 'document', path: a.includes('/') || this._spec.path === null ? a : `${this._spec.path}/${a}` };
+      return a;
+    });
   }
   /** @internal the snapshot's values for every order (explicit, then __name__). */
   _valuesOf(snap: DocumentSnapshot<unknown>): unknown[] {
