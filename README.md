@@ -17,10 +17,13 @@ const snap = await getDocs(q);           // snap.docs[0].data() is typed from th
   names and call shapes. `@panth977/icebase-server/admin` is firebase-admin's counterpart.
 - **Schema.** Every collection, Realtime Database path and storage path is declared once.
   Writes are type-checked at compile time and validated at runtime in every mode; reads are typed.
-- **Composite indexes are declared.** A query that needs an undeclared composite index is a
-  *compile error* (`MissingCompositeIndex<"category" | "stock">`), and is refused at runtime
-  before it leaves — in every mode, including the emulator. `icebase indexes check` lists
-  every such query for CI.
+- **Every index is declared.** Single-field and composite: `index('stock')`,
+  `index('category', desc('priceCents'))`. A query whose index is not declared is a *compile
+  error* (`MissingIndex<"category" | "stock">`) and is refused at runtime before it leaves — in
+  every mode. The emulator indexes exactly what is declared; firebase mode stops indexing the
+  rest. `icebase indexes check` lists every such query for CI.
+- **Key paths, never dots.** Nested fields are key arrays (`where(['address', 'city'], …)`,
+  `updateDoc(ref, ['address', 'city'], 'Pune')`); `'rating.avg'` is one key.
 - **Firebase rules.** `firestore.rules`, `storage.rules` and `database.rules.json` in Firebase's
   own syntax: deployed unchanged to Firebase, enforced by IceBase in the emulator.
 - **Modes per service.** `firebase` (the real Firebase), `emulator` (the IceBase server on
@@ -32,12 +35,19 @@ const snap = await getDocs(q);           // snap.docs[0].data() is typed from th
 
 ## Start
 
+Three packages on JSR: [`@panth977/icebase`](https://jsr.io/@panth977/icebase) (client),
+[`@panth977/icebase-server`](https://jsr.io/@panth977/icebase-server) (admin, functions, custom-auth
+endpoint) and [`@panth977/icebase-cli`](https://jsr.io/@panth977/icebase-cli) (CLI, management
+APIs, emulator).
+
 ```sh
-npm i icebase firebase firebase-admin firebase-functions
-npx icebase init            # icebase.config.ts, schema, rules, functions, src/lib/icebase.ts
-npx icebase dev             # the emulator for every service in emulator mode, hosting, seed
-npx icebase deploy --env prod
+deno run -A jsr:@panth977/icebase-cli/cli init     # icebase.config.ts, schema, rules, functions, deno.json
+deno run -A --unstable-sloppy-imports --config deno.json jsr:@panth977/icebase-cli/cli dev
+deno run -A --unstable-sloppy-imports --config deno.json jsr:@panth977/icebase-cli/cli deploy --env prod
 ```
+
+In a Node project: `npx jsr add @panth977/icebase @panth977/icebase-server` (plus `firebase`,
+`firebase-admin`, `firebase-functions`).
 
 `icebase.config.ts` is the one config: schema, rules files, functions, hosting, auth, and per
 environment which mode each service runs in.
@@ -47,7 +57,7 @@ export default defineConfig({
   name: 'acme-shop',
   schema,
   rules: { firestore: 'icebase/rules/firestore.rules', storage: 'icebase/rules/storage.rules' },
-  functions: { source: '@panth977/icebase/functions' },
+  functions: { source: 'icebase/functions' },
   hosting: { public: 'dist', spa: true, rewrites: [{ source: '/api/**', function: 'api' }] },
   firebase: { projectId: 'acme-shop', webConfigEnv: 'FIREBASE_WEB_CONFIG' },
   environments: {

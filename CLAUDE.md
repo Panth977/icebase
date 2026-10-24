@@ -54,18 +54,33 @@ GitHub: <https://github.com/Panth977/icebase> (public). License: Apache-2.0.
 
 ## Layout
 
-- `packages/icebase/src/` — the package. One module per subpath export (`app`, `config`,
-  `schema`, `firestore`, `auth`, `database`, `storage`, `functions`, `functions/v2`, `admin`,
-  `manage`, `auth/server`). `drivers/` = one backend per service and mode (firebase web SDK,
-  firebase-admin, IceBase emulator). `internal/` = shared pieces (query planner, wire format,
-  custom-auth client/store/senders). `emulator/` = the IceBase server (SQLite engine, rules
-  engine, auth / database / storage / functions / custom-auth services, hosting). `cli/` = the
-  `icebase` command.
-- `packages/icebase/test/` — `*.test.ts` run with no emulator (unit + the IceBase emulator,
-  in-process). `*.emu.test.ts` need Firebase's emulators. `suites/` hold the shared
-  conformance suites: the same assertions run against Firebase and against IceBase.
-- `example-app/` — the PRD's example project. `tsc -p example-app` proves the compile-time
-  checks (each `@ts-expect-error` line must fail for its stated reason).
+Three packages, published to JSR (and built to `dist/` for Node):
+
+- `packages/client` — `@panth977/icebase`: app, config, schema, firestore, auth, database,
+  storage, functions (client), errors; `drivers/` (firebase web SDK and IceBase emulator per
+  service); `internal/` (query planner, wire format, custom-auth client). `./internal` is the
+  API the other two packages build on.
+- `packages/server` — `@panth977/icebase-server`: admin (firebase-admin drivers), functions
+  (firebase-functions v2 wrappers, typed triggers), auth (the custom-auth endpoint, senders,
+  templates, store).
+- `packages/cli` — `@panth977/icebase-cli`: the `icebase` command (`src/cli`), management
+  APIs (`manage.ts`), the emulator server (`src/emulator`: SQLite engine, rules engine, auth /
+  database / storage / functions / custom-auth services, hosting).
+- `packages/tests` — `*.test.ts` run with no emulator (unit + the IceBase emulator in-process);
+  `*.emu.test.ts` need Firebase's emulators; `suites/` hold the shared conformance suites (the
+  same assertions against Firebase and IceBase). `fixtures/functions-app` is a functions source.
+- `example-app/` — the PRD's example project; `tsc -p example-app` proves the compile-time
+  checks (each `@ts-expect-error` must fail for its stated reason); `scripts/smoke.ts` runs it
+  end to end under `icebase dev`.
+
+Rules the code keeps: every index a query uses is declared with `index(…)` (single-field ones
+too); fields are key paths (`['address', 'city']`) and strings are never split on dots.
+
+## Releasing
+
+Bump `version` in `packages/*/deno.json` and `package.json` (all three move together; the
+server and CLI pin the client exactly), commit, tag `vX.Y.Z` and push the tag: CI runs every
+suite and publishes the three packages to JSR (linked to this repository, OIDC, no token).
 
 ## How to verify
 
@@ -73,21 +88,23 @@ GitHub: <https://github.com/Panth977/icebase> (public). License: Apache-2.0.
 - `npm test` — unit + IceBase emulator suites (no Java).
 - `npm run test:firebase` and `npm run test:functions` — the same suites on Firebase's
   emulators (need Java 21+; `scripts/emu.sh` finds `/opt/homebrew/opt/openjdk@21`).
-- `cd example-app && node ../packages/icebase/dist/cli/index.js dev` then
-  `npx tsx scripts/smoke.ts` — end to end under `icebase dev` (build first: `npm run build`).
+- `cd example-app && node ../packages/cli/dist/cli/index.js dev` (or `deno run -A
+  --unstable-sloppy-imports ../packages/cli/src/cli/index.ts dev`) then `npx tsx scripts/smoke.ts`
+  — end to end under `icebase dev` (build first: `npm run build`).
 - Management APIs: `ICEBASE_LIVE_PROJECT=icebase-test-p977 npx tsx test/live/manage.live.ts`
-  in `packages/icebase` (uses `gcloud auth print-access-token`; the project is IceBase's own
+  in `packages/tests` (uses `gcloud auth print-access-token`; the project is IceBase's own
   test project, Spark plan: Auth "Get started" and the default Storage bucket need the console
   or Blaze).
 
 ## How to work here
 
-- Node 22+, TypeScript strict, ESM. Runtime dependencies stay minimal: the Firebase SDKs
-  (peers), `ws` (emulator socket), `tsx` + `esbuild` (CLI: load TS config, bundle functions).
-  SQLite is `node:sqlite`.
+- Node 22+ or Deno 2, TypeScript strict, ESM, `.ts` import extensions (tsc rewrites them for
+  `dist`). Runtime dependencies stay minimal: the Firebase SDKs (peers), `ws` (emulator socket),
+  `tsx` + `esbuild` (CLI on Node: load TS config, bundle functions). SQLite is `node:sqlite`.
+- JSR rules: explicit return types on exported functions (`deno publish --dry-run` checks).
 - Every change ships with tests, in the shared suites when the behaviour exists in Firebase too.
 - Firebase test project: `icebase-test-p977` (created 2026-10-24 for IceBase e2e). Never
   touch any other Firebase / GCP project (TaskManager, VardayiniDairy, Octupuz). Anything that
   needs billing (Blaze) or a credit card is Panth's to do; ask.
 - Secrets are env-var names in config, values in `.env` (gitignored). Never commit a key.
-- Do not publish to npm, push or open PRs unless the ticket asks for it in so many words.
+- Push to `main` and JSR releases are approved (Panth, ORCH-26, 2026-10-24). npm publishing is not.

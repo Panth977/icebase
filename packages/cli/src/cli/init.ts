@@ -214,7 +214,7 @@ export default defineConfig({
   name: ${JSON.stringify(opts.name)},
   schema,
   rules: ${JSON.stringify(rules, null, 2).replace(/\n/g, '\n  ')},
-  functions: { source: '@panth977/icebase/functions', runtime: 'nodejs22', region: 'us-central1' },
+  functions: { source: 'icebase/functions', runtime: 'nodejs22', region: 'us-central1' },
   hosting: { public: 'dist', spa: true },
   auth: { providers: ['password'] },
 
@@ -233,6 +233,8 @@ export default defineConfig({
   write(root, 'icebase/functions/package.json', JSON.stringify({ name: `${opts.name}-functions`, private: true, type: 'module', main: 'src/index.ts', dependencies: {} }, null, 2) + '\n', log);
   write(root, 'icebase/functions/src/index.ts', `// Every export is a deployed function — the same file runs on Cloud Functions (firebase mode) and the IceBase server (emulator).\nimport { onRequest } from '@panth977/icebase-server/functions';\n\nexport const health = onRequest(() => new Response('ok'));\n`, log);
   write(root, 'src/lib/icebase.ts', `// The only setup file in the frontend. Switch environments with one string; app code never changes.\nimport { initializeApp } from '@panth977/icebase/app';\nimport { getFirestore } from '@panth977/icebase/firestore';\nimport { getAuth } from '@panth977/icebase/auth';\nimport config from '../../icebase.config';\n\nexport const app = initializeApp(config, import.meta.env?.PROD ? 'prod' : 'local');\nexport const db = getFirestore(app);\nexport const auth = getAuth(app);\n`, log);
+  // Deno resolves @panth977/* through this import map (Node through package.json).
+  write(root, 'deno.json', JSON.stringify({ imports: { '@panth977/icebase': 'jsr:@panth977/icebase@^0.1', '@panth977/icebase/': 'jsr:/@panth977/icebase@^0.1/', '@panth977/icebase-server/': 'jsr:/@panth977/icebase-server@^0.1/', '@panth977/icebase-cli/': 'jsr:/@panth977/icebase-cli@^0.1/' }, nodeModulesDir: 'auto' }, null, 2) + '\n', log);
   write(root, '.env.example', `# mode: firebase\nFIREBASE_WEB_CONFIG={"apiKey":"…","authDomain":"${pid}.firebaseapp.com","projectId":"${pid}","appId":"…"}\nFIREBASE_SERVICE_ACCOUNT=./secrets/firebase-admin.json\n`, log);
   const gi = resolve(root, '.gitignore');
   const want = ['.icebase/', 'icebase/.generated/', '.env', '.env.*', '!.env.example'];

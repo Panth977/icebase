@@ -79,7 +79,7 @@ export async function dev(initial: AnyConfig, root: string, log: Log, opts: { en
   if (!opts.once) {
     const cfgFile = findConfig(root);
     if (cfgFile) on(cfgFile, () => void restart('icebase.config.ts changed'));
-    on(resolve(root, '@panth977/icebase/schema'), () => void restart('schema changed'));
+    on(resolve(root, 'icebase/schema'), () => void restart('schema changed'));
     for (const f of [config.rules?.firestore, config.rules?.storage, config.rules?.database].filter(Boolean) as string[]) on(resolve(root, f), () => void restart(`${f} changed`));
     if (config.functions?.source) on(resolve(root, config.functions.source), () => void admin('/__/icebase/functions/reload').then(() => log('functions reloaded')));
   }

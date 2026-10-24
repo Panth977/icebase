@@ -15,11 +15,12 @@ The `icebase` command, the management APIs and the IceBase emulator server, for
 Run it with Deno (no install):
 
 ```sh
-deno run -A --unstable-sloppy-imports jsr:@panth977/icebase-cli/cli init
-deno run -A --unstable-sloppy-imports jsr:@panth977/icebase-cli/cli dev
+deno run -A jsr:@panth977/icebase-cli/cli init        # writes deno.json with the import map
+deno run -A --unstable-sloppy-imports --config deno.json jsr:@panth977/icebase-cli/cli dev
 ```
 
-(`--unstable-sloppy-imports` lets your `icebase.config.ts` import `./icebase/schema` without an extension.)
+(`--config deno.json` gives your project's import map to the CLI; `--unstable-sloppy-imports` lets
+`icebase.config.ts` import `./icebase/schema` without an extension.)
 With Node 22+, from a clone of the repository: `npm install && npm run build`, then `node packages/cli/dist/cli/index.js <command>`.
 
 **Management APIs** (`@panth977/icebase-cli/manage`): set a project up from code —
