@@ -51,9 +51,9 @@ describe('collection()', () => {
     expect(() => collection('p', { fields: { a: f.string() }, indexes: [['a']] as never })).toThrow(/index\(…\) declarations/);
     expect(() => collection('p', { fields: { a: f.string() }, indexes: [], ttl: 'a' })).toThrow(/timestamp field/);
   });
-  it('refuses two collections with the same id', () => {
+  it('allows collections that share an id', () => {
     const a = collection('orders', { fields: {}, indexes: [] });
-    expect(() => defineSchema({ a, orders })).toThrow(/used by both/);
+    expect(() => defineSchema({ a, orders })).not.toThrow();
   });
 });
 

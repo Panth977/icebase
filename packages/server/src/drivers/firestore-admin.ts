@@ -18,7 +18,8 @@ export function wrapAdminError(e: unknown): Error {
   if (e instanceof IceBaseError) return e;
   const err = e as { code?: unknown; message?: string; details?: string };
   if (err && typeof err.code === 'number' && GRPC[err.code]) return new IceBaseError(GRPC[err.code]!, err.details || err.message || String(e), { cause: e });
-  if (err && typeof err.code === 'string') return new IceBaseError(err.code.replace(/^(firestore|app)\//, '') as IceBaseError['code'], err.message ?? String(e), { cause: e });
+  // Firebase's own string codes only: any other error (thrown by a transaction's function, say) is the caller's.
+  if (err && typeof err.code === 'string' && /^(firestore|app)\//.test(err.code)) return new IceBaseError(err.code.replace(/^(firestore|app)\//, '') as IceBaseError['code'], err.message ?? String(e), { cause: e });
   return e instanceof Error ? e : new Error(String(e));
 }
 
@@ -134,6 +135,7 @@ export function createAdminDriver(db: Firestore, h: DriverHelpers): FirestoreDri
             const tx: TxDriver = {
               get: async (path) => raw(await t.get(ndb.doc(path))),
               set: (path, d, merge) => void (merge ? t.set(ndb.doc(path), data(d), { merge: true }) : t.set(ndb.doc(path), data(d))),
+              create: (path, d) => void t.create(ndb.doc(path), data(d)),
               update: (path, f) => void t.update(ndb.doc(path), ...pairs(f)),
               delete: (path) => void t.delete(ndb.doc(path)),
             };
@@ -146,6 +148,7 @@ export function createAdminDriver(db: Firestore, h: DriverHelpers): FirestoreDri
       const b = ndb.batch();
       return {
         set: (path, d, merge) => void (merge ? b.set(ndb.doc(path), data(d), { merge: true }) : b.set(ndb.doc(path), data(d))),
+        create: (path, d) => void b.create(ndb.doc(path), data(d)),
         update: (path, f) => void b.update(ndb.doc(path), ...pairs(f)),
         delete: (path) => void b.delete(ndb.doc(path)),
         commit: () => guard(b.commit().then(() => undefined)),

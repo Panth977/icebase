@@ -33,6 +33,10 @@
       "types": "./src/schema.ts",
       "default": "./dist/schema.js"
     },
+    "./zod": {
+      "types": "./src/zod.ts",
+      "default": "./dist/zod.js"
+    },
     "./firestore": {
       "types": "./src/firestore.ts",
       "default": "./dist/firestore.js"

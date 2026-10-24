@@ -11,14 +11,17 @@ import 'wire.dart';
 /// One field's type.
 sealed class FieldDef {
   final bool optional;
-  const FieldDef({this.optional = false});
+
+  /// null is a legal value.
+  final bool nullable;
+  const FieldDef({this.optional = false, this.nullable = false});
   String get expected;
 }
 
 class StringField extends FieldDef {
   final int? min;
   final int? max;
-  const StringField({this.min, this.max, super.optional});
+  const StringField({this.min, this.max, super.optional, super.nullable});
   @override
   String get expected => 'string${min != null || max != null ? ' (length ${min ?? 0}..${max ?? '∞'})' : ''}';
 }
@@ -27,26 +30,26 @@ class NumberField extends FieldDef {
   final bool integer;
   final num? min;
   final num? max;
-  const NumberField({this.integer = false, this.min, this.max, super.optional});
+  const NumberField({this.integer = false, this.min, this.max, super.optional, super.nullable});
   @override
   String get expected => '${integer ? 'integer' : 'number'}${min != null || max != null ? ' (${min ?? '-∞'}..${max ?? '∞'})' : ''}';
 }
 
 class BooleanField extends FieldDef {
-  const BooleanField({super.optional});
+  const BooleanField({super.optional, super.nullable});
   @override
   String get expected => 'boolean';
 }
 
 class TimestampField extends FieldDef {
-  const TimestampField({super.optional});
+  const TimestampField({super.optional, super.nullable});
   @override
   String get expected => 'timestamp';
 }
 
 class EnumField extends FieldDef {
   final List<String> values;
-  const EnumField(this.values, {super.optional});
+  const EnumField(this.values, {super.optional, super.nullable});
   @override
   String get expected => values.map((v) => '"$v"').join(' | ');
 }
@@ -54,14 +57,14 @@ class EnumField extends FieldDef {
 class ArrayField extends FieldDef {
   final FieldDef of;
   final int? max;
-  const ArrayField(this.of, {this.max, super.optional});
+  const ArrayField(this.of, {this.max, super.optional, super.nullable});
   @override
   String get expected => 'array of ${of.expected}${max != null ? ' (max $max)' : ''}';
 }
 
 class MapField extends FieldDef {
   final Map<String, FieldDef> fields;
-  const MapField(this.fields, {super.optional});
+  const MapField(this.fields, {super.optional, super.nullable});
   @override
   String get expected => 'map';
 }
@@ -69,19 +72,50 @@ class MapField extends FieldDef {
 class RefField extends FieldDef {
   /// The target collection's path template ('users/{uid}/orders').
   final String to;
-  const RefField(this.to, {super.optional});
+  const RefField(this.to, {super.optional, super.nullable});
   @override
   String get expected => 'reference to $to';
 }
 
 class GeoPointField extends FieldDef {
-  const GeoPointField({super.optional});
+  const GeoPointField({super.optional, super.nullable});
   @override
   String get expected => 'geopoint';
 }
 
+/// A map keyed by data (ids → values).
+class RecordField extends FieldDef {
+  final FieldDef of;
+  const RecordField(this.of, {super.optional, super.nullable});
+  @override
+  String get expected => 'map of ${of.expected}';
+}
+
+/// One of several types.
+class UnionField extends FieldDef {
+  final List<FieldDef> of;
+  const UnionField(this.of, {super.optional, super.nullable});
+  @override
+  String get expected => of.map((u) => u.expected).join(' | ');
+}
+
+/// Exactly this value.
+class LiteralField extends FieldDef {
+  final Object? value;
+  const LiteralField(this.value, {super.optional, super.nullable});
+  @override
+  String get expected => value is String ? '"$value"' : '$value';
+}
+
+/// Any storable value, unchecked.
+class AnyField extends FieldDef {
+  const AnyField({super.optional, super.nullable});
+  @override
+  String get expected => 'any';
+}
+
 class BytesField extends FieldDef {
-  const BytesField({super.optional});
+  const BytesField({super.optional, super.nullable});
   @override
   String get expected => 'bytes';
 }
@@ -179,18 +213,24 @@ class Schema {
 
 /// The definition of the field at a key path (through maps), or null.
 FieldDef? fieldAt(Map<String, FieldDef> fields, List<String> path) {
-  var cur = fields;
-  FieldDef? def;
-  for (var i = 0; i < path.length; i++) {
-    def = cur[path[i]];
+  FieldDef? def = MapField(fields);
+  for (final key in path) {
+    def = _child(def!, key);
     if (def == null) return null;
-    if (i < path.length - 1) {
-      if (def is! MapField) return null;
-      cur = def.fields;
-    }
   }
   return def;
 }
+
+FieldDef? _child(FieldDef parent, String key) => switch (parent) {
+      MapField() => parent.fields[key],
+      RecordField() => parent.of,
+      AnyField() => const AnyField(optional: true),
+      UnionField() => () {
+          final kids = [for (final u in parent.of) _child(u, key)].whereType<FieldDef>().toList();
+          return kids.isEmpty ? null : (kids.length == 1 ? kids.first : UnionField(kids, optional: true));
+        }(),
+      _ => null,
+    };
 
 String showPath(List<String> p) => p.length == 1 ? "'${p[0]}'" : '[${p.map((s) => "'$s'").join(', ')}]';
 
@@ -232,10 +272,20 @@ bool _refMatches(String template, String path) {
 }
 
 void _check(FieldDef def, Object? v0, String path, _Ctx ctx, bool partial) {
+  if (v0 == null && (def.nullable || def is AnyField)) return;
   final v = v0 is FieldValue ? v0 : storedValue(v0);
   void bad([String? expected]) => ctx.issues.add(Issue(path, expected ?? def.expected, _describe(v)));
   if (v is FieldValue) {
     if (!ctx.write) return bad();
+    if (def is AnyField && v.op != 'delete') return;
+    if (def is UnionField && v.op != 'delete') {
+      for (final alt in def.of) {
+        final sub = _Ctx(write: ctx.write, bounds: ctx.bounds, kind: ctx.kind);
+        _check(alt, v, path, sub, partial);
+        if (sub.issues.isEmpty) return;
+      }
+      return bad();
+    }
     switch (v.op) {
       case 'serverTimestamp':
         if (def is! TimestampField) bad('${def.expected} (serverTimestamp() only fits timestamp fields)');
@@ -291,6 +341,22 @@ void _check(FieldDef def, Object? v0, String path, _Ctx ctx, bool partial) {
     case MapField():
       if (v is! Map) return bad();
       _checkFields(def.fields, v.cast<String, Object?>(), path, ctx, partial);
+    case RecordField():
+      if (v is! Map) return bad();
+      for (final e in v.entries) {
+        _check(def.of, e.value, '$path.${e.key}', ctx, false);
+      }
+    case UnionField():
+      for (final alt in def.of) {
+        final sub = _Ctx(write: ctx.write, bounds: ctx.bounds, kind: ctx.kind);
+        _check(alt, v, path, sub, partial);
+        if (sub.issues.isEmpty) return;
+      }
+      bad();
+    case LiteralField():
+      if (v != def.value) bad();
+    case AnyField():
+      return;
   }
 }
 
@@ -312,14 +378,14 @@ void _checkFields(Map<String, FieldDef> fields, Map<String, Object?> data, Strin
       continue;
     }
     if (v == null) {
-      if (!def.optional) ctx.issues.add(Issue(path, def.expected, 'null'));
+      if (!def.optional && !def.nullable && def is! AnyField) ctx.issues.add(Issue(path, def.expected, 'null'));
       continue;
     }
     _check(def, v, path, ctx, partial);
   }
   if (!partial) {
     for (final e in fields.entries) {
-      if (!e.value.optional && data[e.key] == null) ctx.issues.add(Issue(prefix.isEmpty ? e.key : '$prefix.${e.key}', e.value.expected, 'missing'));
+      if (!e.value.optional && !(e.value.nullable && data.containsKey(e.key)) && data[e.key] == null) ctx.issues.add(Issue(prefix.isEmpty ? e.key : '$prefix.${e.key}', e.value.expected, 'missing'));
     }
   }
 }

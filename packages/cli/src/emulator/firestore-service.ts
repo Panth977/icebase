@@ -66,7 +66,7 @@ export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
     let path: string;
     if (spec.path !== null) path = `${spec.path}/${ANY}`;
     else {
-      const c = Object.values(ctx.config.schema.collections).find((x) => x.id === spec.collectionId);
+      const c = Object.values(ctx.config.schema.collections).find((x) => x.id === spec.collectionId && x.group) ?? Object.values(ctx.config.schema.collections).find((x) => x.id === spec.collectionId);
       path = `${(c?.path ?? spec.collectionId).replace(/\{[^}]+\}/g, ANY)}/${ANY}`;
     }
     const conjs = dnf(spec.filters);

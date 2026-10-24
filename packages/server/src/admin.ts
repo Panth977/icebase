@@ -24,6 +24,8 @@ registerFirestoreDriver('admin:firebase', createAdminDriver);
 export interface AdminAppOptions extends IceBaseAppOptions {
   /** Overrides config.firebase.serviceAccountEnv. */
   credential?: Credential;
+  /** firebase mode: use this firebase-admin app (its project, credential and settings) instead of making one. */
+  firebaseAdminApp?: import('firebase-admin/app').App;
 }
 
 /** initializeAdminApp(config, 'prod') — server side; picks the mode per service like initializeApp. */

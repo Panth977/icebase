@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 // The emulator's document engine: Firestore semantics on SQLite (node:sqlite).
 //
 // One table holds every document (path, collection id, parent, data as tagged JSON). Every
@@ -11,7 +12,7 @@ import { dnf, fullOrder, isName, planQuery, type FilterNode, type OrderSpec, typ
 
 export { fullOrder } from '@panth977/icebase/internal';
 import { tsKey, type Tagged } from '@panth977/icebase/internal';
-import { fieldAt, showPath, type AnyCollection, type Schema } from '@panth977/icebase/schema';
+import { fieldAt, matchCollectionPath, showPath, type AnyCollection, type Schema } from '@panth977/icebase/schema';
 
 export type Json = null | boolean | number | string | Json[] | { [k: string]: Json };
 
@@ -182,7 +183,7 @@ export interface EngineOptions {
 
 export class FirestoreEngine {
   readonly db: DatabaseSync;
-  private readonly byId = new Map<string, AnyCollection>();
+  private readonly colls: AnyCollection[] = [];
   private readonly listeners = new Set<(changes: Change[]) => void>();
   private readonly stmts: Record<string, StatementSync>;
   /** The SQLite indexes built from the declared ones (IDX-5), for the console. */
@@ -209,7 +210,7 @@ export class FirestoreEngine {
       CREATE INDEX IF NOT EXISTS docs_coll ON docs (coll, path);
       CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
     `);
-    for (const c of Object.values(opts.schema.collections)) this.byId.set(c.id, c);
+    this.colls.push(...Object.values(opts.schema.collections));
     this.version = Number((this.db.prepare(`SELECT MAX(version) v FROM docs`).get() as { v: number | null }).v ?? 0);
     this.stmts = {
       get: this.db.prepare(`SELECT * FROM docs WHERE path = ?`),
@@ -218,7 +219,18 @@ export class FirestoreEngine {
       del: this.db.prepare(`DELETE FROM docs WHERE path = ?`),
       count: this.db.prepare(`SELECT COUNT(*) n FROM docs`),
     };
-    for (const c of this.byId.values()) this.ensureIndexes(c);
+    const wanted = new Set<string>();
+    for (const c of this.colls) this.ensureIndexes(c, wanted);
+    // Indexes from an earlier schema (an index removed or changed) go.
+    for (const r of this.db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'ix\\_%' ESCAPE '\\'`).all() as { name: string }[]) {
+      if (!wanted.has(r.name)) this.db.exec(`DROP INDEX IF EXISTS "${r.name}"`);
+    }
+  }
+
+  /** The declared collection a query reads: by its path, else (a collection-group query) by id. */
+  private collectionFor(spec: QuerySpec): AnyCollection | undefined {
+    if (spec.path !== null) return matchCollectionPath({ collections: Object.fromEntries(this.colls.map((c, i) => [i, c])), paths: {}, files: {} }, spec.path)?.collection;
+    return this.colls.find((c) => c.id === spec.collectionId && c.group) ?? this.colls.find((c) => c.id === spec.collectionId);
   }
 
   close(): void {
@@ -245,7 +257,7 @@ export class FirestoreEngine {
   private expr(coll: AnyCollection | undefined, path: readonly string[]): string | null {
     if (isName(path)) return 'path';
     if (!coll) return null;
-    const def = fieldAt(coll.fields, path);
+    const def = fieldAt(coll.fields, path, coll.rest);
     if (!def) return null;
     const p = this.jpath(path);
     switch (def.def.kind) {
@@ -253,6 +265,7 @@ export class FirestoreEngine {
       case 'number':
       case 'boolean':
       case 'enum':
+      case 'literal':
         return `json_extract(data, ${p})`;
       case 'timestamp':
         return `json_extract(data, ${p.slice(0, -1)}.k')`;
@@ -275,17 +288,25 @@ export class FirestoreEngine {
   }
 
   /** IDX-5: one SQLite index per declared index — single-field and composite — and no others. */
-  private ensureIndexes(c: AnyCollection): void {
-    c.indexes.forEach((ix, n) => {
+  private ensureIndexes(c: AnyCollection, wanted: Set<string>): void {
+    // A {rest=**} collection spans many collection ids: answered by scanning.
+    if (c.glob) return;
+    c.indexes.forEach((ix) => {
       const cols = ix.fields.filter((f) => f.mode !== 'contains').map((f) => {
         const e = this.expr(c, f.path);
         return e ? `${e} ${f.mode === 'desc' ? 'DESC' : 'ASC'}` : null;
       });
       // An index on an array (array-contains) or a map has no SQL column; it is answered by scanning the collection.
       if (cols.some((x) => x === null) || cols.length === 0) return;
-      const name = `ix_${c.id}_${n}`.replace(/[^A-Za-z0-9_]/g, '_');
-      this.db.exec(`CREATE INDEX IF NOT EXISTS "${name}" ON docs (parent, ${cols.join(', ')}, path) WHERE coll = '${c.id.replace(/'/g, "''")}'`);
-      if (c.group) this.db.exec(`CREATE INDEX IF NOT EXISTS "${name}_g" ON docs (${cols.join(', ')}, path) WHERE coll = '${c.id.replace(/'/g, "''")}'`);
+      const coll = c.id.replace(/'/g, "''");
+      const make = (cols2: string) => {
+        // Named after its definition, so a changed index is a new one (and the old one is dropped).
+        const name = `ix_${createHash('sha1').update(`${coll}|${cols2}`).digest('hex').slice(0, 16)}`;
+        wanted.add(name);
+        this.db.exec(`CREATE INDEX IF NOT EXISTS "${name}" ON docs (${cols2}, path) WHERE coll = '${coll}'`);
+      };
+      make(`parent, ${cols.join(', ')}`);
+      if (c.group) make(cols.join(', '));
       this.sqlIndexes.push(`${c.path}: ${ix.fields.map((f) => `${showPath(f.path)} ${f.mode}`).join(', ')}`);
     });
   }
@@ -314,11 +335,11 @@ export class FirestoreEngine {
 
   /** Run a query. `cursorStart`/`cursorEnd` values are aligned with fullOrder(spec). */
   query(spec: QuerySpec): StoredDoc[] {
-    const coll = this.byId.get(spec.collectionId);
-    if (coll) {
-      // The SDK checks before sending; the server checks again so no client can skip it.
-      const plan = planQuery(coll, spec);
-      if (!plan.ok) throw new IceBaseError('failed-precondition', `The query requires an index on ${plan.missing.fields.map(showPath).join(' + ')}: add ${plan.missing.suggestion} to collection('${coll.path}')`, { reason: 'missing-index', index: plan.missing.suggestion });
+    const coll = this.collectionFor(spec);
+    // The SDK checks before sending; the server checks again so no client can skip it.
+    for (const c of spec.path === null ? this.colls.filter((x) => x.id === spec.collectionId && x.group) : coll ? [coll] : []) {
+      const plan = planQuery(c, spec);
+      if (!plan.ok) throw new IceBaseError('failed-precondition', `The query requires an index on ${plan.missing.fields.map(showPath).join(' + ')}: add ${plan.missing.suggestion} to collection('${c.path}')`, { reason: 'missing-index', index: plan.missing.suggestion });
     }
     const order = fullOrder(spec);
     const where: string[] = [];
@@ -377,7 +398,7 @@ export class FirestoreEngine {
   }
 
   private filterSql(coll: AnyCollection | undefined, f: { field: string[]; op: WhereOp; value: unknown }, params: unknown[]): string | null {
-    const def = coll && !isName(f.field) ? fieldAt(coll.fields, f.field) : undefined;
+    const def = coll && !isName(f.field) ? fieldAt(coll.fields, f.field, coll.rest) : undefined;
     const jp = this.jpath(f.field);
     if (f.op === 'array-contains' || f.op === 'array-contains-any') {
       if (!def || def.def.kind !== 'array') return null;

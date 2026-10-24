@@ -50,6 +50,13 @@ function dartType(ctx: Ctx, def: FieldDef, name: string): string {
     case 'map':
       modelClass(ctx, name, def.fields);
       return name;
+    case 'record':
+      return `Map<String, ${dartType(ctx, def.of.def, `${name}Value`)}${def.of.nullable ? '?' : ''}>`;
+    case 'literal':
+      return typeof def.value === 'string' ? 'String' : typeof def.value === 'number' ? 'num' : typeof def.value === 'boolean' ? 'bool' : 'Object?';
+    case 'union':
+    case 'any':
+      return 'Object?';
   }
 }
 
@@ -73,6 +80,13 @@ function fromExpr(ctx: Ctx, def: FieldDef, name: string, v: string): string {
       return `[for (final x in ${v} as List) ${fromExpr(ctx, def.of.def, `${name}Item`, 'x')}]`;
     case 'map':
       return `${dartType(ctx, def, name)}.fromMap((${v} as Map).cast<String, Object?>())`;
+    case 'record':
+      return `{for (final e in (${v} as Map).entries) e.key as String: ${def.of.nullable ? 'e.value == null ? null : ' : ''}${fromExpr(ctx, def.of.def, `${name}Value`, 'e.value')}}`;
+    case 'literal':
+      return `${v} as ${dartType(ctx, def, name)}`;
+    case 'union':
+    case 'any':
+      return v;
   }
 }
 
@@ -86,6 +100,10 @@ function toExpr(def: FieldDef, v: string): string {
       const inner = toExpr(def.of.def, 'x');
       return inner === 'x' ? v : `[for (final x in ${v}) ${inner}]`;
     }
+    case 'record': {
+      const inner = toExpr(def.of.def, 'e.value');
+      return inner === 'e.value' ? v : `{for (final e in ${v}.entries) e.key: ${def.of.nullable ? 'e.value == null ? null : ' : ''}${def.of.nullable ? toExpr(def.of.def, 'e.value!') : inner}}`;
+    }
     default:
       return v;
   }
@@ -95,9 +113,9 @@ function toExpr(def: FieldDef, v: string): string {
 function modelClass(ctx: Ctx, cls: string, fields: FieldMap): void {
   if (ctx.made.has(cls)) return;
   ctx.made.add(cls);
-  const entries = Object.entries(fields).map(([key, f]) => ({ key, prop: camel(key), def: f.def, optional: f.optional, type: dartType(ctx, f.def, `${cls}${pascal(key)}`) }));
+  const entries = Object.entries(fields).map(([key, f]) => ({ key, prop: camel(key), def: f.def, optional: f.optional || !!f.nullable, type: dartType(ctx, f.def, `${cls}${pascal(key)}`) }));
   const lines = [`class ${cls} implements IceModel {`];
-  for (const e of entries) lines.push(`  final ${e.type}${e.optional ? '?' : ''} ${e.prop};`);
+  for (const e of entries) lines.push(`  final ${e.type}${e.optional && !e.type.endsWith('?') ? '?' : ''} ${e.prop};`);
   lines.push('', `  const ${cls}({${entries.map((e) => `${e.optional ? '' : 'required '}this.${e.prop}`).join(', ')}});`, '');
   lines.push(`  factory ${cls}.fromMap(Map<String, Object?> m) => ${cls}(`);
   for (const e of entries) lines.push(`        ${e.prop}: ${e.optional ? `m[${str(e.key)}] == null ? null : ` : ''}${fromExpr(ctx, e.def, `${cls}${pascal(e.key)}`, `m[${str(e.key)}]`)},`);
@@ -108,8 +126,8 @@ function modelClass(ctx: Ctx, cls: string, fields: FieldMap): void {
   ctx.out.push(lines.join('\n'));
 }
 
-function fieldDefExpr(def: FieldDef, optional: boolean): string {
-  const o = optional ? 'optional: true' : '';
+function fieldDefExpr(def: FieldDef, optional: boolean, nullable = false): string {
+  const o = [optional ? 'optional: true' : '', nullable ? 'nullable: true' : ''].filter(Boolean).join(', ');
   const args = (...a: string[]) => a.filter(Boolean).join(', ');
   switch (def.kind) {
     case 'string':
@@ -127,9 +145,17 @@ function fieldDefExpr(def: FieldDef, optional: boolean): string {
     case 'ref':
       return `RefField(${str(def.to.path)}${o ? `, ${o}` : ''})`;
     case 'array':
-      return `ArrayField(${fieldDefExpr(def.of.def, false)}${def.max !== undefined ? `, max: ${def.max}` : ''}${o ? `, ${o}` : ''})`;
+      return `ArrayField(${fieldDefExpr(def.of.def, false, !!def.of.nullable)}${def.max !== undefined ? `, max: ${def.max}` : ''}${o ? `, ${o}` : ''})`;
     case 'map':
-      return `MapField({${Object.entries(def.fields).map(([k, f]) => `${str(k)}: ${fieldDefExpr(f.def, f.optional)}`).join(', ')}}${o ? `, ${o}` : ''})`;
+      return `MapField({${Object.entries(def.fields).map(([k, f]) => `${str(k)}: ${fieldDefExpr(f.def, f.optional, !!f.nullable)}`).join(', ')}}${o ? `, ${o}` : ''})`;
+    case 'record':
+      return `RecordField(${fieldDefExpr(def.of.def, false, !!def.of.nullable)}${o ? `, ${o}` : ''})`;
+    case 'union':
+      return `UnionField([${def.of.map((u) => fieldDefExpr(u.def, false, !!u.nullable)).join(', ')}]${o ? `, ${o}` : ''})`;
+    case 'literal':
+      return `LiteralField(${def.value === null ? 'null' : typeof def.value === 'string' ? str(def.value) : String(def.value)}${o ? `, ${o}` : ''})`;
+    case 'any':
+      return `AnyField(${o})`;
   }
 }
 
@@ -159,7 +185,7 @@ export function genDart(config: AnyConfig, opts: { package?: string } = {}): str
       `abstract final class ${holder} {`,
       `  static const def = CollectionDef(`,
       `    ${str(c.path)},`,
-      `    fields: {${Object.entries(c.fields).map(([k, f]) => `${str(k)}: ${fieldDefExpr(f.def, f.optional)}`).join(', ')}},`,
+      `    fields: {${Object.entries(c.fields).map(([k, f]) => `${str(k)}: ${fieldDefExpr(f.def, f.optional, !!f.nullable)}`).join(', ')}},`,
       `    indexes: [${idx.join(', ')}],`,
       ...(c.group ? ['    group: true,'] : []),
       '  );',

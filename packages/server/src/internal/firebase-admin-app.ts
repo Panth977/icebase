@@ -64,6 +64,8 @@ export function adminCredential(app: IceBaseApp): Credential {
 
 export function nativeAdminApp(app: IceBaseApp): App {
   return service(app, 'firebase:admin', () => {
+    const given = (app.options as { firebaseAdminApp?: App }).firebaseAdminApp;
+    if (given) return given;
     const fb = app.config.firebase;
     if (!fb?.projectId) throw configError('firebase mode needs `firebase.projectId` in icebase.config');
     const native = initializeApp(

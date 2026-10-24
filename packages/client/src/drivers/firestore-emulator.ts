@@ -131,6 +131,7 @@ export function createEmulatorDriver(db: Firestore, h: DriverHelpers): Firestore
             return raw(d);
           },
           set: (path, d, merge) => void writes.push(writeOf('set', path, d, merge)),
+          create: (path, d) => void writes.push(writeOf('create', path, d)),
           update: (path, f) => void writes.push(updateOf(path, f)),
           delete: (path) => void writes.push(writeOf('delete', path)),
         };
@@ -148,6 +149,7 @@ export function createEmulatorDriver(db: Firestore, h: DriverHelpers): Firestore
       const writes: unknown[] = [];
       return {
         set: (path, d, merge) => void writes.push(writeOf('set', path, d, merge)),
+        create: (path, d) => void writes.push(writeOf('create', path, d)),
         update: (path, f) => void writes.push(updateOf(path, f)),
         delete: (path) => void writes.push(writeOf('delete', path)),
         commit: () => commit(writes),

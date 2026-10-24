@@ -71,8 +71,21 @@ export function collectionOverrides(c: AnyCollection): FieldOverrideJson[] {
 }
 
 export function firestoreIndexesJson(schema: Schema<Record<string, AnyCollection>, any, any>): IndexesFile {
-  const cs = Object.values(schema.collections);
-  return { indexes: cs.flatMap(collectionIndexes), fieldOverrides: cs.flatMap(collectionOverrides) };
+  // {rest=**} collections have no single collection id: Firestore's automatic single-field
+  // indexes serve them (autoIndex), and they declare no composites.
+  const cs = Object.values(schema.collections).filter((c) => !c.glob);
+  // Collections sharing an id share Firestore's indexes and overrides: an index any of them
+  // declares is kept, a field any of them indexes is not exempted, and nothing is listed twice.
+  const touched = new Map<string, Set<string>>();
+  for (const c of cs) for (const ix of c.indexes) for (const f of ix.fields) (touched.get(c.id) ?? touched.set(c.id, new Set()).get(c.id)!).add(firebaseFieldPath([f.path[0]!]));
+  const uniq = <T>(xs: T[], key: (x: T) => string) => [...new Map(xs.map((x) => [key(x), x])).values()];
+  const overrides = cs
+    .flatMap(collectionOverrides)
+    .filter((o) => o.indexes.length > 0 || o.ttl || !touched.get(o.collectionGroup)?.has(o.fieldPath));
+  return {
+    indexes: uniq(cs.flatMap(collectionIndexes), indexKey),
+    fieldOverrides: uniq(overrides, (o) => `${o.collectionGroup}|${o.fieldPath}|${JSON.stringify(o.indexes)}|${o.ttl ?? ''}`),
+  };
 }
 
 /** A stable key for comparing a desired index with one listed by the Admin API. */

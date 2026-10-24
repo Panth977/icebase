@@ -86,19 +86,23 @@ function needFor(conj: FieldFilter[], orders: OrderSpec[]): Need | null {
 }
 
 const single = (ix: ParsedIndex) => ix.fields.length === 1;
-const declaresSingle = (c: AnyCollection, p: string[]) => c.indexes.some((ix) => single(ix) && pathKey(ix.fields[0]!.path) === pathKey(p));
+/** A declared index path matches a field path; '*' in a declared path is any one key (a record's). */
+const samePath = (declared: readonly string[], p: readonly string[]) => declared.length === p.length && declared.every((k, i) => k === '*' || k === p[i]);
+const autoSingle = (c: AnyCollection, p: string[]): ParsedIndex => ({ kind: 'index', fields: [{ path: p, mode: 'asc' }] }) as unknown as ParsedIndex;
+const findSingle = (c: AnyCollection, p: string[]) => c.indexes.find((ix) => single(ix) && samePath(ix.fields[0]!.path, p)) ?? (c.autoIndex ? autoSingle(c, p) : undefined);
+const declaresSingle = (c: AnyCollection, p: string[]) => !!findSingle(c, p);
 
 /** A composite that serves the conjunction: the same fields, the ordered ones as its tail in order (or all reversed). */
 function serves(ix: ParsedIndex, n: Need): boolean {
   const fields = ix.fields;
   if (fields.length !== n.fields.length) return false;
-  const want = new Set(n.fields.map(pathKey));
-  if (!fields.every((f) => want.has(pathKey(f.path)))) return false;
+  if (!fields.every((f) => n.fields.some((p) => samePath(f.path, p)))) return false;
+  if (!n.fields.every((p) => fields.some((f) => samePath(f.path, p)))) return false;
   const containsEntry = fields.find((f) => f.mode === 'contains');
-  if ((containsEntry ? pathKey(containsEntry.path) : null) !== (n.contains ? pathKey(n.contains) : null)) return false;
+  if (!!containsEntry !== !!n.contains || (containsEntry && !samePath(containsEntry.path, n.contains!))) return false;
   const tail: IndexField[] = fields.slice(fields.length - n.ordered.length);
   if (tail.some((t) => t.mode === 'contains')) return false;
-  if (!tail.every((t, i) => pathKey(t.path) === pathKey(n.ordered[i]!.field))) return false;
+  if (!tail.every((t, i) => samePath(t.path, n.ordered[i]!.field))) return false;
   const same = tail.every((t, i) => t.mode === n.ordered[i]!.dir);
   const reversed = tail.every((t, i) => t.mode !== n.ordered[i]!.dir);
   return same || reversed;
@@ -111,13 +115,13 @@ function choose(c: AnyCollection, n: Need): { ok: true; uses: ParsedIndex[] } | 
   // One field: its single-field index (an array field's serves array-contains too).
   if (n.fields.length === 1) {
     const p = n.fields[0]!;
-    const ix = c.indexes.find((x) => single(x) && pathKey(x.fields[0]!.path) === pathKey(p));
+    const ix = findSingle(c, p);
     return ix ? { ok: true, uses: [ix] } : { ok: false, missing: { fields: [p], suggestion: `index(${code(p)})` } };
   }
   const composite = c.indexes.find((x) => !single(x) && serves(x, n));
   if (composite) return { ok: true, uses: [composite] };
   // Equality / contains only: Firestore merges single-field indexes, so every field's will do.
-  if (n.ordered.length === 0 && n.fields.every((p) => declaresSingle(c, p))) return { ok: true, uses: n.fields.map((p) => c.indexes.find((x) => single(x) && pathKey(x.fields[0]!.path) === pathKey(p))!) };
+  if (n.ordered.length === 0 && n.fields.every((p) => declaresSingle(c, p))) return { ok: true, uses: n.fields.map((p) => findSingle(c, p)!) };
   const parts = [...n.eq.map(code), ...(n.contains ? [`contains(${code(n.contains)})`] : []), ...n.ordered.map((o) => (o.dir === 'desc' ? `desc(${code(o.field)})` : code(o.field)))];
   if (n.ordered.length === 0) {
     const lacking = n.fields.filter((p) => !declaresSingle(c, p));
@@ -144,7 +148,9 @@ export function planQuery(c: AnyCollection, spec: QuerySpec): { ok: true; indexe
 
 /** Throw the IDX-2 error when a query needs an index that is not declared. */
 export function assertIndexed(c: AnyCollection, spec: QuerySpec): void {
-  if (spec.path === null && !c.group) {
+  // An unfiltered, unordered collection-group scan needs no index (Firestore runs it on any id).
+  const scan = spec.filters.length === 0 && spec.orders.length === 0;
+  if (spec.path === null && !c.group && !scan) {
     throw new IceBaseError('failed-precondition', `collectionGroup('${c.id}') needs \`group: true\` on collection('${c.path}') in the schema, so its indexes are declared with collection-group scope.`, { reason: 'missing-index', collection: c.path });
   }
   const r = planQuery(c, spec);

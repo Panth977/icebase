@@ -19,13 +19,23 @@ export type FieldDef =
   | { kind: 'timestamp' }
   | { kind: 'enum'; values: readonly string[] }
   | { kind: 'array'; of: Field<unknown>; max?: number }
-  | { kind: 'map'; fields: FieldMap }
+  | { kind: 'map'; fields: FieldMap; rest?: Field<unknown> }
   | { kind: 'ref'; to: AnyCollection }
-  | { kind: 'geopoint' };
+  | { kind: 'geopoint' }
+  /** A map whose keys are data (ids → values): every value has the same type. */
+  | { kind: 'record'; of: Field<unknown> }
+  /** One of several types (the first that fits). */
+  | { kind: 'union'; of: readonly Field<unknown>[] }
+  /** Exactly this value. */
+  | { kind: 'literal'; value: string | number | boolean | null }
+  /** Any value Firestore can store (no check). */
+  | { kind: 'any' };
 
 export interface Field<T> {
   readonly kind: FieldDef['kind'];
   readonly optional: boolean;
+  /** null is a legal value (f.nullable). */
+  readonly nullable?: boolean;
   /** @internal the runtime definition */
   readonly def: FieldDef;
   readonly __t?: T;
@@ -38,7 +48,7 @@ type Flat<T> = { [K in keyof T]: T[K] } & {};
 /** The TypeScript type of a document, inferred from its field map. */
 export type Infer<S extends FieldMap> = Flat<Req<S> & Opt<S>>;
 
-const field = <T>(def: FieldDef, optional = false): Field<T> => ({ kind: def.kind, optional, def });
+const field = <T>(def: FieldDef, optional = false, nullable = false): Field<T> => ({ kind: def.kind, optional, ...(nullable ? { nullable } : {}), def });
 
 export const f = {
   string: (opts: { min?: number; max?: number } = {}): Field<string> => field({ kind: 'string', ...opts }),
@@ -53,10 +63,25 @@ export const f = {
     if (of.optional) throw new IceBaseError('invalid-argument', 'f.array(f.optional(…)): array elements cannot be optional', { reason: 'schema' });
     return field({ kind: 'array', of, ...opts });
   },
-  map: <S extends FieldMap>(fields: S): Field<Infer<S>> => field({ kind: 'map', fields }),
+  /** A map of known keys; `rest` types any other key (an open map). */
+  map: <S extends FieldMap>(fields: S, opts: { rest?: Field<unknown> } = {}): Field<Infer<S>> => field({ kind: 'map', fields, ...(opts.rest ? { rest: { ...opts.rest, optional: true } } : {}) }),
   ref: <C extends AnyCollection>(to: C): Field<DocumentReference<DocOf<C>>> => field({ kind: 'ref', to }),
   geopoint: (): Field<{ latitude: number; longitude: number }> => field({ kind: 'geopoint' }),
-  optional: <T>(inner: Field<T>): Field<T | undefined> => field(inner.def, true),
+  optional: <T>(inner: Field<T>): Field<T | undefined> => field(inner.def, true, !!inner.nullable),
+  /** null is a legal value too. */
+  nullable: <T>(inner: Field<T>): Field<T | null> => field(inner.def, inner.optional, true),
+  /** A map keyed by data (ids → values), e.g. f.record(f.number()) for { u1: 3, u2: 5 }. */
+  record: <T>(of: Field<T>): Field<Record<string, T>> => {
+    if (of.optional) throw new IceBaseError('invalid-argument', 'f.record(f.optional(…)): record values cannot be optional', { reason: 'schema' });
+    return field({ kind: 'record', of });
+  },
+  union: <const U extends readonly Field<any>[]>(...of: U): Field<U[number] extends Field<infer T> ? T : never> => {
+    if (of.length < 2) throw new IceBaseError('invalid-argument', 'f.union(…) needs at least two types', { reason: 'schema' });
+    return field({ kind: 'union', of });
+  },
+  literal: <const V extends string | number | boolean | null>(value: V): Field<V> => field({ kind: 'literal', value }),
+  /** Any storable value, unchecked: for free-form JSON. */
+  any: <T = unknown>(): Field<T> => field({ kind: 'any' }),
 };
 
 // ─── field paths ───────────────────────────────────────────────────────────────
@@ -140,18 +165,30 @@ type IndexSetOf<I> = I extends readonly (infer X)[] ? (X extends IndexSpec<infer
 export type ParsedIndex = IndexSpec<string>;
 
 /** The schema definition of the field at a path (through nested maps), or undefined. */
-export function fieldAt(fields: FieldMap, path: readonly string[]): Field<unknown> | undefined {
-  let cur: FieldMap = fields;
-  let def: Field<unknown> | undefined;
-  for (let i = 0; i < path.length; i++) {
-    def = cur[path[i]!];
+export function fieldAt(fields: FieldMap, path: readonly string[], rest?: Field<unknown>): Field<unknown> | undefined {
+  let def: Field<unknown> | undefined = { kind: 'map', optional: false, def: { kind: 'map', fields, ...(rest ? { rest } : {}) } };
+  for (const key of path) {
+    def = childField(def, key);
     if (!def) return undefined;
-    if (i < path.length - 1) {
-      if (def.def.kind !== 'map') return undefined;
-      cur = def.def.fields;
-    }
   }
   return def;
+}
+
+const ANY: Field<unknown> = { kind: 'any', optional: true, def: { kind: 'any' } };
+
+/** The field under one key of a map-like field (map, record, any, or a union containing one). */
+function childField(parent: Field<unknown>, key: string): Field<unknown> | undefined {
+  const d = parent.def;
+  if (d.kind === 'map') return d.fields[key] ?? d.rest;
+  if (d.kind === 'record') return { ...d.of, optional: true };
+  if (d.kind === 'any') return ANY;
+  if (d.kind === 'union') {
+    const kids = d.of.map((u) => childField(u, key)).filter((x): x is Field<unknown> => !!x);
+    if (kids.length === 0) return undefined;
+    if (kids.length === 1) return { ...kids[0]!, optional: true };
+    return { kind: 'union', optional: true, def: { kind: 'union', of: kids } };
+  }
+  return undefined;
 }
 
 export interface Collection<P extends string, T, IX> {
@@ -162,11 +199,20 @@ export interface Collection<P extends string, T, IX> {
   /** Path parameter names, in order ('users/{uid}/orders' → ['uid']). */
   readonly params: readonly string[];
   readonly fields: FieldMap;
+  /** Any other top-level key (an open document). */
+  readonly rest?: Field<unknown>;
   /** Every declared index: single-field and composite. */
   readonly indexes: readonly ParsedIndex[];
   readonly ttl?: string;
   /** Queried with collectionGroup(): its indexes are also declared with collection-group scope. */
   readonly group: boolean;
+  /** The path ends in {name=**}: that collection and every collection below it (data whose shape users define). */
+  readonly glob?: boolean;
+  /**
+   * Single-field queries need no declaration (like Firestore's automatic indexes) — only for
+   * collections whose fields users define (a glob). Composite indexes are still declared.
+   */
+  readonly autoIndex?: boolean;
   readonly __doc?: T;
   /** Union of declared indexes, e.g. IndexDecl<'stock'> | IndexDecl<'category' | 'priceCents'> */
   readonly __ix?: IX;
@@ -177,11 +223,21 @@ export type IndexesOf<C> = C extends Collection<string, any, infer IX> ? IX : ne
 
 const SEGMENT = /^[^/{}]+$/;
 const PARAM = /^\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
+const GLOB = /^\{([A-Za-z_][A-Za-z0-9_]*)=\*\*\}$/;
 
 /** Parse a collection path template: 'users/{uid}/orders' → ['users', '{uid}', 'orders']. */
-function parsePath(path: string): { segments: string[]; params: string[] } {
+function parsePath(path: string): { segments: string[]; params: string[]; glob: boolean } {
   const segments = path.split('/');
   const params: string[] = [];
+  const last = segments[segments.length - 1]!;
+  if (GLOB.test(last)) {
+    // 'artifacts/{a}/db/{path=**}': every collection below artifacts/{a}/db (any depth).
+    const head = segments.slice(0, -1);
+    if (head.length % 2 !== 1) throw new IceBaseError('invalid-argument', `collection('${path}'): {${GLOB.exec(last)![1]}=**} follows a collection id (collection/{doc}/…/data/{rest=**} — every collection below data's documents)`, { reason: 'schema' });
+    const p = parsePath(head.join('/'));
+    return { segments, params: p.params, glob: true };
+  }
+  if (segments.some((x) => GLOB.test(x))) throw new IceBaseError('invalid-argument', `collection('${path}'): {name=**} can only be the last segment`, { reason: 'schema' });
   if (segments.length % 2 === 0) throw new IceBaseError('invalid-argument', `collection('${path}'): a collection path has an odd number of segments (collection/{doc}/collection…)`, { reason: 'schema' });
   segments.forEach((s, i) => {
     const m = PARAM.exec(s);
@@ -193,13 +249,13 @@ function parsePath(path: string): { segments: string[]; params: string[] } {
       throw new IceBaseError('invalid-argument', `collection('${path}'): '${s}' is not a valid collection id`, { reason: 'schema' });
     }
   });
-  return { segments, params };
+  return { segments, params, glob: false };
 }
 
-function checkIndex(path: string, fields: FieldMap, ix: ParsedIndex): ParsedIndex {
+function checkIndex(path: string, fields: FieldMap, ix: ParsedIndex, rest?: Field<unknown>): ParsedIndex {
   if (!ix || ix.kind !== 'index') throw new IceBaseError('invalid-argument', `collection('${path}'): indexes are index(…) declarations, e.g. index('stock') or index('category', desc('priceCents'))`, { reason: 'schema' });
   for (const f of ix.fields) {
-    const def = fieldAt(fields, f.path);
+    const def = fieldAt(fields, f.path, rest);
     if (!def) throw new IceBaseError('invalid-argument', `collection('${path}'): index field ${showPath(f.path)} is not in the schema`, { reason: 'schema' });
     if (f.mode === 'contains' && def.def.kind !== 'array') throw new IceBaseError('invalid-argument', `collection('${path}'): contains(${showPath(f.path)}) needs an array field, it is ${def.def.kind}`, { reason: 'schema' });
   }
@@ -215,9 +271,19 @@ function checkIndex(path: string, fields: FieldMap, ix: ParsedIndex): ParsedInde
  * else is indexed. Every index field must be in the schema: a typo is a compile error. */
 export function collection<const P extends string, S extends FieldMap, const I extends readonly IndexSpec<FieldKeys<Infer<S>>>[]>(
   path: P,
-  def: { fields: S; indexes: I; ttl?: keyof S & string; group?: boolean },
+  def: {
+    fields: S;
+    indexes: I;
+    ttl?: keyof S & string;
+    group?: boolean;
+    /** Types any other top-level key: an open document (e.g. f.any()). */
+    rest?: Field<unknown>;
+    /** Single-field queries need no declaration (only with a {name=**} path: data whose fields users define). */
+    autoIndex?: boolean;
+  },
 ): Collection<P, Infer<S>, IndexSetOf<I>> {
-  const { segments, params } = parsePath(path);
+  const { segments, params, glob } = parsePath(path);
+  if (def.autoIndex && !glob) throw new IceBaseError('invalid-argument', `collection('${path}'): autoIndex is only for {name=**} collections (data whose fields users define); declare this collection's indexes`, { reason: 'schema' });
   for (const name of Object.keys(def.fields)) {
     // Any key Firestore accepts, except reserved __x__ names and characters that break JSON paths.
     if (!name || /^__.*__$/.test(name) || /["\u0000-\u001f]/.test(name)) throw new IceBaseError('invalid-argument', `collection('${path}'): '${name}' is not a usable field name`, { reason: 'schema' });
@@ -226,13 +292,17 @@ export function collection<const P extends string, S extends FieldMap, const I e
     const t = def.fields[def.ttl];
     if (!t || t.def.kind !== 'timestamp') throw new IceBaseError('invalid-argument', `collection('${path}'): ttl field '${String(def.ttl)}' must be a timestamp field`, { reason: 'schema' });
   }
-  const indexes = def.indexes.map((ix) => checkIndex(path, def.fields, ix));
+  const rest = def.rest ? { ...def.rest, optional: true } : undefined;
+  const indexes = def.indexes.map((ix) => checkIndex(path, def.fields, ix, rest));
   return {
     kind: 'collection',
     path,
-    id: segments[segments.length - 1]!,
+    id: glob ? '*' : segments[segments.length - 1]!,
     params,
     fields: def.fields,
+    ...(rest ? { rest } : {}),
+    ...(glob ? { glob: true } : {}),
+    ...(def.autoIndex ? { autoIndex: true } : {}),
     indexes,
     ...(def.ttl !== undefined ? { ttl: def.ttl } : {}),
     group: def.group ?? false,
@@ -288,7 +358,7 @@ export function dbPath<const P extends string, T, const IX extends string = neve
 /** Validate one value against a field — used by the Realtime Database, where a location holds any field. */
 export function validateValue(def: Field<unknown>, value: unknown, where: string): unknown {
   const ctx: Ctx = { issues: [], kind: 'set', write: true, bounds: true };
-  const out = check(def.def, value, where, ctx, false);
+  const out = checkF(def, value, where, ctx, false);
   if (ctx.issues.length) {
     const lines = ctx.issues.slice(0, 10).map((i) => `  ${i.path}: expected ${i.expected}, got ${i.got}`);
     throw new IceBaseError('invalid-argument', `write to '${where}' does not match the schema:\n${lines.join('\n')}`, { reason: 'schema', issues: ctx.issues });
@@ -341,13 +411,10 @@ export function defineSchema<const C extends Record<string, AnyCollection>, cons
   collections: C,
   more: { paths?: D; files?: Fs } = {},
 ): Schema<C, D, Fs> {
-  const byId = new Map<string, string>();
   for (const [key, c] of Object.entries(collections)) {
+    // Collections may share an id (Firestore keys indexes by id: they are merged when deployed,
+    // and a collectionGroup(id) query reads every group: true collection with that id).
     if (!c || c.kind !== 'collection') throw new IceBaseError('invalid-argument', `defineSchema: '${key}' is not a collection(…)`, { reason: 'schema' });
-    const prev = byId.get(c.id);
-    // Firestore keys composite indexes and collection-group queries by collection id alone.
-    if (prev) throw new IceBaseError('invalid-argument', `defineSchema: collection id '${c.id}' is used by both '${prev}' and '${c.path}'; Firestore indexes are per collection id, so give them different ids`, { reason: 'schema' });
-    byId.set(c.id, c.path);
   }
   for (const [key, p] of Object.entries(more.paths ?? {})) {
     if (!p || p.kind !== 'dbPath') throw new IceBaseError('invalid-argument', `defineSchema: paths.${key} is not a dbPath(…)`, { reason: 'schema' });
@@ -361,9 +428,12 @@ export function defineSchema<const C extends Record<string, AnyCollection>, cons
 /** Find the schema collection a concrete path ('users/u1/orders') belongs to. */
 export function matchCollectionPath(schema: Schema<Record<string, AnyCollection>, any, any>, path: string): { collection: AnyCollection; params: Record<string, string> } | null {
   const segs = path.split('/');
-  for (const c of Object.values(schema.collections)) {
-    const tpl = c.path.split('/');
-    if (tpl.length !== segs.length) continue;
+  const all = Object.values(schema.collections);
+  // Exact templates first, then {rest=**} ones (the longest prefix wins).
+  const ordered = [...all.filter((c) => !c.glob), ...all.filter((c) => c.glob).sort((a, b) => b.path.length - a.path.length)];
+  for (const c of ordered) {
+    const tpl = c.glob ? c.path.split('/').slice(0, -1) : c.path.split('/');
+    if (c.glob ? segs.length < tpl.length || segs.length % 2 === 0 : tpl.length !== segs.length) continue;
     const params: Record<string, string> = {};
     let ok = true;
     for (let i = 0; i < tpl.length; i++) {
@@ -432,6 +502,12 @@ const expectedOf = (d: FieldDef): string => {
       return 'map';
     case 'ref':
       return `reference to ${d.to.path}`;
+    case 'record':
+      return `map of ${expectedOf(d.of.def)}`;
+    case 'union':
+      return d.of.map((u) => expectedOf(u.def) + (u.nullable ? ' | null' : '')).join(' | ');
+    case 'literal':
+      return JSON.stringify(d.value);
     default:
       return d.kind;
   }
@@ -453,6 +529,12 @@ interface Ctx {
   bounds: boolean;
 }
 
+/** check() for a Field: null passes when the field is nullable (or any). */
+function checkF(field: Field<unknown>, v: unknown, path: string, ctx: Ctx, partial: boolean): unknown {
+  if (v === null && (field.nullable || field.def.kind === 'any')) return null;
+  return check(field.def, v, path, ctx, partial);
+}
+
 /** Validate one value against a field. Returns the value normalised for drivers (Date → Timestamp, {lat,lng} → GeoPoint). */
 function check(def: FieldDef, v: unknown, path: string, ctx: Ctx, partial: boolean): unknown {
   const bad = (expected = expectedOf(def)) => {
@@ -461,6 +543,15 @@ function check(def: FieldDef, v: unknown, path: string, ctx: Ctx, partial: boole
   };
   if (v instanceof FieldValue) {
     if (!ctx.write) return bad();
+    if (def.kind === 'any' && v.op !== 'delete') return v;
+    if (def.kind === 'union' && v.op !== 'delete') {
+      for (const alt of def.of) {
+        const sub: Ctx = { ...ctx, issues: [] };
+        check(alt.def, v, path, sub, partial);
+        if (sub.issues.length === 0) return v;
+      }
+      return bad();
+    }
     switch (v.op) {
       case 'serverTimestamp':
         return def.kind === 'timestamp' ? v : bad(`${expectedOf(def)} (serverTimestamp() only fits timestamp fields)`);
@@ -473,13 +564,38 @@ function check(def: FieldDef, v: unknown, path: string, ctx: Ctx, partial: boole
       case 'arrayUnion':
       case 'arrayRemove':
         if (def.kind !== 'array') return bad(`${expectedOf(def)} (${v.op}() only fits array fields)`);
-        (v.operand as unknown[]).forEach((e, i) => check(def.of.def, e, `${path}[${i}]`, ctx, false));
+        (v.operand as unknown[]).forEach((e, i) => checkF(def.of, e, `${path}[${i}]`, ctx, false));
         return v;
       case 'delete':
         return bad('a value (deleteField() is only allowed on optional fields, with updateDoc or setDoc merge)');
     }
   }
   switch (def.kind) {
+    case 'any':
+      return v;
+    case 'literal':
+      return v === def.value ? v : bad();
+    case 'union': {
+      for (const alt of def.of) {
+        const sub: Ctx = { ...ctx, issues: [] };
+        const out = checkF(alt, v, path, sub, partial);
+        if (sub.issues.length === 0) return out;
+      }
+      return bad();
+    }
+    case 'record': {
+      if (!isPlainObject(v)) return bad();
+      const out: Record<string, unknown> = {};
+      for (const [k, x] of Object.entries(v)) {
+        if (x === undefined) continue;
+        if (x instanceof FieldValue && x.op === 'delete' && ctx.write && (ctx.kind === 'update' || ctx.kind === 'merge')) {
+          out[k] = x;
+          continue;
+        }
+        out[k] = checkF(def.of, x, `${path}.${k}`, ctx, false);
+      }
+      return out;
+    }
     case 'string':
       if (typeof v !== 'string') return bad();
       if (ctx.bounds && ((def.min !== undefined && v.length < def.min) || (def.max !== undefined && v.length > def.max))) return bad();
@@ -515,20 +631,20 @@ function check(def: FieldDef, v: unknown, path: string, ctx: Ctx, partial: boole
     case 'array': {
       if (!Array.isArray(v)) return bad();
       if (ctx.bounds && def.max !== undefined && v.length > def.max) return bad();
-      return v.map((e, i) => check(def.of.def, e, `${path}[${i}]`, ctx, false));
+      return v.map((e, i) => checkF(def.of, e, `${path}[${i}]`, ctx, false));
     }
     case 'map': {
       if (!isPlainObject(v)) return bad();
-      return checkFields(def.fields, v, path, ctx, partial);
+      return checkFields(def.fields, v, path, ctx, partial, def.rest);
     }
   }
 }
 
-function checkFields(fields: FieldMap, data: Record<string, unknown>, prefix: string, ctx: Ctx, partial: boolean): Record<string, unknown> {
+function checkFields(fields: FieldMap, data: Record<string, unknown>, prefix: string, ctx: Ctx, partial: boolean, rest?: Field<unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(data)) {
     const path = prefix ? `${prefix}.${k}` : k;
-    const def = fields[k];
+    const def = fields[k] ?? rest;
     if (!def) {
       ctx.issues.push({ path, expected: `no such field (fields: ${Object.keys(fields).join(', ') || 'none'})`, got: describe(v) });
       continue;
@@ -544,7 +660,7 @@ function checkFields(fields: FieldMap, data: Record<string, unknown>, prefix: st
       out[k] = v;
       continue;
     }
-    out[k] = check(def.def, v, path, ctx, partial);
+    out[k] = checkF(def, v, path, ctx, partial);
   }
   if (!partial) {
     for (const [k, def] of Object.entries(fields)) {
@@ -568,7 +684,7 @@ function fail(c: AnyCollection, what: string, issues: Issue[]): never {
 export function validateWrite(c: AnyCollection, data: unknown, kind: Exclude<WriteKind, 'update'>): Record<string, unknown> {
   const ctx: Ctx = { issues: [], kind, write: true, bounds: true };
   if (!isPlainObject(data)) fail(c, kind, [{ path: '(document)', expected: 'an object', got: describe(data) }]);
-  const out = checkFields(c.fields, data, '', ctx, kind === 'merge');
+  const out = checkFields(c.fields, data, '', ctx, kind === 'merge', c.rest);
   if (ctx.issues.length) fail(c, kind, ctx.issues);
   return out;
 }
@@ -586,7 +702,7 @@ export function validateUpdate(c: AnyCollection, entries: readonly UpdateEntry[]
   for (const [path, v] of entries) {
     // Plain for an ordinary key; quoted when a key path or a key with a dot could be misread.
     const shown = path.length === 1 && !path[0]!.includes('.') ? path[0]! : showPath(path);
-    const def = path.length ? fieldAt(c.fields, path) : undefined;
+    const def = path.length ? fieldAt(c.fields, path, c.rest) : undefined;
     if (!def) {
       ctx.issues.push({ path: shown, expected: 'a field in the schema', got: describe(v) });
       continue;
@@ -600,7 +716,7 @@ export function validateUpdate(c: AnyCollection, entries: readonly UpdateEntry[]
       ctx.issues.push({ path: shown, expected: expectedOf(def.def), got: 'undefined' });
       continue;
     }
-    out.push([[...path], check(def.def, v, shown, ctx, false)]);
+    out.push([[...path], checkF(def, v, shown, ctx, false)]);
   }
   if (ctx.issues.length) fail(c, 'update', ctx.issues);
   return out;
@@ -610,14 +726,14 @@ export function validateUpdate(c: AnyCollection, entries: readonly UpdateEntry[]
 export function readIssues(c: AnyCollection, data: unknown): Issue[] {
   const ctx: Ctx = { issues: [], kind: 'set', write: false, bounds: true };
   if (!isPlainObject(data)) return [{ path: '(document)', expected: 'an object', got: describe(data) }];
-  checkFields(c.fields, data, '', ctx, false);
+  checkFields(c.fields, data, '', ctx, false, c.rest);
   return ctx.issues;
 }
 
 /** Validate one query value against a field (used by where()); throws like validateWrite. */
 export function validateQueryValue(c: AnyCollection, path: readonly string[], op: string, value: unknown): void {
   if (path.length === 1 && path[0] === '__name__') return;
-  const def = fieldAt(c.fields, path);
+  const def = fieldAt(c.fields, path, c.rest);
   const field = path.join('.');
   if (!def) {
     throw new IceBaseError('invalid-argument', `where(${showPath(path)}, …) on '${c.path}': ${showPath(path)} is not a field (fields: ${Object.keys(c.fields).join(', ')})`, { reason: 'schema' });
@@ -629,6 +745,7 @@ export function validateQueryValue(c: AnyCollection, path: readonly string[], op
     if (!Array.isArray(value)) ctx.issues.push({ path: field, expected: `an array for '${op}'`, got: describe(value) });
     else value.forEach((v, i) => one(v, def.def, `${field}[${i}]`));
   } else if (op === 'array-contains' || op === 'array-contains-any') {
+    if (def.def.kind === 'any' || def.def.kind === 'union') return;
     if (def.def.kind !== 'array') ctx.issues.push({ path: field, expected: `an array field for '${op}'`, got: def.def.kind });
     else if (op === 'array-contains') one(value, def.def.of.def, field);
     else if (!Array.isArray(value)) ctx.issues.push({ path: field, expected: `an array for '${op}'`, got: describe(value) });

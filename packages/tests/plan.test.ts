@@ -78,7 +78,8 @@ describe('index rule: every index is declared', () => {
     expect(() => assertIndexed(products, spec([], [['stock', 'desc']]))).toThrow("Add index('stock')");
     expect(() => assertIndexed(products, spec([w(['dims', 'h'], '==')]))).toThrow("Add index(['dims', 'h'])");
   });
-  it('wants group: true for collection-group queries', () => {
-    expect(() => assertIndexed(sub, { path: null, collectionId: 'orders', filters: [], orders: [] })).toThrow(/group: true/);
+  it('wants group: true for filtered collection-group queries; a plain scan needs none', () => {
+    expect(() => assertIndexed(sub, { path: null, collectionId: 'orders', filters: [], orders: [{ field: ['qty'], dir: 'asc' }] })).toThrow(/group: true/);
+    expect(() => assertIndexed(sub, { path: null, collectionId: 'orders', filters: [], orders: [] })).not.toThrow();
   });
 });

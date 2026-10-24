@@ -40,6 +40,8 @@ export interface Unsubscribe {
 export interface TxDriver {
   get(path: string): Promise<RawDoc>;
   set(path: string, data: Record<string, unknown>, merge: boolean): void;
+  /** Create only (admin and emulator drivers): the commit fails if the document exists. */
+  create?(path: string, data: Record<string, unknown>): void;
   /** Each entry sets the field at its key path. */
   update(path: string, fields: [string[], unknown][]): void;
   delete(path: string): void;
@@ -47,6 +49,7 @@ export interface TxDriver {
 
 export interface BatchDriver {
   set(path: string, data: Record<string, unknown>, merge: boolean): void;
+  create?(path: string, data: Record<string, unknown>): void;
   update(path: string, fields: [string[], unknown][]): void;
   delete(path: string): void;
   commit(): Promise<void>;

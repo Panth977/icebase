@@ -8,8 +8,8 @@
   },
   "dependencies": {
     "@panth977/icebase": "0.1.2",
-    "@panth977/icebase-server": "0.1.2",
-    "@panth977/icebase-cli": "0.1.2"
+    "@panth977/icebase-cli": "0.1.2",
+    "@panth977/icebase-server": "0.1.2"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -19,6 +19,7 @@
     "firebase-functions": "^7.4.0",
     "firebase-tools": "^15.34.1",
     "typescript": "^5.9.3",
-    "vitest": "^5.0.5"
+    "vitest": "^5.0.5",
+    "zod": "^3.25.76"
   }
 }

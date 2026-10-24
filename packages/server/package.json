@@ -25,6 +25,10 @@
       "types": "./src/admin.ts",
       "default": "./dist/admin.js"
     },
+    "./compat": {
+      "types": "./src/compat.ts",
+      "default": "./dist/compat.js"
+    },
     "./functions": {
       "types": "./src/functions.ts",
       "default": "./dist/functions.js"

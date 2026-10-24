@@ -5,6 +5,7 @@
   "exports": {
     ".": "./src/admin.ts",
     "./admin": "./src/admin.ts",
+    "./compat": "./src/compat.ts",
     "./functions": "./src/functions.ts",
     "./auth": "./src/auth.ts",
     "./internal": "./src/internal.ts"
