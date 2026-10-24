@@ -1,0 +1,1188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>IceBase — Product Requirements Document</title>
+<style>
+  :root{--bg:#0f1115;--card:#171a21;--card2:#1d212a;--ink:#e6e6e6;--mut:#9aa3ad;--blue:#58C4DD;--yel:#FFFF00;--grn:#83C167;--red:#FC6255;--org:#F5A65B;--line:#2a2f3a}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  .wrap{display:grid;grid-template-columns:250px 1fr;max-width:1300px;margin:0 auto}
+  nav{position:sticky;top:0;height:100vh;overflow:auto;padding:24px 14px;border-right:1px solid var(--line);font-size:13px}
+  nav a{display:block;color:var(--mut);text-decoration:none;padding:3px 6px;border-radius:4px}
+  nav a:hover{color:var(--ink);background:#ffffff0a}
+  nav .h{color:var(--ink);font-weight:600;margin:10px 0 4px}
+  main{padding:28px 32px 120px;min-width:0}
+  @media(max-width:900px){.wrap{grid-template-columns:1fr}nav{display:none}}
+  h1{font:600 32px/1.2 Georgia,serif;margin:0 0 6px}
+  h2{font:600 22px/1.3 Georgia,serif;margin:46px 0 12px;color:var(--blue);padding-top:8px;border-top:1px solid var(--line)}
+  h3{font-size:16px;margin:22px 0 6px;color:#e9eef3}
+  .meta{display:flex;flex-wrap:wrap;gap:8px 18px;color:var(--mut);font-size:13px;margin-bottom:18px}
+  .stmt{background:var(--card);border-left:4px solid var(--yel);padding:16px 20px;border-radius:6px;font-size:17px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:10px 0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:12px}
+  table{width:100%;border-collapse:collapse;margin:8px 0;font-size:13.5px}
+  th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--mut);font-weight:600}
+  td.n{text-align:right;font-variant-numeric:tabular-nums}
+  code{background:#ffffff12;padding:1px 5px;border-radius:4px;font-size:12.5px}
+  pre{background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow:auto;font-size:12.5px;line-height:1.5}
+  details{background:var(--card);border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:6px 12px}
+  details summary{cursor:pointer;font-weight:600;padding:4px 0}
+  details pre{border:0;background:transparent;padding:6px 0}
+  .req{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--org);white-space:nowrap}
+  ul{padding-left:20px} li{margin:3px 0}
+  .ok{color:var(--grn)} .no{color:var(--red)} .y{color:var(--yel)} .mut{color:var(--mut)}
+  .pill{display:inline-block;padding:0 8px;border-radius:9px;font-size:11.5px;font-weight:600}
+  .p1{background:#FFFF0018;color:var(--yel)} .p2{background:#58C4DD18;color:var(--blue)} .p3{background:#83C16718;color:var(--grn)} .p4{background:#9CA3AF18;color:#bbb}
+</style>
+</head>
+<body><div class="wrap">
+<nav>
+  <div class="h">IceBase PRD</div>
+  <a href="#summary">1. Summary</a><a href="#goals">2. Goals & non-goals</a><a href="#users">3. Users & use cases</a><a href="#principles">4. Product principles</a>
+  <a href="#modes">5. Modes</a><a href="#schema">6. Schema</a><a href="#indexes">7. Indexes</a><a href="#rules">8. Rules</a><a href="#types">9. Type safety</a>
+  <a href="#services">10. Services & requirements</a><a href="#config">11. Configuration</a><a href="#structure">12. Project structure</a><a href="#cli">13. CLI</a>
+  <a href="#console">14. Console GUI</a><a href="#arch">15. Architecture</a><a href="#nfr">16. Non-functional</a><a href="#phases">17. Phases & acceptance</a>
+  <a href="#out">18. Out of scope</a><a href="#risks">19. Risks</a><a href="#open">20. Open decisions</a><a href="#glossary">21. Glossary</a><a href="#appendix">Appendix</a>
+</nav>
+<main>
+<h1>IceBase — Product Requirements Document</h1>
+<div class="meta"><span>Ticket ORCH-10</span><span>Status: <b class="y">Draft for review</b></span><span>Owner: Panth Patel</span><span>Author: Devbox</span><span>Revision 8 · 2026-10-23</span><span>No timelines in this document (by request)</span></div>
+
+<h2 id="summary">1. Summary</h2>
+<div class="stmt"><b>IceBase is a Firebase wrapper with every Firebase API, which lets you move from Firebase to your own VM.</b><br>
+It runs in three modes: <b>firebase</b> (default), <b>emulator</b> (SQLite, local) and <b>vm</b> (self-hosted, Postgres). You pick the mode per service. One console GUI covers all modes. Data has an explicit schema and declared composite indexes. Queries are type-safe in frontend and backend. Rules are Firebase rules.</div>
+<h3>Problem</h3>
+<ul>
+  <li>Firebase gets expensive as usage grows, and leaving means rewriting the app: there's no drop-in self-hosted Firebase.</li>
+  <li>The Firebase emulator doesn't enforce indexes, so missing-index bugs only show up in production.</li>
+  <li>Firestore is schemaless and untyped. Typos in field names and wrong value types reach the database.</li>
+  <li>Developers learn three tools: Firebase console, emulator UI and whatever runs on a VM.</li>
+</ul>
+<h3>Solution in one paragraph</h3>
+<p>Apps import <code>icebase/*</code> instead of <code>firebase/*</code>. The function names and call shapes are Firebase's. A single <code>icebase.config.ts</code> declares the schema (collections, fields, composite indexes), the rules files, functions, hosting, and, per environment, which mode each service runs in. In <b>firebase</b> mode IceBase calls the real Firebase SDKs and adds type checks and index checks. In <b>emulator</b> mode a local IceBase server implements the same APIs on SQLite. In <b>vm</b> mode the same server runs as one Docker image on Postgres. The IceBase console manages all three.</p>
+
+<h2 id="goals">2. Goals & non-goals</h2>
+<div class="grid">
+<div class="card"><h3 class="ok">Goals</h3><ul>
+  <li><b>G1</b> Same API surface as Firebase (names, arguments, results) for every service in scope.</li>
+  <li><b>G2</b> Explicit schema for documents, function inputs/outputs and claims; typed autocomplete in frontend and backend.</li>
+  <li><b>G3</b> Composite indexes are declared; a query that needs an undeclared composite fails at compile time where possible, and always at runtime in every mode.</li>
+  <li><b>G4</b> Firebase rules syntax enforced identically in all modes.</li>
+  <li><b>G5</b> Emulator mode replaces the Firebase emulator and enforces indexes; it handles millions of documents for development.</li>
+  <li><b>G6</b> VM mode: one Docker image on one port, Postgres underneath, parallel transactions, aimed at a ~$100/month VM.</li>
+  <li><b>G7</b> Mode chosen per service per environment (e.g. Firestore on Firebase, functions on the VM).</li>
+  <li><b>G8</b> One console GUI for all modes.</li>
+  <li><b>G9</b> Move a service's data between modes with one command.</li>
+</ul></div>
+<div class="card"><h3 class="no">Non-goals</h3><ul>
+  <li>Wire compatibility with Google's SDKs talking to the IceBase server (apps use <code>icebase/*</code>).</li>
+  <li>Self-hosting push delivery, SMS, Google Analytics data, Gemini models (these stay external).</li>
+  <li>Mobile-only Firebase products (Crashlytics, In-App Messaging, App Distribution, Test Lab client, Dynamic Links).</li>
+  <li>Multi-region / HA clustering in VM mode (single box + backups).</li>
+  <li>Databases other than SQLite (emulator) and Postgres (VM).</li>
+  <li>Schema-less writes (every collection must be declared).</li>
+</ul></div>
+</div>
+
+<h2 id="users">3. Users & use cases</h2>
+<table>
+<tr><th>Who</th><th>Use case</th><th>What they need from IceBase</th></tr>
+<tr><td>Indie dev / startup on Firebase</td><td>Bill is growing; wants an exit without a rewrite</td><td>Swap imports once, then move services to the VM one at a time</td></tr>
+<tr><td>Team building on Firebase</td><td>Local dev and CI with real index behaviour</td><td>Emulator mode that fails on missing composite indexes, seeds data, runs in CI</td></tr>
+<tr><td>Agency running many small apps</td><td>Host many apps cheaply</td><td>VM mode: one Docker image per app (or project), console for clients</td></tr>
+<tr><td>Developer writing app code</td><td>Fewer runtime surprises</td><td>Typed docs, typed queries, typed callables, field-name autocomplete</td></tr>
+<tr><td>Ops / owner</td><td>One place to look</td><td>Same console for Firebase, emulator and VM: data, users, files, logs, rules</td></tr>
+</table>
+
+<h2 id="principles">4. Product principles</h2>
+<ol>
+  <li><b>Firebase names, Firebase behaviour.</b> If Firebase has <code>getDocs(query(...))</code>, IceBase has exactly that. No new query language.</li>
+  <li><b>Explicit beats implicit.</b> Schema and composite indexes are declared in code and reviewed in PRs.</li>
+  <li><b>Fail early.</b> Compile time first, then runtime with a clear message naming the missing index, in every mode.</li>
+  <li><b>One config, many places.</b> <code>icebase.config.ts</code> is the only source of truth; Firebase index files, SQL tables and RTDB <code>.indexOn</code> are generated from it.</li>
+  <li><b>Per-service freedom.</b> Each service picks its mode independently.</li>
+  <li><b>One console.</b> The GUI doesn't change between modes.</li>
+</ol>
+
+<h2 id="modes">5. Modes</h2>
+<table>
+<tr><th></th><th>firebase (default)</th><th>emulator</th><th>vm</th></tr>
+<tr><td>Runs on</td><td>Google's Firebase</td><td>Developer machine / CI</td><td>Your server (one Docker image)</td></tr>
+<tr><td>Documents</td><td>Firestore</td><td>SQLite file in <code>.icebase/</code></td><td>Postgres</td></tr>
+<tr><td>Files</td><td>Cloud Storage</td><td>Local disk</td><td>Disk or S3/R2</td></tr>
+<tr><td>Functions</td><td>Cloud Functions (Node)</td><td>Local Node workers</td><td>Node workers on the VM</td></tr>
+<tr><td>Concurrency</td><td>Firebase's</td><td>One writer; batched writes measured at 25k–70k/s on the devbox laptop; readers never wait</td><td>Postgres row-level locking; parallel transactions</td></tr>
+<tr><td>Rules</td><td>Enforced by Firebase</td><td colspan="2">Enforced by the IceBase rules engine (same files)</td></tr>
+<tr><td>Indexes</td><td>Generated <code>firestore.indexes.json</code></td><td colspan="2">Indexed fields become columns + SQL indexes (§7)</td></tr>
+<tr><td>Console</td><td colspan="3">Same IceBase console</td></tr>
+</table>
+<h3>Per-service mixing</h3>
+<p>Each environment sets a default <code>mode</code>; any service can override it. Requirements:</p>
+<ul>
+  <li><span class="req">MIX-1</span> Services in the VM accept Firebase Auth ID tokens (verified with Google's public keys) when auth runs on Firebase.</li>
+  <li><span class="req">MIX-2</span> Functions on the VM can be triggered by Firestore on Firebase (listener bridge; per-document ordering, at-least-once).</li>
+  <li><span class="req">MIX-3</span> Functions on Firebase can be triggered by documents on the VM (signed webhook to the HTTPS function).</li>
+  <li><span class="req">MIX-4</span> <code>icebase drivers --env X</code> prints the wiring and refuses impossible combinations at deploy time.</li>
+</ul>
+<p class="mut">Known hard limits: Firebase Hosting can't rewrite to functions on the VM; Firebase Storage rules can't read documents stored on the VM. Native auth + Firestore on Firebase needs a token bridge (custom tokens).</p>
+
+<h2 id="schema">6. Schema</h2>
+<p>Every collection (and RTDB path) is declared in TypeScript. The schema drives types, runtime validation, generated index files, SQL tables and console forms.</p>
+<pre>import { collection, f } from &#x27;icebase/schema&#x27;;
+
+export const products = collection(&#x27;products&#x27;, {
+  fields: {
+    name: f.string(),
+    priceCents: f.number({ int: true, min: 0 }),
+    category: f.enum([&#x27;shoes&#x27;, &#x27;shirts&#x27;, &#x27;bags&#x27;]),
+    tags: f.array(f.string()),
+    stock: f.number({ int: true }),
+    active: f.boolean(),
+  },
+  indexes: [
+    [&#x27;category&#x27;, &#x27;priceCents asc&#x27;],
+    [&#x27;tags contains&#x27;, &#x27;priceCents asc&#x27;],
+    [&#x27;active&#x27;, &#x27;stock desc&#x27;],
+  ],
+});
+</pre>
+<h3>Field types</h3>
+<table>
+<tr><th>DSL</th><th>TypeScript type</th><th>Stored as (emulator/vm)</th><th>Firestore</th></tr>
+<tr><td><code>f.string({min,max})</code></td><td>string</td><td>JSONB string</td><td>string</td></tr>
+<tr><td><code>f.number({int,min,max})</code></td><td>number</td><td>JSONB number</td><td>integer / double</td></tr>
+<tr><td><code>f.boolean()</code></td><td>boolean</td><td>JSONB bool</td><td>boolean</td></tr>
+<tr><td><code>f.timestamp()</code></td><td>Timestamp</td><td>tagged {seconds,nanos}</td><td>timestamp</td></tr>
+<tr><td><code>f.enum([...])</code></td><td>union of literals</td><td>JSONB string</td><td>string</td></tr>
+<tr><td><code>f.array(of)</code></td><td>T[]</td><td>JSONB array (+ side table if indexed with contains)</td><td>array</td></tr>
+<tr><td><code>f.map({...})</code></td><td>object</td><td>JSONB object</td><td>map</td></tr>
+<tr><td><code>f.ref(collection)</code></td><td>DocumentReference&lt;T&gt;</td><td>tagged path</td><td>reference</td></tr>
+<tr><td><code>f.geopoint()</code></td><td>{latitude, longitude}</td><td>tagged pair</td><td>geopoint</td></tr>
+<tr><td><code>f.optional(x)</code></td><td>T | undefined</td><td>absent key</td><td>absent field</td></tr>
+</table>
+<h3>Requirements</h3>
+<ul>
+  <li><span class="req">SCH-1</span> Writes are type-checked at compile time and validated at runtime (all modes) before being sent; invalid writes fail with the field path and expected type.</li>
+  <li><span class="req">SCH-2</span> Reads return typed data. Documents that don't match the schema (legacy data) are returned with a warning in dev and counted in the console's "schema drift" view.</li>
+  <li><span class="req">SCH-3</span> Subcollections use path templates (<code>users/{uid}/orders</code>); the params are required arguments.</li>
+  <li><span class="req">SCH-4</span> Schema changes: adding optional fields and new collections is free; adding required fields, renaming or narrowing types needs a migration script (<code>icebase migrate</code>), checked by <code>icebase deploy</code>.</li>
+  <li><span class="req">SCH-5</span> <code>noIndex</code> per field mirrors Firebase single-field exemptions; <code>ttl</code> marks a TTL field.</li>
+  <li><span class="req">SCH-6</span> Function inputs/outputs, auth custom claims, Remote Config parameters and RTDB paths use the same DSL.</li>
+</ul>
+
+<h2 id="indexes">7. Indexes</h2>
+<p>Firebase indexes every single field automatically. IceBase keeps that: any query on <b>one field</b> works without a declaration. Queries that need a <b>composite index</b> only work when it's declared in the schema.</p>
+<table>
+<tr><th>Query</th><th>Composite needed?</th></tr>
+<tr><td><code>where('name','==','Boot')</code> (any field)</td><td class="ok">no</td></tr>
+<tr><td><code>orderBy('stock','desc')</code></td><td class="ok">no</td></tr>
+<tr><td><code>where('priceCents','&gt;',1000), orderBy('priceCents')</code> (same field)</td><td class="ok">no</td></tr>
+<tr><td><code>where('category','==',x), where('active','==',true)</code> (equality only)</td><td class="ok">no (Firebase merges single-field indexes)</td></tr>
+<tr><td><code>where('category','==',x), orderBy('priceCents')</code></td><td class="no">yes: category + priceCents</td></tr>
+<tr><td><code>where('tags','array-contains',t), orderBy('priceCents')</code></td><td class="no">yes: tags contains + priceCents</td></tr>
+<tr><td><code>orderBy('a'), orderBy('b')</code> · range on two fields</td><td class="no">yes</td></tr>
+<tr><td>collection-group variants of the above</td><td class="no">yes (scope collectionGroup)</td></tr>
+</table>
+<h3>Requirements</h3>
+<ul>
+  <li><span class="req">IDX-1</span> Compile time: <code>query()</code> returns <code>MissingCompositeIndex&lt;fields&gt;</code> instead of a <code>Query</code> when the combination needs an undeclared composite, so <code>getDocs</code>/<code>onSnapshot</code> on it is a type error naming the fields (implemented and verified, §9).</li>
+  <li><span class="req">IDX-2</span> Runtime, all modes: the same check runs before the request leaves; error <code>missing-index</code> includes the exact index to add.</li>
+  <li><span class="req">IDX-3</span> <code>icebase indexes check</code> scans the code for queries and lists missing composites (CI-friendly).</li>
+  <li><span class="req">IDX-4</span> firebase mode: generate and deploy <code>firestore.indexes.json</code> from the schema.</li>
+  <li><span class="req">IDX-5</span> emulator/vm: every field that appears in a declared composite gets a column; each composite becomes a SQL index; single-field queries use per-field expression indexes created on demand (and listed in the console).</li>
+  <li><span class="req">IDX-6</span> RTDB: <code>orderByChild(x)</code> requires <code>x</code> in the path's <code>indexOn</code>; <code>.indexOn</code> generated into <code>database.rules.json</code>.</li>
+</ul>
+<pre>-- emulator (SQLite) and vm (Postgres): one table per collection id
+CREATE TABLE products (
+  path TEXT PRIMARY KEY, parent TEXT, id TEXT,
+  data JSONB NOT NULL,                              -- the whole document
+  create_time TIMESTAMPTZ, update_time TIMESTAMPTZ, version BIGINT,
+  ix_category TEXT, ix_price_cents BIGINT, ix_active BOOLEAN, ix_stock BIGINT   -- fields used by composites
+);
+CREATE INDEX products__category__price_cents ON products (ix_category, ix_price_cents ASC);
+CREATE INDEX products__active__stock         ON products (ix_active, ix_stock DESC);
+CREATE TABLE products__tags (path TEXT, value TEXT);  -- array 'contains'</pre>
+
+<h2 id="rules">8. Rules</h2>
+<ul>
+  <li><span class="req">RUL-1</span> <code>firestore.rules</code>, <code>storage.rules</code>, <code>database.rules.json</code> in exact Firebase syntax; deployed unchanged in firebase mode.</li>
+  <li><span class="req">RUL-2</span> emulator/vm: IceBase evaluates rules itself: <code>match</code> blocks, wildcards, functions, <code>request</code>/<code>resource</code>, <code>get()</code>/<code>exists()</code>/<code>getAfter()</code>, list-query checks ("rules are not filters").</li>
+  <li><span class="req">RUL-3</span> Conformance: the same rules test suite runs against IceBase and the official Firebase emulator; any difference is a bug.</li>
+  <li><span class="req">RUL-4</span> Lint: field names used in rules must exist in the schema; comparisons are type-checked against field types.</li>
+  <li><span class="req">RUL-5</span> Console playground: simulate a read/write as a chosen user against real data, in every mode.</li>
+</ul>
+
+<h2 id="types">9. Type safety (frontend + backend + functions)</h2>
+<p>The typings below are implemented as stubs and verified with <code>tsc</code> on an example project (0 errors).</p>
+<pre>// Frontend usage — reads exactly like Firebase, but everything is typed from icebase/schema.
+import { addDoc, collection, getDocs, limit, onSnapshot, orderBy, query, serverTimestamp, where } from &#x27;icebase/firestore&#x27;;
+import { signInWithEmailAndPassword } from &#x27;icebase/auth&#x27;;
+import { httpsCallable } from &#x27;icebase/functions&#x27;;
+import { auth, db, functions } from &#x27;../lib/icebase&#x27;;
+import { orders, products, users } from &#x27;../../icebase/schema&#x27;;
+
+// Single field: works on ANY schema field, no declaration (Firebase indexes single fields automatically).
+export const byName = query(collection(db, products), where(&#x27;name&#x27;, &#x27;==&#x27;, &#x27;Boot&#x27;));
+export const byEmail = query(collection(db, users), where(&#x27;email&#x27;, &#x27;==&#x27;, &#x27;a@b.c&#x27;));
+export const newest = query(collection(db, products), orderBy(&#x27;stock&#x27;, &#x27;desc&#x27;), limit(10));
+// Equality on several fields: Firebase merges single-field indexes, so no composite needed.
+export const activeShoes = query(collection(db, products), where(&#x27;category&#x27;, &#x27;==&#x27;, &#x27;shoes&#x27;), where(&#x27;active&#x27;, &#x27;==&#x27;, true));
+
+// Range + orderBy on the SAME field is still single-field.
+export const midPrice = query(collection(db, products), where(&#x27;priceCents&#x27;, &#x27;&gt;&#x27;, 1000), orderBy(&#x27;priceCents&#x27;));
+// array-contains + orderBy → uses the declared composite [&#x27;tags contains&#x27;, &#x27;priceCents asc&#x27;].
+export const tagged = query(collection(db, products), where(&#x27;tags&#x27;, &#x27;array-contains&#x27;, &#x27;new&#x27;), orderBy(&#x27;priceCents&#x27;));
+
+// Composite: equality + orderBy on another field → needs the declared index [&#x27;category&#x27;, &#x27;priceCents asc&#x27;].
+export async function cheapShoes() {
+  const q = query(collection(db, products), where(&#x27;category&#x27;, &#x27;==&#x27;, &#x27;shoes&#x27;), orderBy(&#x27;priceCents&#x27;, &#x27;asc&#x27;), limit(20));
+  const snap = await getDocs(q);
+  return snap.docs.map((d) =&gt; d.data().name);          // d.data() is { name: string; priceCents: number; … }
+}
+
+export function watchMyOrders(uid: string, cb: (n: number) =&gt; void) {
+  // &#x27;users/{uid}/orders&#x27; → collection(db, orders, uid). Uses the declared composite [&#x27;status&#x27;, &#x27;createdAt desc&#x27;].
+  return onSnapshot(query(collection(db, orders, uid), where(&#x27;status&#x27;, &#x27;==&#x27;, &#x27;pending&#x27;), orderBy(&#x27;createdAt&#x27;, &#x27;desc&#x27;)), (s) =&gt; cb(s.size));
+}
+
+export async function placeOrder(uid: string) {
+  await signInWithEmailAndPassword(auth, &#x27;a@b.c&#x27;, &#x27;pw&#x27;);
+  await addDoc(collection(db, orders, uid), { status: &#x27;pending&#x27;, items: [], totalCents: 1200, createdAt: serverTimestamp() });
+}
+
+export const cancelOrder = httpsCallable&lt;{ orderId: string }, { ok: true }&gt;(functions, &#x27;cancelOrder&#x27;);
+
+// ── What the types refuse (each line is a compile error; tsc proves it via @ts-expect-error) ──
+export function refused(uid: string) {
+  // @ts-expect-error  category + stock needs a composite index that is not declared
+  getDocs(query(collection(db, products), where(&#x27;category&#x27;, &#x27;==&#x27;, &#x27;shoes&#x27;), orderBy(&#x27;stock&#x27;)));
+  // @ts-expect-error  status + totalCents needs a composite index that is not declared
+  getDocs(query(collection(db, orders, uid), where(&#x27;status&#x27;, &#x27;==&#x27;, &#x27;paid&#x27;), orderBy(&#x27;totalCents&#x27;)));
+  // @ts-expect-error  &#x27;socks&#x27; is not a valid category value
+  query(collection(db, products), where(&#x27;category&#x27;, &#x27;==&#x27;, &#x27;socks&#x27;));
+  // @ts-expect-error  &#x27;colour&#x27; is not a field of products
+  query(collection(db, products), where(&#x27;colour&#x27;, &#x27;==&#x27;, &#x27;red&#x27;));
+  // @ts-expect-error  subcollection needs its {uid} path parameter
+  collection(db, orders);
+  // @ts-expect-error  missing required fields (items, totalCents, createdAt)
+  addDoc(collection(db, orders, uid), { status: &#x27;pending&#x27; });
+  // @ts-expect-error  tags is string[] → array-contains takes one string, not a number
+  query(collection(db, products), where(&#x27;tags&#x27;, &#x27;array-contains&#x27;, 3));
+}
+</pre>
+<h3>What tsc reports for the refused lines (markers removed)</h3>
+<pre>src/pages/shop.ts(42,11): error TS2345: Argument of type &#x27;MissingCompositeIndex&lt;&quot;category&quot; | &quot;stock&quot;&gt;&#x27; is not assignable to parameter of type &#x27;Query&lt;unknown, unknown&gt; | CollectionReference&lt;unknown, unknown&gt;&#x27;.
+src/pages/shop.ts(44,11): error TS2345: Argument of type &#x27;MissingCompositeIndex&lt;&quot;status&quot; | &quot;totalCents&quot;&gt;&#x27; is not assignable to parameter of type &#x27;Query&lt;unknown, unknown&gt; | CollectionReference&lt;unknown, unknown&gt;&#x27;.
+src/pages/shop.ts(46,59): error TS2345: Argument of type &#x27;&quot;socks&quot;&#x27; is not assignable to parameter of type &#x27;&quot;shoes&quot; | &quot;shirts&quot; | &quot;bags&quot;&#x27;.
+src/pages/shop.ts(48,41): error TS2345: Argument of type &#x27;&quot;colour&quot;&#x27; is not assignable to parameter of type &#x27;&quot;name&quot; | &quot;priceCents&quot; | &quot;category&quot; | &quot;tags&quot; | &quot;stock&quot; | &quot;active&quot;&#x27;.
+src/pages/shop.ts(50,3): error TS2554: Expected 3 arguments, but got 2.
+src/pages/shop.ts(52,39): error TS2345: Argument of type &#x27;{ status: &quot;pending&quot;; }&#x27; is not assignable to parameter of type &#x27;{ status: &quot;pending&quot; | &quot;paid&quot; | &quot;shipped&quot; | &quot;cancelled&quot;; items: { product: DocumentReference&lt;{ name: string; …
+src/pages/shop.ts(54,67): error TS2345: Argument of type &#x27;number&#x27; is not assignable to parameter of type &#x27;string&#x27;.</pre>
+<ul>
+  <li><span class="req">TYP-1</span> Field names autocomplete in <code>where</code>/<code>orderBy</code>/<code>updateDoc</code>; values are checked against field types and enums.</li>
+  <li><span class="req">TYP-2</span> Callables: <code>httpsCallable</code> knows request/response types from the function's declared schema.</li>
+  <li><span class="req">TYP-3</span> Triggers (<code>onDocumentCreated(orders, …)</code>) give typed <code>event.data</code> and typed path params.</li>
+  <li><span class="req">TYP-4</span> <code>initializeApp(config, env)</code> only accepts environment names from the config.</li>
+</ul>
+
+<h2 id="services">10. Services & requirements</h2>
+<p>Inventory taken from the real SDK typings (firebase 13.1.0 · firebase-admin 14.5.0 · firebase-functions 7.4.0 · @google-cloud/firestore 9.4.0). Full per-API list with docs and a phase-1 picker is in <code>icebase-services-apis.html</code> (posted earlier on this ticket).</p>
+<table>
+<tr><th>Service</th><th class="n">APIs</th><th class="n">Console screens</th><th>IceBase behaviour</th><th>Suggested phase</th></tr>
+<tr><td><a href="#svc-app" style="color:var(--ink)">App (core)</a></td><td class="n">15</td><td class="n">3</td><td>initializeApp(config, env) takes the IceBase config instead of a raw Firebase config</td><td><span class="pill p1">Phase 1 (suggested)</span></td></tr>
+<tr><td><a href="#svc-firestore" style="color:var(--ink)">Cloud Firestore</a></td><td class="n">280</td><td class="n">7</td><td>Every collection is declared with a schema (fields + types); reads return typed docs, writes are type-checked and validated at runtime before they leave</td><td><span class="pill p1">Phase 1 (suggested)</span></td></tr>
+<tr><td><a href="#svc-firestore-pipelines" style="color:var(--ink)">Firestore Pipelines (Enterprise edition)</a></td><td class="n">305</td><td class="n">1</td><td>Out of the index model: pipelines can scan without indexes. Suggest: not in phase 1; later only typed pass-through on firebase mode</td><td><span class="pill p4">pass-through only</span></td></tr>
+<tr><td><a href="#svc-database" style="color:var(--ink)">Realtime Database</a></td><td class="n">69</td><td class="n">5</td><td>Paths declared as templates with types, e.g. rooms/{roomId}/messages/{msgId}: { text: string, at: number }</td><td><span class="pill p4">Phase 4+</span></td></tr>
+<tr><td><a href="#svc-auth" style="color:var(--ink)">Authentication</a></td><td class="n">152</td><td class="n">6</td><td>Same API; custom claims can be typed in the schema (e.g. role: &quot;admin&quot; | &quot;member&quot;) so request.auth.token is typed in rules and functions</td><td><span class="pill p1">Phase 1 (suggested)</span></td></tr>
+<tr><td><a href="#svc-storage" style="color:var(--ink)">Cloud Storage</a></td><td class="n">22</td><td class="n">4</td><td>Optional path schema: allowed content types and max size per path template, checked before upload and in rules</td><td><span class="pill p1">Phase 1 (suggested)</span></td></tr>
+<tr><td><a href="#svc-functions" style="color:var(--ink)">Cloud Functions</a></td><td class="n">16</td><td class="n">5</td><td>Callables declare input and output schemas (validated on both ends, typed on the client: httpsCallable(fns, api.cancelOrder) knows its types)</td><td><span class="pill p1">Phase 1 (suggested)</span></td></tr>
+<tr><td><a href="#svc-hosting" style="color:var(--ink)">Hosting</a></td><td class="n">11</td><td class="n">4</td><td>hosting block in icebase.config.ts mirrors firebase.json hosting</td><td><span class="pill p1">Phase 1 (suggested)</span></td></tr>
+<tr><td><a href="#svc-remote-config" style="color:var(--ink)">Remote Config</a></td><td class="n">26</td><td class="n">3</td><td>Parameters declared in schema with types and defaults, so getValue is typed</td><td><span class="pill p4">Phase 4+</span></td></tr>
+<tr><td><a href="#svc-messaging" style="color:var(--ink)">Cloud Messaging (FCM)</a></td><td class="n">18</td><td class="n">3</td><td>Typed data payloads per message type (optional)</td><td><span class="pill p4">Phase 4+</span></td></tr>
+<tr><td><a href="#svc-analytics" style="color:var(--ink)">Analytics</a></td><td class="n">12</td><td class="n">3</td><td>Event names and params can be declared for typed logEvent</td><td><span class="pill p4">Phase 4+</span></td></tr>
+<tr><td><a href="#svc-app-check" style="color:var(--ink)">App Check</a></td><td class="n">8</td><td class="n">3</td><td>Pass-through in firebase mode; vm mode verifies tokens</td><td><span class="pill p4">Phase 4+</span></td></tr>
+<tr><td><a href="#svc-installations" style="color:var(--ink)">Installations</a></td><td class="n">7</td><td class="n">0</td><td>Pass-through</td><td><span class="pill p4">Phase 4+</span></td></tr>
+<tr><td><a href="#svc-performance" style="color:var(--ink)">Performance Monitoring</a></td><td class="n">3</td><td class="n">1</td><td>Pass-through in firebase mode</td><td><span class="pill p4">Phase 4+</span></td></tr>
+<tr><td><a href="#svc-data-connect" style="color:var(--ink)">Data Connect</a></td><td class="n">24</td><td class="n">0</td><td>Pass-through only; out of IceBase’s document model</td><td><span class="pill p4">pass-through only</span></td></tr>
+<tr><td><a href="#svc-ai" style="color:var(--ink)">AI Logic (firebase/ai)</a></td><td class="n">33</td><td class="n">0</td><td>Pass-through in firebase mode only</td><td><span class="pill p4">pass-through only</span></td></tr>
+<tr><td><a href="#svc-security-rules" style="color:var(--ink)">Security Rules (management)</a></td><td class="n">12</td><td class="n">1</td><td>Rules files are part of every IceBase project; this admin API is optional</td><td><span class="pill p4">Phase 4+</span></td></tr>
+<tr><td><a href="#svc-eventarc" style="color:var(--ink)">Eventarc (custom events)</a></td><td class="n">4</td><td class="n">1</td><td>Typed event payloads (optional)</td><td><span class="pill p4">Phase 4+</span></td></tr>
+<tr><td><a href="#svc-extensions" style="color:var(--ink)">Extensions</a></td><td class="n">4</td><td class="n">0</td><td>Firebase mode only</td><td><span class="pill p4">pass-through only</span></td></tr>
+<tr><td><a href="#svc-project-management" style="color:var(--ink)">Project Management</a></td><td class="n">19</td><td class="n">1</td><td>Firebase mode only</td><td><span class="pill p4">pass-through only</span></td></tr>
+<tr><td><a href="#svc-machine-learning" style="color:var(--ink)">Machine Learning (model hosting)</a></td><td class="n">10</td><td class="n">0</td><td>Firebase mode only</td><td><span class="pill p4">pass-through only</span></td></tr>
+<tr><td><a href="#svc-phone-number-verification" style="color:var(--ink)">Phone Number Verification</a></td><td class="n">2</td><td class="n">0</td><td>Firebase mode only</td><td><span class="pill p4">pass-through only</span></td></tr>
+<tr><td><a href="#svc-devops-triggers" style="color:var(--ink)">Alerts &amp; Test Lab triggers</a></td><td class="n">2</td><td class="n">0</td><td>Firebase mode only</td><td><span class="pill p4">pass-through only</span></td></tr>
+</table>
+<p class="mut">APIs = exported functions + public class methods (+ config features for Hosting). Total 1,054 APIs across 23 services.</p>
+<details id="svc-app"><summary>App (core) — 15 APIs · 3 console screens · <span class="pill p1">Phase 1 (suggested)</span></summary>
+<p>Creates the app instance every other service hangs off. Picks the mode (firebase / emulator / vm) per service from icebase.config.ts.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">APP-1</span> initializeApp(config, env) takes the IceBase config instead of a raw Firebase config</li><li><span class="req">APP-2</span> initializeServerApp (SSR) supported in all modes</li><li><span class="req">APP-3</span> setLogLevel / onLog unified across modes</li></ul></div><div><h3>Console screens</h3><ul><li>Project overview: environments, mode per service, health of each service</li><li>Environment switcher (local / staging / prod) shared by every console page</li><li>Config viewer: resolved icebase.config.ts, secrets shown as env-var names only</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>Lifecycle</td><td class="n">5</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">deleteApp, getApp, getApps, initializeApp, initializeServerApp</td></tr><tr><td>Logging &amp; meta</td><td class="n">5</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">FirebaseError, SDK_VERSION, onLog, registerVersion, setLogLevel</td></tr><tr><td>Server · firebase-admin app</td><td class="n">10</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">AppErrorCode, FirebaseAppError, SDK_VERSION, applicationDefault, cert, deleteApp, getApp, getApps, initializeApp, refreshToken</td></tr></table></details>
+<details id="svc-firestore"><summary>Cloud Firestore — 280 APIs · 7 console screens · <span class="pill p1">Phase 1 (suggested)</span></summary>
+<p>Document database. The heart of IceBase: schema-based, composite-index-checked, Firebase rules.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">FIREST-1</span> Every collection is declared with a schema (fields + types); reads return typed docs, writes are type-checked and validated at runtime before they leave</li><li><span class="req">FIREST-2</span> Single-field queries are allowed on any schema field (Firebase auto-indexes single fields). Queries that need a composite index are only allowed when that composite index is declared</li><li><span class="req">FIREST-3</span> Composite needed when: equality + range/orderBy on another field · orderBy on 2+ fields · array-contains + range/orderBy · range on 2+ fields · same for collection-group queries</li><li><span class="req">FIREST-4</span> Optional per-field &quot;noIndex&quot; (Firebase single-field exemption) for large fields you never query</li><li><span class="req">FIREST-5</span> firestore.rules in Firebase syntax; IceBase lints rules for field names that are not in the schema</li><li><span class="req">FIREST-6</span> Generates firestore.indexes.json from the schema; never edited by hand</li></ul></div><div><h3>Console screens</h3><ul><li>Data browser: collection tree incl. subcollections, typed document editor (form from schema, raw JSON toggle), add/duplicate/delete, bulk delete by query</li><li>Query runner: only offers filters/orders that the declared indexes allow; shows which index serves the query</li><li>Schema page: fields, types, required/optional, docs count per collection, fields seen in data but missing from schema</li><li>Indexes page: declared composite indexes, build status (firebase) or SQL index (emulator/vm), missing-index errors captured at runtime with a one-click &quot;add to schema&quot;</li><li>Rules page: editor + playground (simulate get/list/create/update/delete as a chosen user), lint against schema</li><li>Usage: reads / writes / deletes per collection per day (feeds the cost view)</li><li>Import / export: JSON or NDJSON per collection, copy collection between environments</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>Setup &amp; connection</td><td class="n">9</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">connectFirestoreEmulator, disableNetwork, enableNetwork, getFirestore, initializeFirestore, onSnapshotsInSync, setLogLevel, terminate, waitForPendingWrites</td></tr><tr><td>References</td><td class="n">8</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">CollectionReference, DocumentReference, FieldPath, collection, collectionGroup, doc, documentId, refEqual</td></tr><tr><td>Reads</td><td class="n">13</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">DocumentSnapshot, QueryDocumentSnapshot, QuerySnapshot, SnapshotMetadata, documentSnapshotFromJSON, getDoc, getDocFromCache, getDocFromServer, getDocs, getDocsFromCache, getDocsFromServer, querySnapshotFromJSON, snapshotEqual</td></tr><tr><td>Writes</td><td class="n">4</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">addDoc, deleteDoc, setDoc, updateDoc</td></tr><tr><td>Queries (index-checked)</td><td class="n">20</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">Query, QueryCompositeFilterConstraint, QueryConstraint, QueryEndAtConstraint, QueryFieldFilterConstraint, QueryLimitConstraint, QueryOrderByConstraint, QueryStartAtConstraint, and, endAt, endBefore, limit, limitToLast, or, orderBy, query, queryEqual, startAfter, startAt, where</td></tr><tr><td>Aggregations</td><td class="n">11</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">AggregateField, AggregateQuerySnapshot, aggregateFieldEqual, aggregateQuerySnapshotEqual, average, count, getAggregateFromServer, getCountFromServer, maximum, minimum, sum</td></tr><tr><td>Realtime listeners</td><td class="n">2</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">onSnapshot, onSnapshotResume</td></tr><tr><td>Transactions &amp; batches</td><td class="n">4</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">Transaction, WriteBatch, runTransaction, writeBatch</td></tr><tr><td>Field values</td><td class="n">6</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">FieldValue, arrayRemove, arrayUnion, deleteField, increment, serverTimestamp</td></tr><tr><td>Offline cache</td><td class="n">16</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">CACHE_SIZE_UNLIMITED, PersistentCacheIndexManager, clearIndexedDbPersistence, deleteAllPersistentCacheIndexes, disablePersistentCacheIndexAutoCreation, enableIndexedDbPersistence, enableMultiTabIndexedDbPersistence, enablePersistentCacheIndexAutoCreation, getPersistentCacheIndexManager, memoryEagerGarbageCollector, memoryLocalCache, memoryLruGarbageCollector, persistentLocalCache, persistentMultipleTabManager, persistentSingleTabManager, setIndexConfiguration</td></tr><tr><td>Bundles</td><td class="n">3</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">LoadBundleTask, loadBundle, namedQuery</td></tr><tr><td>Vector search</td><td class="n">2</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">VectorValue, vector</td></tr><tr><td>Value types</td><td class="n">10</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">BsonObjectId, BsonTimestamp, Bytes, Decimal128Value, GeoPoint, Int32Value, MaxKey, MinKey, RegexValue, Timestamp</td></tr><tr><td>Errors &amp; misc</td><td class="n">4</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">EmulatorMockTokenOptions, Firestore, FirestoreError, LogLevel</td></tr><tr><td>Server · firebase-admin firestore</td><td class="n">33</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">AggregateQuery, AggregateQuerySnapshot, BsonObjectId, BsonTimestamp, BulkWriter, BulkWriterError, BundleBuilder, Bytes, CollectionGroup, CollectionReference, Decimal128Value, DocumentReference, DocumentSnapshot, FieldPath, FieldValue, Filter, Firestore, GeoPoint, Int32Value, MaxKey, MinKey, Query, QueryDocumentSnapshot, QueryPartition, QuerySnapshot, RegexValue, Timestamp, Transaction, VectorQuery, VectorQuerySnapshot, VectorValue, WriteBatch, WriteResult</td></tr><tr><td>Server · functions/v2 firestore</td><td class="n">11</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">Change, onChangedOperation, onDocumentCreated, onDocumentCreatedWithAuthContext, onDocumentDeleted, onDocumentDeletedWithAuthContext, onDocumentUpdated, onDocumentUpdatedWithAuthContext, onDocumentWritten, onDocumentWrittenWithAuthContext, onOperation</td></tr></table></details>
+<details id="svc-firestore-pipelines"><summary>Firestore Pipelines (Enterprise edition) — 305 APIs · 1 console screen · <span class="pill p4">pass-through only</span></summary>
+<p>New pipeline query language for Firestore Enterprise edition (stages + expressions). Separate entry point firebase/firestore/pipelines.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">FIREST-1</span> Out of the index model: pipelines can scan without indexes. Suggest: not in phase 1; later only typed pass-through on firebase mode</li></ul></div><div><h3>Console screens</h3><ul><li>Pipeline runner (later)</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>Stages &amp; expressions</td><td class="n">156</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">AggregateFunction, AliasedAggregate, AliasedExpression, BooleanExpression, Expression, Field, FunctionExpression, Ordering, Pipeline, PipelineResult, PipelineSnapshot, PipelineSource, abs, add, and, array, arrayAgg, arrayAggDistinct, arrayConcat, arrayContains, arrayContainsAll, arrayContainsAny, arrayFilter, arrayFirst, arrayFirstN, arrayGet, arrayIndexOf, arrayIndexOfAll, arrayLast, arrayLastIndexOf, arrayLastN, arrayLength, arrayMaximum, arrayMaximumN, arrayMinimum, arrayMinimumN, arraySlice, arraySum, arrayTransform, arrayTransformWithIndex …</td></tr></table></details>
+<details id="svc-database"><summary>Realtime Database — 69 APIs · 5 console screens · <span class="pill p4">Phase 4+</span></summary>
+<p>JSON tree database with live sync. Schema = typed path templates; indexes = .indexOn per path.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">DATABA-1</span> Paths declared as templates with types, e.g. rooms/{roomId}/messages/{msgId}: { text: string, at: number }</li><li><span class="req">DATABA-2</span> orderByChild(x) only allowed when x is declared in indexOn for that path (Firebase otherwise downloads the whole node and warns)</li><li><span class="req">DATABA-3</span> database.rules.json in Firebase syntax; .indexOn generated from the schema</li></ul></div><div><h3>Console screens</h3><ul><li>Tree browser with live updates, inline edit typed by path schema</li><li>Rules editor + simulator</li><li>indexOn list per path</li><li>Presence view (onDisconnect hooks)</li><li>Import / export JSON</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>Setup &amp; connection</td><td class="n">8</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">Database, connectDatabaseEmulator, enableLogging, forceLongPolling, forceWebSockets, getDatabase, goOffline, goOnline</td></tr><tr><td>References</td><td class="n">4</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">child, push, ref, refFromURL</td></tr><tr><td>Reads</td><td class="n">2</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">DataSnapshot, get</td></tr><tr><td>Writes</td><td class="n">7</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">increment, remove, serverTimestamp, set, setPriority, setWithPriority, update</td></tr><tr><td>Queries (indexOn-checked)</td><td class="n">13</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">QueryConstraint, endAt, endBefore, equalTo, limitToFirst, limitToLast, orderByChild, orderByKey, orderByPriority, orderByValue, query, startAfter, startAt</td></tr><tr><td>Realtime listeners</td><td class="n">6</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">off, onChildAdded, onChildChanged, onChildMoved, onChildRemoved, onValue</td></tr><tr><td>Transactions</td><td class="n">2</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">TransactionResult, runTransaction</td></tr><tr><td>Presence</td><td class="n">2</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">OnDisconnect, onDisconnect</td></tr><tr><td>Misc</td><td class="n">1</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">EmulatorMockTokenOptions</td></tr><tr><td>Server · firebase-admin database</td><td class="n">12</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">DataSnapshot, DatabaseErrorCode, EventType, FirebaseDatabaseError, OnDisconnect, Query, Reference, ServerValue, ThenableReference, enableLogging, getDatabase, getDatabaseWithUrl</td></tr><tr><td>Server · functions/v2 database</td><td class="n">5</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">DataSnapshot, onValueCreated, onValueDeleted, onValueUpdated, onValueWritten</td></tr></table></details>
+<details id="svc-auth"><summary>Authentication — 152 APIs · 6 console screens · <span class="pill p1">Phase 1 (suggested)</span></summary>
+<p>Users, sign-in providers, tokens, custom claims, MFA.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">AUTH-1</span> Same API; custom claims can be typed in the schema (e.g. role: &quot;admin&quot; | &quot;member&quot;) so request.auth.token is typed in rules and functions</li><li><span class="req">AUTH-2</span> Blocking functions (beforeUserCreated / beforeUserSignedIn) typed</li></ul></div><div><h3>Console screens</h3><ul><li>Users table: search, filter by provider, disable/enable, delete, reset password, set custom claims (typed form)</li><li>Providers page: enable email/password, anonymous, Google, GitHub, Apple, Microsoft, phone, OIDC/SAML</li><li>Templates: verification / reset / sign-in-link emails</li><li>Authorized domains</li><li>Sessions &amp; token revocation</li><li>Import / export users (with password hashes)</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>Setup &amp; persistence</td><td class="n">13</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">browserCookiePersistence, browserLocalPersistence, browserPopupRedirectResolver, browserSessionPersistence, connectAuthEmulator, getAuth, inMemoryPersistence, indexedDBLocalPersistence, initializeAuth, initializeRecaptchaConfig, setPersistence, updateCurrentUser, useDeviceLanguage</td></tr><tr><td>Session state</td><td class="n">4</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">beforeAuthStateChanged, onAuthStateChanged, onIdTokenChanged, signOut</td></tr><tr><td>Sign-in</td><td class="n">13</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">createUserWithEmailAndPassword, fetchSignInMethodsForEmail, getAdditionalUserInfo, getRedirectResult, isSignInWithEmailLink, signInAnonymously, signInWithCredential, signInWithCustomToken, signInWithEmailAndPassword, signInWithEmailLink, signInWithPhoneNumber, signInWithPopup, signInWithRedirect</td></tr><tr><td>Linking &amp; re-auth</td><td class="n">9</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">linkWithCredential, linkWithPhoneNumber, linkWithPopup, linkWithRedirect, reauthenticateWithCredential, reauthenticateWithPhoneNumber, reauthenticateWithPopup, reauthenticateWithRedirect, unlink</td></tr><tr><td>User management</td><td class="n">11</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">deleteUser, getIdToken, getIdTokenResult, reload, revokeAccessToken, sendEmailVerification, updateEmail, updatePassword, updatePhoneNumber, updateProfile, verifyBeforeUpdateEmail</td></tr><tr><td>Email actions &amp; passwords</td><td class="n">10</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">ActionCodeOperation, ActionCodeURL, applyActionCode, checkActionCode, confirmPasswordReset, parseActionCodeURL, sendPasswordResetEmail, sendSignInLinkToEmail, validatePassword, verifyPasswordResetCode</td></tr><tr><td>Multi-factor</td><td class="n">5</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">PhoneMultiFactorGenerator, TotpMultiFactorGenerator, TotpSecret, getMultiFactorResolver, multiFactor</td></tr><tr><td>Providers &amp; credentials</td><td class="n">13</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">AuthCredential, EmailAuthCredential, EmailAuthProvider, FacebookAuthProvider, GithubAuthProvider, GoogleAuthProvider, OAuthCredential, OAuthProvider, PhoneAuthCredential, PhoneAuthProvider, RecaptchaVerifier, SAMLAuthProvider, TwitterAuthProvider</td></tr><tr><td>Constants &amp; errors</td><td class="n">11</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">AuthErrorCodes, CompleteFn, ErrorFn, FactorId, NextFn, OperationType, ProviderId, SignInMethod, Unsubscribe, debugErrorMap, prodErrorMap</td></tr><tr><td>Server · firebase-admin auth</td><td class="n">16</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">Auth, AuthErrorCode, BaseAuth, FirebaseAuthError, MultiFactorInfo, MultiFactorSettings, PhoneMultiFactorInfo, ProjectConfig, ProjectConfigManager, Tenant, TenantAwareAuth, TenantManager, UserInfo, UserMetadata, UserRecord, getAuth</td></tr><tr><td>Server · functions/v2 identity</td><td class="n">10</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">HttpsError, IS_NOT_TENANT, beforeEmailSent, beforeOperation, beforeSmsSent, beforeUserCreated, beforeUserSignedIn, getOpts, onUserCreated, onUserDeleted</td></tr></table></details>
+<details id="svc-storage"><summary>Cloud Storage — 22 APIs · 4 console screens · <span class="pill p1">Phase 1 (suggested)</span></summary>
+<p>File uploads/downloads with storage.rules.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">STORAG-1</span> Optional path schema: allowed content types and max size per path template, checked before upload and in rules</li><li><span class="req">STORAG-2</span> storage.rules in Firebase syntax; firestore.get() in rules keeps working when Firestore runs on Firebase</li></ul></div><div><h3>Console screens</h3><ul><li>File browser per bucket: folders, upload (drag &amp; drop), preview images/video/PDF, download, delete, copy URL</li><li>Metadata editor (content type, cache control, custom metadata)</li><li>Rules editor + simulator</li><li>Usage: bytes stored, bytes out</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>Setup</td><td class="n">2</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">connectStorageEmulator, getStorage</td></tr><tr><td>References</td><td class="n">1</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">ref</td></tr><tr><td>Upload</td><td class="n">3</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">uploadBytes, uploadBytesResumable, uploadString</td></tr><tr><td>Download</td><td class="n">4</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">getBlob, getBytes, getDownloadURL, getStream</td></tr><tr><td>Metadata</td><td class="n">2</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">getMetadata, updateMetadata</td></tr><tr><td>List &amp; delete</td><td class="n">3</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">deleteObject, list, listAll</td></tr><tr><td>Errors</td><td class="n">3</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">EmulatorMockTokenOptions, StorageError, StorageErrorCode</td></tr><tr><td>Server · firebase-admin storage</td><td class="n">5</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">FirebaseStorageError, Storage, StorageErrorCode, getDownloadURL, getStorage</td></tr><tr><td>Server · functions/v2 storage</td><td class="n">4</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">onObjectArchived, onObjectDeleted, onObjectFinalized, onObjectMetadataUpdated</td></tr></table></details>
+<details id="svc-functions"><summary>Cloud Functions — 16 APIs · 5 console screens · <span class="pill p1">Phase 1 (suggested)</span></summary>
+<p>Callable/HTTP functions and background triggers. Same source deploys to Cloud Functions or the IceBase server.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">FUNCTI-1</span> Callables declare input and output schemas (validated on both ends, typed on the client: httpsCallable(fns, api.cancelOrder) knows its types)</li><li><span class="req">FUNCTI-2</span> Document/storage/auth triggers take the schema collection, so event data is typed</li><li><span class="req">FUNCTI-3</span> Secrets and params read from env-var names in config</li></ul></div><div><h3>Console screens</h3><ul><li>Functions list: name, trigger, region/mode, last deploy, error rate</li><li>Logs: live tail, filter by function / severity / request id</li><li>Invoke panel: call a callable with a typed form, see response</li><li>Scheduled jobs: next run, last result, run now</li><li>Task queues: depth, retries, dead letters</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>Client setup</td><td class="n">2</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">connectFunctionsEmulator, getFunctions</td></tr><tr><td>Client calls</td><td class="n">3</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">FunctionsError, httpsCallable, httpsCallableFromURL</td></tr><tr><td>Server · firebase-admin functions</td><td class="n">5</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">FirebaseFunctionsError, Functions, FunctionsErrorCode, TaskQueue, getFunctions</td></tr><tr><td>Server · functions/v2 https</td><td class="n">7</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">HttpsError, Response, hasClaim, isSignedIn, onCall, onCallGenkit, onRequest</td></tr><tr><td>Server · functions/v2 pubsub</td><td class="n">2</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">Message, onMessagePublished</td></tr><tr><td>Server · functions/v2 scheduler</td><td class="n">1</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">onSchedule</td></tr><tr><td>Server · functions/v2 tasks</td><td class="n">1</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">onTaskDispatched</td></tr></table></details>
+<details id="svc-hosting"><summary>Hosting — 11 APIs · 4 console screens · <span class="pill p1">Phase 1 (suggested)</span></summary>
+<p>No SDK: configured in icebase.config.ts and deployed by the CLI.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">HOSTIN-1</span> hosting block in icebase.config.ts mirrors firebase.json hosting</li><li><span class="req">HOSTIN-2</span> Limit: Firebase Hosting cannot rewrite to functions running on the VM</li></ul></div><div><h3>Console screens</h3><ul><li>Releases list with rollback</li><li>Preview channels</li><li>Domains &amp; certificates</li><li>Request log (vm/emulator)</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>Deploy</td><td class="n">1</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">Static files from public dir</td></tr><tr><td>Domains</td><td class="n">2</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">Custom domains + TLS, Multiple sites per project</td></tr><tr><td>Releases</td><td class="n">2</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">Preview channels (per-PR URLs, expiry), Release history + rollback</td></tr><tr><td>Routing</td><td class="n">6</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">Custom headers (cache-control, CSP …), Redirects (301/302, regex/glob), Rewrites to functions, Rewrites to paths (SPA), cleanUrls / trailingSlash, i18n rewrites</td></tr></table></details>
+<details id="svc-remote-config"><summary>Remote Config — 26 APIs · 3 console screens · <span class="pill p4">Phase 4+</span></summary>
+<p>Server-controlled app parameters with conditions.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">REMOTE-1</span> Parameters declared in schema with types and defaults, so getValue is typed</li></ul></div><div><h3>Console screens</h3><ul><li>Parameters table with conditions</li><li>Publish with version history and rollback</li><li>Condition builder</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>API</td><td class="n">14</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">activate, ensureInitialized, fetchAndActivate, fetchConfig, getAll, getBoolean, getNumber, getRemoteConfig, getString, getValue, isSupported, onConfigUpdate, setCustomSignals, setLogLevel</td></tr><tr><td>Server · firebase-admin remote-config</td><td class="n">7</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">CustomSignalOperator, FirebaseRemoteConfigError, PercentConditionOperator, RemoteConfig, RemoteConfigErrorCode, RemoteConfigFetchResponse, getRemoteConfig</td></tr><tr><td>Server · functions/v2 remoteConfig</td><td class="n">1</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">onConfigUpdated</td></tr></table></details>
+<details id="svc-messaging"><summary>Cloud Messaging (FCM) — 18 APIs · 3 console screens · <span class="pill p4">Phase 4+</span></summary>
+<p>Push notifications. Delivery always goes through Google/Apple push services.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">MESSAG-1</span> Typed data payloads per message type (optional)</li></ul></div><div><h3>Console screens</h3><ul><li>Compose &amp; send (token / topic / user)</li><li>Topics and subscribers</li><li>Delivery log</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>API</td><td class="n">12</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">NextFn, Observer, Unsubscribe, deleteToken, getMessaging, getToken, isSupported, onMessage, onRegistered, onUnregistered, register, unregister</td></tr><tr><td>Server · firebase-admin messaging</td><td class="n">4</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">FirebaseMessagingError, Messaging, MessagingErrorCode, getMessaging</td></tr></table></details>
+<details id="svc-analytics"><summary>Analytics — 12 APIs · 3 console screens · <span class="pill p4">Phase 4+</span></summary>
+<p>Event logging (GA4 in firebase mode).</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">ANALYT-1</span> Event names and params can be declared for typed logEvent</li></ul></div><div><h3>Console screens</h3><ul><li>Events stream (emulator/vm)</li><li>DAU / MAU / retention (vm)</li><li>Link to GA4 (firebase mode)</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>API</td><td class="n">12</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">getAnalytics, getGoogleAnalyticsClientId, initializeAnalytics, isSupported, logEvent, setAnalyticsCollectionEnabled, setConsent, setCurrentScreen, setDefaultEventParameters, setUserId, setUserProperties, settings</td></tr></table></details>
+<details id="svc-app-check"><summary>App Check — 8 APIs · 3 console screens · <span class="pill p4">Phase 4+</span></summary>
+<p>Attests requests come from your real app.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">APPCHE-1</span> Pass-through in firebase mode; vm mode verifies tokens</li></ul></div><div><h3>Console screens</h3><ul><li>Enforcement per service</li><li>Debug tokens</li><li>Verified vs unverified request chart</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>API</td><td class="n">10</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">CustomProvider, PartialObserver, ReCaptchaEnterpriseProvider, ReCaptchaV3Provider, Unsubscribe, getLimitedUseToken, getToken, initializeAppCheck, onTokenChanged, setTokenAutoRefreshEnabled</td></tr><tr><td>Server · firebase-admin app-check</td><td class="n">4</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">AppCheck, AppCheckErrorCode, FirebaseAppCheckError, getAppCheck</td></tr></table></details>
+<details id="svc-installations"><summary>Installations — 7 APIs · no console screens · <span class="pill p4">Phase 4+</span></summary>
+<p>Per-install IDs used by FCM, Remote Config, Analytics.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">INSTAL-1</span> Pass-through</li></ul></div><div><h3>Console screens</h3><ul><li>(none; shown inside Messaging / Remote Config)</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>API</td><td class="n">5</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">deleteInstallations, getId, getInstallations, getToken, onIdChange</td></tr><tr><td>Server · firebase-admin installations</td><td class="n">4</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">FirebaseInstallationsError, Installations, InstallationsErrorCode, getInstallations</td></tr></table></details>
+<details id="svc-performance"><summary>Performance Monitoring — 3 APIs · 1 console screen · <span class="pill p4">Phase 4+</span></summary>
+<p>Traces and web vitals.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">PERFOR-1</span> Pass-through in firebase mode</li></ul></div><div><h3>Console screens</h3><ul><li>Traces list (later)</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>API</td><td class="n">3</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">getPerformance, initializePerformance, trace</td></tr></table></details>
+<details id="svc-data-connect"><summary>Data Connect — 24 APIs · no console screens · <span class="pill p4">pass-through only</span></summary>
+<p>Firebase-managed Postgres with GraphQL schema. Overlaps with IceBase VM mode.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">DATACO-1</span> Pass-through only; out of IceBase’s document model</li></ul></div><div><h3>Console screens</h3><ul><li>(none)</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>API</td><td class="n">21</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">CallerSdkTypeEnum, DataConnect, DataConnectError, DataConnectOperationError, MUTATION_STR, QUERY_STR, QueryFetchPolicy, SOURCE_CACHE, SOURCE_SERVER, StorageType, connectDataConnectEmulator, executeMutation, executeQuery, getDataConnect, makeMemoryCacheProvider, mutationRef, queryRef, setLogLevel, subscribe, terminate, toQueryRef</td></tr><tr><td>Server · firebase-admin data-connect</td><td class="n">4</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">DataConnect, DataConnectErrorCode, FirebaseDataConnectError, getDataConnect</td></tr><tr><td>Server · functions/v2 dataconnect</td><td class="n">1</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">onMutationExecuted</td></tr></table></details>
+<details id="svc-ai"><summary>AI Logic (firebase/ai) — 33 APIs · no console screens · <span class="pill p4">pass-through only</span></summary>
+<p>Gemini / Imagen calls from the client via Firebase.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">AI-1</span> Pass-through in firebase mode only</li></ul></div><div><h3>Console screens</h3><ul><li>(none)</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>API</td><td class="n">45</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">AIError, AIErrorCode, AIModel, AgentPlatformBackend, AnyOfSchema, ArraySchema, Backend, BackendType, BlockReason, BooleanSchema, FinishReason, FunctionCallingMode, GenerativeModel, GoogleAIBackend, HarmBlockMethod, HarmBlockThreshold, HarmCategory, HarmProbability, HarmSeverity, ImageConfigAspectRatio, ImageConfigImageSize, InferenceMode, InferenceSource, IntegerSchema, Language, LiveGenerativeModel, LiveResponseType, LiveSession, Modality, NumberSchema, ObjectSchema, Outcome, POSSIBLE_ROLES, ResponseModality, Schema, SchemaType, StringSchema, TemplateGenerativeModel, ThinkingLevel, URLRetrievalStatus …</td></tr><tr><td>Server · functions/v2 ai</td><td class="n">8</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">HttpsError, afterGenerateContent, afterGenerateEventType, beforeGenerateContent, beforeGenerateEventType, geminiV1Beta, rpcCodeMap, vertexV1Beta1</td></tr></table></details>
+<details id="svc-security-rules"><summary>Security Rules (management) — 12 APIs · 1 console screen · <span class="pill p4">Phase 4+</span></summary>
+<p>Deploy/test rules programmatically. IceBase uses rules files directly; this is the admin API around them.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">SECURI-1</span> Rules files are part of every IceBase project; this admin API is optional</li></ul></div><div><h3>Console screens</h3><ul><li>Shown inside Firestore / Storage / RTDB rules pages</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>Server · firebase-admin security-rules</td><td class="n">6</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">FirebaseSecurityRulesError, Ruleset, RulesetMetadataList, SecurityRules, SecurityRulesErrorCode, getSecurityRules</td></tr></table></details>
+<details id="svc-eventarc"><summary>Eventarc (custom events) — 4 APIs · 1 console screen · <span class="pill p4">Phase 4+</span></summary>
+<p>Publish and consume custom events between functions.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">EVENTA-1</span> Typed event payloads (optional)</li></ul></div><div><h3>Console screens</h3><ul><li>Event log</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>Server · firebase-admin eventarc</td><td class="n">5</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">Channel, Eventarc, EventarcErrorCode, FirebaseEventarcError, getEventarc</td></tr><tr><td>Server · functions/v2 eventarc</td><td class="n">1</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">onCustomEventPublished</td></tr></table></details>
+<details id="svc-extensions"><summary>Extensions — 4 APIs · no console screens · <span class="pill p4">pass-through only</span></summary>
+<p>Prebuilt Firebase extensions runtime API.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">EXTENS-1</span> Firebase mode only</li></ul></div><div><h3>Console screens</h3><ul><li>(none)</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>Server · firebase-admin extensions</td><td class="n">5</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">Extensions, ExtensionsErrorCode, FirebaseExtensionsError, Runtime, getExtensions</td></tr></table></details>
+<details id="svc-project-management"><summary>Project Management — 19 APIs · 1 console screen · <span class="pill p4">pass-through only</span></summary>
+<p>Manage Android/iOS apps in a Firebase project.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">PROJEC-1</span> Firebase mode only</li></ul></div><div><h3>Console screens</h3><ul><li>Apps list (inside Project overview)</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>Server · firebase-admin project-management</td><td class="n">8</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">AndroidApp, AppPlatform, FirebaseProjectManagementError, IosApp, ProjectManagement, ProjectManagementErrorCode, ShaCertificate, getProjectManagement</td></tr></table></details>
+<details id="svc-machine-learning"><summary>Machine Learning (model hosting) — 10 APIs · no console screens · <span class="pill p4">pass-through only</span></summary>
+<p>Upload/publish custom TFLite models.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">MACHIN-1</span> Firebase mode only</li></ul></div><div><h3>Console screens</h3><ul><li>(none)</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>Server · firebase-admin machine-learning</td><td class="n">5</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">FirebaseMachineLearningError, MachineLearning, MachineLearningErrorCode, Model, getMachineLearning</td></tr></table></details>
+<details id="svc-phone-number-verification"><summary>Phone Number Verification — 2 APIs · no console screens · <span class="pill p4">pass-through only</span></summary>
+<p>Server-side verification of phone numbers (new in admin 14).</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">PHONEN-1</span> Firebase mode only</li></ul></div><div><h3>Console screens</h3><ul><li>(none)</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>Server · firebase-admin phone-number-verification</td><td class="n">4</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">FirebasePhoneNumberVerificationError, PhoneNumberVerification, PhoneNumberVerificationErrorCode, getPhoneNumberVerification</td></tr></table></details>
+<details id="svc-devops-triggers"><summary>Alerts &amp; Test Lab triggers — 2 APIs · no console screens · <span class="pill p4">pass-through only</span></summary>
+<p>Functions triggered by Crashlytics/billing/performance alerts and Test Lab results.</p>
+<div class="grid"><div><h3>Requirements</h3><ul><li><span class="req">DEVOPS-1</span> Firebase mode only</li></ul></div><div><h3>Console screens</h3><ul><li>(none)</li></ul></div></div>
+<h3>API groups</h3><table><tr><th>Group</th><th class="n">Entries</th><th>Names</th></tr><tr><td>Server · functions/v2 alerts</td><td class="n">1</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">onAlertPublished</td></tr><tr><td>Server · functions/v2 testLab</td><td class="n">1</td><td class="mut" style="font-family:ui-monospace,Menlo,monospace;font-size:12px">onTestMatrixCompleted</td></tr></table></details>
+
+<h2 id="config">11. Configuration</h2>
+<pre>import { defineConfig } from &#x27;icebase/config&#x27;;
+import { schema } from &#x27;./icebase/schema&#x27;;
+
+export default defineConfig({
+  name: &#x27;acme-shop&#x27;,
+  schema,
+
+  // Firebase rules syntax — the same files work in every mode.
+  rules: {
+    firestore: &#x27;icebase/rules/firestore.rules&#x27;,
+    storage: &#x27;icebase/rules/storage.rules&#x27;,
+  },
+
+  functions: { source: &#x27;icebase/functions&#x27;, runtime: &#x27;nodejs22&#x27;, region: &#x27;us-central1&#x27; },
+  hosting: { public: &#x27;dist&#x27;, spa: true, rewrites: [{ source: &#x27;/api/**&#x27;, function: &#x27;api&#x27; }] },
+  auth: { providers: [&#x27;password&#x27;, &#x27;google&#x27;] },
+  storage: { maxUploadMb: 20 },
+
+  // Connection details. Secrets are env-var NAMES, never values.
+  firebase: { projectId: &#x27;acme-shop&#x27;, webConfigEnv: &#x27;FIREBASE_WEB_CONFIG&#x27;, serviceAccountEnv: &#x27;FIREBASE_SERVICE_ACCOUNT&#x27; },
+  vm: {
+    url: &#x27;https://ice.acme.com&#x27;,
+    databaseUrlEnv: &#x27;ICEBASE_DATABASE_URL&#x27;,
+    blobs: { kind: &#x27;s3&#x27;, bucket: &#x27;acme-uploads&#x27;, endpointEnv: &#x27;ICEBASE_S3_ENDPOINT&#x27; },
+  },
+  emulator: { dataDir: &#x27;.icebase&#x27;, port: 4400, seed: &#x27;icebase/seed/local.ts&#x27; },
+
+  // Pick a mode per environment, and override per service when you want to mix.
+  environments: {
+    local:   { mode: &#x27;emulator&#x27; },                                         // `icebase dev`: SQLite, no cloud
+    staging: { mode: &#x27;vm&#x27; },                                               // everything on your VM (Postgres)
+    prod:    { mode: &#x27;firebase&#x27;, services: { functions: &#x27;vm&#x27;, storage: &#x27;vm&#x27; } }, // Firestore+Auth on Firebase, functions+storage on VM
+  },
+
+  console: { port: 4000 },                                                 // same GUI for every mode
+});
+</pre>
+<ul>
+  <li><span class="req">CFG-1</span> One file, <code>icebase.config.ts</code>, typed via <code>defineConfig</code>.</li>
+  <li><span class="req">CFG-2</span> Secrets are env-var <i>names</i>; values live in <code>.env*</code> (gitignored) or the VM's secret store.</li>
+  <li><span class="req">CFG-3</span> <code>environments</code>: each has a default <code>mode</code> and optional per-service overrides.</li>
+  <li><span class="req">CFG-4</span> Rules, functions source, hosting and emulator settings are all referenced from here.</li>
+</ul>
+
+<h2 id="structure">12. Project structure</h2>
+<pre>acme-shop/
+├── icebase.config.ts            ← the one config
+├── package.json                 ← "dev": "icebase dev", "deploy:prod": "icebase deploy --env prod"
+├── .env.example                 ← names of required secrets
+├── icebase/
+│   ├── schema/                  ← one file per collection + index.ts (defineSchema)
+│   ├── rules/                   ← firestore.rules, storage.rules, database.rules.json
+│   ├── functions/               ← package.json + src/ (every export = a function)
+│   ├── seed/                    ← emulator seed scripts
+│   └── .generated/              ← (gitignored) firestore.indexes.json, SQL migrations, bundles
+├── src/                         ← frontend; src/lib/icebase.ts = initializeApp + get* services
+├── server/                      ← optional own backend using icebase/admin
+└── .icebase/                    ← (gitignored) emulator data: local.sqlite, blobs/, logs/</pre>
+
+<h2 id="cli">13. CLI</h2>
+<table>
+<tr><th>Command</th><th>Behaviour</th><th>Req</th></tr>
+<tr><td><code>icebase init</code></td><td>Create the structure above; optionally import an existing Firebase project (rules, indexes → schema draft from sampled docs)</td><td class="req">CLI-1</td></tr>
+<tr><td><code>icebase dev</code></td><td>Start emulator (all services in emulator mode), console on :4000, hot reload of schema/rules/functions, run seed on empty DB</td><td class="req">CLI-2</td></tr>
+<tr><td><code>icebase login [--env]</code></td><td>Firebase login for firebase-mode services; device-code login to the VM for vm-mode services</td><td class="req">CLI-3</td></tr>
+<tr><td><code>icebase deploy --env X [--only …]</code></td><td>Per service: firebase-tools for firebase mode, VM API for vm mode; applies index/table migrations; refuses impossible mixes</td><td class="req">CLI-4</td></tr>
+<tr><td><code>icebase console --env X</code></td><td>Open the console against any environment</td><td class="req">CLI-5</td></tr>
+<tr><td><code>icebase indexes check</code></td><td>Scan code for queries; report missing composite indexes; exit non-zero in CI</td><td class="req">CLI-6</td></tr>
+<tr><td><code>icebase rules test</code></td><td>Run rules unit tests (same API as @firebase/rules-unit-testing)</td><td class="req">CLI-7</td></tr>
+<tr><td><code>icebase migrate --service S --from A --to B</code></td><td>Copy a service's data between modes/environments (docs, auth users with hashes, files)</td><td class="req">CLI-8</td></tr>
+<tr><td><code>icebase drivers --env X</code></td><td>Print mode per service, cross-service wiring, and warnings</td><td class="req">CLI-9</td></tr>
+<tr><td><code>icebase vm up</code></td><td>Print/run the Docker command for the VM (IceBase server + Postgres)</td><td class="req">CLI-10</td></tr>
+</table>
+
+<h2 id="console">14. Console GUI</h2>
+<ul>
+  <li><span class="req">CON-1</span> One web app, served by <code>icebase dev</code> (emulator), by the VM image (<code>/console</code>), or locally against Firebase via the admin SDK.</li>
+  <li><span class="req">CON-2</span> Global: environment switcher, mode badge per service, project overview, health, usage/cost view.</li>
+  <li><span class="req">CON-3</span> Schema-aware everywhere: document forms come from the schema, query builder only offers allowed shapes.</li>
+  <li><span class="req">CON-4</span> Access: Firebase project IAM in firebase mode; VM console users (owner/editor/viewer) in vm mode; open on localhost in emulator.</li>
+</ul>
+<table><tr><th>Service</th><th>Screens</th></tr>
+<tr><td>App (core)</td><td><ul style="margin:0"><li>Project overview: environments, mode per service, health of each service</li><li>Environment switcher (local / staging / prod) shared by every console page</li><li>Config viewer: resolved icebase.config.ts, secrets shown as env-var names only</li></ul></td></tr>
+<tr><td>Cloud Firestore</td><td><ul style="margin:0"><li>Data browser: collection tree incl. subcollections, typed document editor (form from schema, raw JSON toggle), add/duplicate/delete, bulk delete by query</li><li>Query runner: only offers filters/orders that the declared indexes allow; shows which index serves the query</li><li>Schema page: fields, types, required/optional, docs count per collection, fields seen in data but missing from schema</li><li>Indexes page: declared composite indexes, build status (firebase) or SQL index (emulator/vm), missing-index errors captured at runtime with a one-click &quot;add to schema&quot;</li><li>Rules page: editor + playground (simulate get/list/create/update/delete as a chosen user), lint against schema</li><li>Usage: reads / writes / deletes per collection per day (feeds the cost view)</li><li>Import / export: JSON or NDJSON per collection, copy collection between environments</li></ul></td></tr>
+<tr><td>Firestore Pipelines (Enterprise edition)</td><td><ul style="margin:0"><li>Pipeline runner (later)</li></ul></td></tr>
+<tr><td>Realtime Database</td><td><ul style="margin:0"><li>Tree browser with live updates, inline edit typed by path schema</li><li>Rules editor + simulator</li><li>indexOn list per path</li><li>Presence view (onDisconnect hooks)</li><li>Import / export JSON</li></ul></td></tr>
+<tr><td>Authentication</td><td><ul style="margin:0"><li>Users table: search, filter by provider, disable/enable, delete, reset password, set custom claims (typed form)</li><li>Providers page: enable email/password, anonymous, Google, GitHub, Apple, Microsoft, phone, OIDC/SAML</li><li>Templates: verification / reset / sign-in-link emails</li><li>Authorized domains</li><li>Sessions &amp; token revocation</li><li>Import / export users (with password hashes)</li></ul></td></tr>
+<tr><td>Cloud Storage</td><td><ul style="margin:0"><li>File browser per bucket: folders, upload (drag &amp; drop), preview images/video/PDF, download, delete, copy URL</li><li>Metadata editor (content type, cache control, custom metadata)</li><li>Rules editor + simulator</li><li>Usage: bytes stored, bytes out</li></ul></td></tr>
+<tr><td>Cloud Functions</td><td><ul style="margin:0"><li>Functions list: name, trigger, region/mode, last deploy, error rate</li><li>Logs: live tail, filter by function / severity / request id</li><li>Invoke panel: call a callable with a typed form, see response</li><li>Scheduled jobs: next run, last result, run now</li><li>Task queues: depth, retries, dead letters</li></ul></td></tr>
+<tr><td>Hosting</td><td><ul style="margin:0"><li>Releases list with rollback</li><li>Preview channels</li><li>Domains &amp; certificates</li><li>Request log (vm/emulator)</li></ul></td></tr>
+<tr><td>Remote Config</td><td><ul style="margin:0"><li>Parameters table with conditions</li><li>Publish with version history and rollback</li><li>Condition builder</li></ul></td></tr>
+<tr><td>Cloud Messaging (FCM)</td><td><ul style="margin:0"><li>Compose &amp; send (token / topic / user)</li><li>Topics and subscribers</li><li>Delivery log</li></ul></td></tr>
+<tr><td>Analytics</td><td><ul style="margin:0"><li>Events stream (emulator/vm)</li><li>DAU / MAU / retention (vm)</li><li>Link to GA4 (firebase mode)</li></ul></td></tr>
+<tr><td>App Check</td><td><ul style="margin:0"><li>Enforcement per service</li><li>Debug tokens</li><li>Verified vs unverified request chart</li></ul></td></tr>
+<tr><td>Performance Monitoring</td><td><ul style="margin:0"><li>Traces list (later)</li></ul></td></tr>
+<tr><td>Security Rules (management)</td><td><ul style="margin:0"><li>Shown inside Firestore / Storage / RTDB rules pages</li></ul></td></tr>
+<tr><td>Eventarc (custom events)</td><td><ul style="margin:0"><li>Event log</li></ul></td></tr>
+<tr><td>Project Management</td><td><ul style="margin:0"><li>Apps list (inside Project overview)</li></ul></td></tr>
+</table>
+
+<h2 id="arch">15. Architecture</h2>
+<svg viewBox="0 0 1000 400" width="100%" style="background:var(--card);border:1px solid var(--line);border-radius:8px">
+  <g font-family="system-ui" font-size="14">
+  <rect x="20" y="16" width="960" height="44" rx="8" fill="none" stroke="#888"/><text x="500" y="44" fill="#ddd" text-anchor="middle">App code: frontend, backend, functions → imports icebase/*</text>
+  <rect x="20" y="80" width="960" height="70" rx="8" fill="none" stroke="#FFFF00" stroke-width="2"/><text x="40" y="104" fill="#FFFF00">icebase SDK: app · firestore · auth · storage · functions · database · admin · functions/v2</text>
+  <text x="40" y="130" fill="#ccc" font-size="13">shared core: schema runtime validator · query planner + composite check · rules engine (used by emulator/vm) · mode router</text>
+  <rect x="20" y="175" width="300" height="120" rx="8" fill="none" stroke="#58C4DD" stroke-width="2"/><text x="40" y="200" fill="#58C4DD">firebase mode</text><text x="40" y="225" fill="#ccc" font-size="13">firebase JS SDK · firebase-admin</text><text x="40" y="245" fill="#ccc" font-size="13">firebase-functions · firebase-tools</text><text x="40" y="270" fill="#888" font-size="12">+ type/index/schema checks</text>
+  <rect x="350" y="175" width="300" height="120" rx="8" fill="none" stroke="#F5A65B" stroke-width="2"/><text x="370" y="200" fill="#F5A65B">emulator mode</text><text x="370" y="225" fill="#ccc" font-size="13">IceBase server (local)</text><text x="370" y="245" fill="#ccc" font-size="13">SQLite · disk · Node workers</text><text x="370" y="270" fill="#888" font-size="12">icebase dev</text>
+  <rect x="680" y="175" width="300" height="120" rx="8" fill="none" stroke="#83C167" stroke-width="2"/><text x="700" y="200" fill="#83C167">vm mode</text><text x="700" y="225" fill="#ccc" font-size="13">same IceBase server, Docker</text><text x="700" y="245" fill="#ccc" font-size="13">Postgres · disk/S3 · Node workers</text><text x="700" y="270" fill="#888" font-size="12">1 image · 1 port · /console</text>
+  <rect x="20" y="320" width="960" height="60" rx="8" fill="none" stroke="#C77DFF" stroke-width="2"/><text x="40" y="345" fill="#C77DFF">IceBase console (one GUI)</text><text x="40" y="368" fill="#ccc" font-size="13">talks to firebase via admin SDK, to emulator/vm via the IceBase admin API</text>
+  </g>
+</svg>
+<h3>Server components (emulator and vm share code)</h3>
+<table>
+<tr><th>Component</th><th>Responsibility</th></tr>
+<tr><td>Gateway</td><td>One port; routes <code>/v1/db</code>, <code>/v1/auth</code>, <code>/v1/storage</code>, <code>/v1/fn</code>, <code>/v1/rt</code> (WebSocket), <code>/console</code>, hosting; verifies tokens; rate limits</td></tr>
+<tr><td>Document engine</td><td>Schema validation, transforms (serverTimestamp, increment…), transactions with optimistic versions, write batching (group commit on SQLite)</td></tr>
+<tr><td>Query planner</td><td>Same composite rule as the SDK; picks the SQL index; returns <code>missing-index</code></td></tr>
+<tr><td>Rules engine</td><td>Parses and evaluates Firebase rules for documents, storage and RTDB</td></tr>
+<tr><td>Realtime hub</td><td>Change feed (outbox table) → matches active listeners → pushes snapshots over WebSocket; resume tokens</td></tr>
+<tr><td>Auth</td><td>Email/password, anonymous, OAuth, custom tokens, email links, JWT signing + JWKS, admin user API</td></tr>
+<tr><td>Storage</td><td>Uploads (simple + resumable), download tokens, metadata, storage rules</td></tr>
+<tr><td>Functions runtime</td><td>Loads the functions bundle; https/callable/doc/auth/storage/schedule triggers; retries; logs</td></tr>
+<tr><td>Hosting</td><td>Static releases, rewrites/redirects/headers, rollback</td></tr>
+<tr><td>Admin API</td><td>Used by CLI (deploy, migrate) and console</td></tr>
+</table>
+
+<h2 id="nfr">16. Non-functional requirements</h2>
+<table>
+<tr><th>Area</th><th>Requirement</th></tr>
+<tr><td>Performance: emulator</td><td>Millions of documents; batched writes 25k–70k/s and reads alongside (measured on the devbox laptop, report v2 §5b). Heavy concurrent writes are not a goal.</td></tr>
+<tr><td>Performance: vm</td><td>Parallel transactions via Postgres; target to be benchmarked on an 8-core / 32 GB VM before beta.</td></tr>
+<tr><td>Compatibility</td><td>Pinned to Firebase JS SDK 13.x, firebase-admin 14.x, firebase-functions 7.x; IceBase versions follow Firebase majors.</td></tr>
+<tr><td>Correctness</td><td>Conformance suites (queries, transactions, rules) run against firebase mode, the official emulator, emulator mode and vm mode; results must match.</td></tr>
+<tr><td>Security</td><td>No secrets in config; rules enforced server-side in emulator/vm; VM console behind login; TLS on VM.</td></tr>
+<tr><td>Reliability (vm)</td><td>Postgres backups (WAL archiving / scheduled dumps) to S3; restore command; health endpoint.</td></tr>
+<tr><td>Observability</td><td>Structured logs, per-service metrics, request ids shown in console.</td></tr>
+<tr><td>DX</td><td>Every error names the file/field/index and the fix; <code>icebase dev</code> starts in under 5 s on a laptop.</td></tr>
+</table>
+
+<h2 id="phases">17. Phases & acceptance criteria (no dates)</h2>
+<table>
+<tr><th>Phase</th><th>Scope</th><th>Done when</th></tr>
+<tr><td><span class="pill p1">Phase 1</span></td><td>Firebase wrapper for the services/APIs Panth selects (picker), with schema, composite indexes, rules, type safety, CLI (<code>init</code>, <code>deploy</code>, <code>indexes check</code>), console for those services in firebase mode</td><td>An existing Firebase app switches imports to icebase/* and works unchanged; undeclared composites fail at compile time and runtime; console manages the Firebase project</td></tr>
+<tr><td><span class="pill p2">Phase 2</span></td><td>Emulator mode, complete for every phase-1 API: SQLite engine, realtime, rules engine, auth, storage, functions, hosting; <code>icebase dev</code>; console in emulator mode</td><td>Phase-1 conformance suite passes in emulator mode; the Firebase emulator is no longer needed</td></tr>
+<tr><td><span class="pill p3">Phase 3</span></td><td>VM mode, complete for every phase-1 API: Postgres engine, Docker image, <code>login</code>/<code>deploy</code> to VM, backups, per-service mixing, <code>migrate</code></td><td>Conformance passes in vm mode; a sample app runs with Firestore on Firebase and functions/storage on the VM; data migrates both ways</td></tr>
+<tr><td><span class="pill p4">Phase 4+</span></td><td>Remaining APIs and services, in Panth's order</td><td>Per service, same three-mode conformance</td></tr>
+</table>
+
+<h2 id="out">18. Out of scope</h2>
+<ul><li>Firestore Pipelines (Enterprise edition) beyond pass-through</li><li>Data Connect, AI Logic, Extensions, ML model hosting, Project Management, Phone Number Verification: pass-through in firebase mode only</li><li>Self-hosted push delivery, SMS, analytics dashboards beyond basic</li><li>Other databases (MongoDB, Durable Objects) — dropped in rev 5</li></ul>
+
+<h2 id="risks">19. Risks & mitigations</h2>
+<table>
+<tr><th>Risk</th><th>Impact</th><th>Mitigation</th></tr>
+<tr><td>Rules engine behaves differently from Firebase in edge cases</td><td>Security holes or false denials in emulator/vm</td><td>Shared conformance suite against the official emulator (RUL-3)</td></tr>
+<tr><td>Firebase SDK changes (new majors, deprecations)</td><td>Wrapper drift</td><td>Pin majors; generated API inventory diff on each Firebase release</td></tr>
+<tr><td>Type-level composite check misses an edge case</td><td>Compiles but fails at runtime</td><td>Runtime check in all modes (IDX-2) + <code>indexes check</code></td></tr>
+<tr><td>Legacy data doesn't match the schema</td><td>Read errors after adopting IceBase</td><td>Warn-not-throw on reads + schema drift view + <code>init</code> schema draft from samples</td></tr>
+<tr><td>Single-box VM</td><td>Downtime if the machine dies</td><td>Backups + restore; HA is a non-goal for now</td></tr>
+<tr><td>Mixed modes add hidden glue</td><td>Surprising latency/ordering</td><td><code>icebase drivers</code> warnings; documented limits</td></tr>
+</table>
+
+<h2 id="open">20. Open decisions</h2>
+<ol>
+  <li><b>Phase-1 selection</b>: which services and APIs (use the picker; suggested: App, Firestore, Auth, Storage, Functions, Hosting).</li>
+  <li><b>RTDB</b> in phase 1 or later?</li>
+  <li><b>License</b>: MIT/Apache-2.0 vs AGPL.</li>
+  <li><b>Console delivery</b> in firebase mode: local app (<code>icebase console</code>) only, or also hosted?</li>
+</ol>
+
+<h2 id="glossary">21. Glossary</h2>
+<table>
+<tr><td><b>Mode</b></td><td>Where a service runs: firebase, emulator or vm</td></tr>
+<tr><td><b>Environment</b></td><td>A named set of mode choices (local, staging, prod)</td></tr>
+<tr><td><b>Composite index</b></td><td>Index over 2+ fields; must be declared in IceBase</td></tr>
+<tr><td><b>Single-field index</b></td><td>Automatic per-field index (Firebase behaviour), no declaration</td></tr>
+<tr><td><b>Conformance suite</b></td><td>Same tests run against every mode and the official emulator</td></tr>
+<tr><td><b>Group commit</b></td><td>Batching many writes into one SQLite transaction</td></tr>
+</table>
+
+<h2 id="appendix">Appendix · example project and typed package (all files)</h2>
+<p class="mut">On devbox: <code>~/icebase-rnd/rev8/example-app/</code> and <code>~/icebase-rnd/rev8/packages/icebase/src/</code>. <code>tsc -p example-app</code> → 0 errors.</p>
+<details><summary><code>example-app/icebase.config.ts</code></summary><pre>import { defineConfig } from &#x27;icebase/config&#x27;;
+import { schema } from &#x27;./icebase/schema&#x27;;
+
+export default defineConfig({
+  name: &#x27;acme-shop&#x27;,
+  schema,
+
+  // Firebase rules syntax — the same files work in every mode.
+  rules: {
+    firestore: &#x27;icebase/rules/firestore.rules&#x27;,
+    storage: &#x27;icebase/rules/storage.rules&#x27;,
+  },
+
+  functions: { source: &#x27;icebase/functions&#x27;, runtime: &#x27;nodejs22&#x27;, region: &#x27;us-central1&#x27; },
+  hosting: { public: &#x27;dist&#x27;, spa: true, rewrites: [{ source: &#x27;/api/**&#x27;, function: &#x27;api&#x27; }] },
+  auth: { providers: [&#x27;password&#x27;, &#x27;google&#x27;] },
+  storage: { maxUploadMb: 20 },
+
+  // Connection details. Secrets are env-var NAMES, never values.
+  firebase: { projectId: &#x27;acme-shop&#x27;, webConfigEnv: &#x27;FIREBASE_WEB_CONFIG&#x27;, serviceAccountEnv: &#x27;FIREBASE_SERVICE_ACCOUNT&#x27; },
+  vm: {
+    url: &#x27;https://ice.acme.com&#x27;,
+    databaseUrlEnv: &#x27;ICEBASE_DATABASE_URL&#x27;,
+    blobs: { kind: &#x27;s3&#x27;, bucket: &#x27;acme-uploads&#x27;, endpointEnv: &#x27;ICEBASE_S3_ENDPOINT&#x27; },
+  },
+  emulator: { dataDir: &#x27;.icebase&#x27;, port: 4400, seed: &#x27;icebase/seed/local.ts&#x27; },
+
+  // Pick a mode per environment, and override per service when you want to mix.
+  environments: {
+    local:   { mode: &#x27;emulator&#x27; },                                         // `icebase dev`: SQLite, no cloud
+    staging: { mode: &#x27;vm&#x27; },                                               // everything on your VM (Postgres)
+    prod:    { mode: &#x27;firebase&#x27;, services: { functions: &#x27;vm&#x27;, storage: &#x27;vm&#x27; } }, // Firestore+Auth on Firebase, functions+storage on VM
+  },
+
+  console: { port: 4000 },                                                 // same GUI for every mode
+});
+</pre></details>
+<details><summary><code>example-app/icebase/functions/package.json</code></summary><pre>{ &quot;name&quot;: &quot;acme-shop-functions&quot;, &quot;private&quot;: true, &quot;type&quot;: &quot;module&quot;, &quot;main&quot;: &quot;src/index.ts&quot;, &quot;dependencies&quot;: { &quot;icebase&quot;: &quot;^1.0.0&quot; } }
+</pre></details>
+<details><summary><code>example-app/icebase/functions/src/index.ts</code></summary><pre>// Every export is a deployed function — same file deploys to Cloud Functions (mode firebase) or the IceBase VM.
+import { onRequest, onSchedule } from &#x27;icebase/functions/v2&#x27;;
+
+export { onOrderCreated, cancelOrder, lowStock } from &#x27;./orders&#x27;;
+
+export const api = onRequest(async (req) =&gt; new Response(JSON.stringify({ ok: true, path: new URL(req.url).pathname }), { headers: { &#x27;content-type&#x27;: &#x27;application/json&#x27; } }));
+
+export const nightlyReport = onSchedule(&#x27;0 2 * * *&#x27;, async () =&gt; {
+  console.log(&#x27;nightly report&#x27;);
+});
+</pre></details>
+<details><summary><code>example-app/icebase/functions/src/orders.ts</code></summary><pre>import { onCall, onDocumentCreated, HttpsError } from &#x27;icebase/functions/v2&#x27;;
+import { getAdminFirestore, initializeAdminApp } from &#x27;icebase/admin&#x27;;
+import { collection, doc, getDoc, increment, query, runTransaction, updateDoc, where, getDocs } from &#x27;icebase/firestore&#x27;;
+import config from &#x27;../../../icebase.config&#x27;;
+import { orders, products } from &#x27;../../schema&#x27;;
+
+const app = initializeAdminApp(config, &#x27;prod&#x27;);
+const db = getAdminFirestore(app);
+
+// Typed trigger: e.params.uid comes from the &#x27;users/{uid}/orders&#x27; path, data() is the order type.
+export const onOrderCreated = onDocumentCreated(orders, async (e) =&gt; {
+  const order = e.data.data();
+  for (const item of order.items) {
+    await updateDoc(doc(collection(db, products), item.product.id), { stock: increment(-item.qty) });
+  }
+  console.log(`order ${e.params.docId} for user ${e.params.uid}: ${order.totalCents} cents`);
+});
+
+export const cancelOrder = onCall&lt;{ orderId: string }, { ok: true }&gt;(async (req) =&gt; {
+  if (!req.auth) throw new HttpsError(&#x27;unauthenticated&#x27;, &#x27;sign in first&#x27;);
+  const ref = doc(collection(db, orders, req.auth.uid), req.data.orderId);
+  await runTransaction(db, async (tx) =&gt; {
+    const snap = await tx.get(ref);
+    if (snap.data()?.status !== &#x27;pending&#x27;) throw new HttpsError(&#x27;failed-precondition&#x27;, &#x27;only pending orders&#x27;);
+    tx.update(ref, { status: &#x27;cancelled&#x27; });
+  });
+  return { ok: true };
+});
+
+export const lowStock = onCall&lt;void, { names: string[] }&gt;(async () =&gt; {
+  const snap = await getDocs(query(collection(db, products), where(&#x27;active&#x27;, &#x27;==&#x27;, true)));
+  return { names: snap.docs.filter((d) =&gt; d.data().stock &lt; 5).map((d) =&gt; d.data().name) };
+});
+
+void getDoc;
+</pre></details>
+<details><summary><code>example-app/icebase/rules/firestore.rules</code></summary><pre>rules_version = &#x27;2&#x27;;
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isAdmin() { return signedIn() &amp;&amp; get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == &#x27;admin&#x27;; }
+
+    match /users/{uid} {
+      allow read: if signedIn() &amp;&amp; (request.auth.uid == uid || isAdmin());
+      allow create: if request.auth.uid == uid &amp;&amp; request.resource.data.role == &#x27;member&#x27;;
+      allow update: if request.auth.uid == uid &amp;&amp; !request.resource.data.diff(resource.data).affectedKeys().hasAny([&#x27;role&#x27;]);
+
+      match /orders/{orderId} {
+        allow read: if request.auth.uid == uid || isAdmin();
+        allow create: if request.auth.uid == uid &amp;&amp; request.resource.data.status == &#x27;pending&#x27;;
+        allow update, delete: if isAdmin();
+      }
+    }
+    match /products/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}
+</pre></details>
+<details><summary><code>example-app/icebase/rules/storage.rules</code></summary><pre>rules_version = &#x27;2&#x27;;
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /avatars/{uid}/{file} {
+      allow read: if true;
+      allow write: if request.auth.uid == uid &amp;&amp; request.resource.size &lt; 2 * 1024 * 1024
+                   &amp;&amp; request.resource.contentType.matches(&#x27;image/.*&#x27;);
+    }
+    match /products/{file} {
+      allow read: if true;
+      allow write: if firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role == &#x27;admin&#x27;;
+    }
+  }
+}
+</pre></details>
+<details><summary><code>example-app/icebase/schema/index.ts</code></summary><pre>import { defineSchema } from &#x27;icebase/schema&#x27;;
+import { users } from &#x27;./users&#x27;;
+import { products } from &#x27;./products&#x27;;
+import { orders } from &#x27;./orders&#x27;;
+
+export { users, products, orders };
+export const schema = defineSchema({ users, products, orders });
+</pre></details>
+<details><summary><code>example-app/icebase/schema/orders.ts</code></summary><pre>import { collection, f } from &#x27;icebase/schema&#x27;;
+import { products } from &#x27;./products&#x27;;
+
+// Subcollection: users/{uid}/orders/{orderId}
+export const orders = collection(&#x27;users/{uid}/orders&#x27;, {
+  fields: {
+    status: f.enum([&#x27;pending&#x27;, &#x27;paid&#x27;, &#x27;shipped&#x27;, &#x27;cancelled&#x27;]),
+    items: f.array(f.map({ product: f.ref(products), qty: f.number({ int: true, min: 1 }) })),
+    totalCents: f.number({ int: true }),
+    createdAt: f.timestamp(),
+  },
+  indexes: [
+    [&#x27;status&#x27;, &#x27;createdAt desc&#x27;],
+  ],
+});
+</pre></details>
+<details><summary><code>example-app/icebase/schema/products.ts</code></summary><pre>import { collection, f } from &#x27;icebase/schema&#x27;;
+
+export const products = collection(&#x27;products&#x27;, {
+  fields: {
+    name: f.string(),
+    priceCents: f.number({ int: true, min: 0 }),
+    category: f.enum([&#x27;shoes&#x27;, &#x27;shirts&#x27;, &#x27;bags&#x27;]),
+    tags: f.array(f.string()),
+    stock: f.number({ int: true }),
+    active: f.boolean(),
+  },
+  indexes: [
+    [&#x27;category&#x27;, &#x27;priceCents asc&#x27;],
+    [&#x27;tags contains&#x27;, &#x27;priceCents asc&#x27;],
+    [&#x27;active&#x27;, &#x27;stock desc&#x27;],
+  ],
+});
+</pre></details>
+<details><summary><code>example-app/icebase/schema/users.ts</code></summary><pre>import { collection, f } from &#x27;icebase/schema&#x27;;
+
+export const users = collection(&#x27;users&#x27;, {
+  fields: {
+    email: f.string(),
+    displayName: f.string({ max: 80 }),
+    role: f.enum([&#x27;admin&#x27;, &#x27;member&#x27;]),
+    createdAt: f.timestamp(),
+    photoUrl: f.optional(f.string()),
+  },
+  // Composite indexes only. Single fields (email, role, …) are indexed automatically, like Firebase.
+  indexes: [
+    [&#x27;role&#x27;, &#x27;createdAt desc&#x27;],
+  ],
+});
+</pre></details>
+<details><summary><code>example-app/icebase/seed/local.ts</code></summary><pre>// `icebase dev` runs this once on an empty emulator (SQLite) database.
+import { getAdminFirestore, initializeAdminApp } from &#x27;icebase/admin&#x27;;
+import { addDoc, collection } from &#x27;icebase/firestore&#x27;;
+import config from &#x27;../../icebase.config&#x27;;
+import { products } from &#x27;../schema&#x27;;
+
+const db = getAdminFirestore(initializeAdminApp(config, &#x27;local&#x27;));
+for (let i = 0; i &lt; 1000; i++) {
+  await addDoc(collection(db, products), {
+    name: `Product ${i}`, priceCents: 500 + i, category: ([&#x27;shoes&#x27;, &#x27;shirts&#x27;, &#x27;bags&#x27;] as const)[i % 3],
+    tags: [&#x27;new&#x27;], stock: i % 20, active: true,
+  });
+}
+</pre></details>
+<details><summary><code>example-app/package.json</code></summary><pre>{
+  &quot;name&quot;: &quot;acme-shop&quot;,
+  &quot;private&quot;: true,
+  &quot;type&quot;: &quot;module&quot;,
+  &quot;scripts&quot;: {
+    &quot;dev&quot;: &quot;icebase dev&quot;,
+    &quot;deploy:prod&quot;: &quot;icebase deploy --env prod&quot;,
+    &quot;console&quot;: &quot;icebase console --env prod&quot;,
+    &quot;typecheck&quot;: &quot;tsc -p .&quot;
+  },
+  &quot;dependencies&quot;: { &quot;icebase&quot;: &quot;^1.0.0&quot; }
+}
+</pre></details>
+<details><summary><code>example-app/server/admin-report.ts</code></summary><pre>// Optional backend (your own API / scripts) — same typed API, admin mode bypasses rules.
+import { getAdminFirestore, initializeAdminApp } from &#x27;icebase/admin&#x27;;
+import { collectionGroup, getDocs, query, where } from &#x27;icebase/firestore&#x27;;
+import config from &#x27;../icebase.config&#x27;;
+import { orders } from &#x27;../icebase/schema&#x27;;
+
+const db = getAdminFirestore(initializeAdminApp(config, &#x27;prod&#x27;));
+
+export async function paidOrdersAcrossUsers() {
+  const snap = await getDocs(query(collectionGroup(db, orders), where(&#x27;status&#x27;, &#x27;==&#x27;, &#x27;paid&#x27;)));
+  return snap.docs.reduce((sum, d) =&gt; sum + d.data().totalCents, 0);
+}
+</pre></details>
+<details><summary><code>example-app/src/lib/icebase.ts</code></summary><pre>// The only setup file in the frontend. Switch environments with one string; app code never changes.
+import { initializeApp } from &#x27;icebase/app&#x27;;
+import { getFirestore } from &#x27;icebase/firestore&#x27;;
+import { getAuth } from &#x27;icebase/auth&#x27;;
+import { getStorage } from &#x27;icebase/storage&#x27;;
+import { getFunctions } from &#x27;icebase/functions&#x27;;
+import config from &#x27;../../icebase.config&#x27;;
+
+const env = (globalThis as { ICEBASE_ENV?: &#x27;local&#x27; | &#x27;staging&#x27; | &#x27;prod&#x27; }).ICEBASE_ENV ?? &#x27;local&#x27;;
+
+export const app = initializeApp(config, env);   // &#x27;local&#x27; | &#x27;staging&#x27; | &#x27;prod&#x27; — typo is a compile error
+export const db = getFirestore(app);
+export const auth = getAuth(app);
+export const storage = getStorage(app);
+export const functions = getFunctions(app);
+</pre></details>
+<details><summary><code>example-app/src/pages/shop.ts</code></summary><pre>// Frontend usage — reads exactly like Firebase, but everything is typed from icebase/schema.
+import { addDoc, collection, getDocs, limit, onSnapshot, orderBy, query, serverTimestamp, where } from &#x27;icebase/firestore&#x27;;
+import { signInWithEmailAndPassword } from &#x27;icebase/auth&#x27;;
+import { httpsCallable } from &#x27;icebase/functions&#x27;;
+import { auth, db, functions } from &#x27;../lib/icebase&#x27;;
+import { orders, products, users } from &#x27;../../icebase/schema&#x27;;
+
+// Single field: works on ANY schema field, no declaration (Firebase indexes single fields automatically).
+export const byName = query(collection(db, products), where(&#x27;name&#x27;, &#x27;==&#x27;, &#x27;Boot&#x27;));
+export const byEmail = query(collection(db, users), where(&#x27;email&#x27;, &#x27;==&#x27;, &#x27;a@b.c&#x27;));
+export const newest = query(collection(db, products), orderBy(&#x27;stock&#x27;, &#x27;desc&#x27;), limit(10));
+// Equality on several fields: Firebase merges single-field indexes, so no composite needed.
+export const activeShoes = query(collection(db, products), where(&#x27;category&#x27;, &#x27;==&#x27;, &#x27;shoes&#x27;), where(&#x27;active&#x27;, &#x27;==&#x27;, true));
+
+// Range + orderBy on the SAME field is still single-field.
+export const midPrice = query(collection(db, products), where(&#x27;priceCents&#x27;, &#x27;&gt;&#x27;, 1000), orderBy(&#x27;priceCents&#x27;));
+// array-contains + orderBy → uses the declared composite [&#x27;tags contains&#x27;, &#x27;priceCents asc&#x27;].
+export const tagged = query(collection(db, products), where(&#x27;tags&#x27;, &#x27;array-contains&#x27;, &#x27;new&#x27;), orderBy(&#x27;priceCents&#x27;));
+
+// Composite: equality + orderBy on another field → needs the declared index [&#x27;category&#x27;, &#x27;priceCents asc&#x27;].
+export async function cheapShoes() {
+  const q = query(collection(db, products), where(&#x27;category&#x27;, &#x27;==&#x27;, &#x27;shoes&#x27;), orderBy(&#x27;priceCents&#x27;, &#x27;asc&#x27;), limit(20));
+  const snap = await getDocs(q);
+  return snap.docs.map((d) =&gt; d.data().name);          // d.data() is { name: string; priceCents: number; … }
+}
+
+export function watchMyOrders(uid: string, cb: (n: number) =&gt; void) {
+  // &#x27;users/{uid}/orders&#x27; → collection(db, orders, uid). Uses the declared composite [&#x27;status&#x27;, &#x27;createdAt desc&#x27;].
+  return onSnapshot(query(collection(db, orders, uid), where(&#x27;status&#x27;, &#x27;==&#x27;, &#x27;pending&#x27;), orderBy(&#x27;createdAt&#x27;, &#x27;desc&#x27;)), (s) =&gt; cb(s.size));
+}
+
+export async function placeOrder(uid: string) {
+  await signInWithEmailAndPassword(auth, &#x27;a@b.c&#x27;, &#x27;pw&#x27;);
+  await addDoc(collection(db, orders, uid), { status: &#x27;pending&#x27;, items: [], totalCents: 1200, createdAt: serverTimestamp() });
+}
+
+export const cancelOrder = httpsCallable&lt;{ orderId: string }, { ok: true }&gt;(functions, &#x27;cancelOrder&#x27;);
+
+// ── What the types refuse (each line is a compile error; tsc proves it via @ts-expect-error) ──
+export function refused(uid: string) {
+  // @ts-expect-error  category + stock needs a composite index that is not declared
+  getDocs(query(collection(db, products), where(&#x27;category&#x27;, &#x27;==&#x27;, &#x27;shoes&#x27;), orderBy(&#x27;stock&#x27;)));
+  // @ts-expect-error  status + totalCents needs a composite index that is not declared
+  getDocs(query(collection(db, orders, uid), where(&#x27;status&#x27;, &#x27;==&#x27;, &#x27;paid&#x27;), orderBy(&#x27;totalCents&#x27;)));
+  // @ts-expect-error  &#x27;socks&#x27; is not a valid category value
+  query(collection(db, products), where(&#x27;category&#x27;, &#x27;==&#x27;, &#x27;socks&#x27;));
+  // @ts-expect-error  &#x27;colour&#x27; is not a field of products
+  query(collection(db, products), where(&#x27;colour&#x27;, &#x27;==&#x27;, &#x27;red&#x27;));
+  // @ts-expect-error  subcollection needs its {uid} path parameter
+  collection(db, orders);
+  // @ts-expect-error  missing required fields (items, totalCents, createdAt)
+  addDoc(collection(db, orders, uid), { status: &#x27;pending&#x27; });
+  // @ts-expect-error  tags is string[] → array-contains takes one string, not a number
+  query(collection(db, products), where(&#x27;tags&#x27;, &#x27;array-contains&#x27;, 3));
+}
+</pre></details>
+<details><summary><code>example-app/tsconfig.json</code></summary><pre>{
+  &quot;compilerOptions&quot;: {
+    &quot;target&quot;: &quot;ES2022&quot;, &quot;module&quot;: &quot;ESNext&quot;, &quot;moduleResolution&quot;: &quot;Bundler&quot;, &quot;strict&quot;: true, &quot;noEmit&quot;: true,
+    &quot;lib&quot;: [&quot;ES2022&quot;, &quot;DOM&quot;], &quot;skipLibCheck&quot;: true,
+    &quot;baseUrl&quot;: &quot;.&quot;,
+    &quot;paths&quot;: {
+      &quot;icebase/functions/v2&quot;: [&quot;../packages/icebase/src/functions-v2.ts&quot;],
+      &quot;icebase/*&quot;: [&quot;../packages/icebase/src/*&quot;]
+    }
+  },
+  &quot;include&quot;: [&quot;icebase.config.ts&quot;, &quot;icebase&quot;, &quot;src&quot;, &quot;server&quot;]
+}
+</pre></details>
+<details><summary><code>example-app/.env.example</code></summary><pre># mode: firebase
+FIREBASE_WEB_CONFIG={&quot;apiKey&quot;:&quot;…&quot;,&quot;authDomain&quot;:&quot;acme-shop.firebaseapp.com&quot;,&quot;projectId&quot;:&quot;acme-shop&quot;,&quot;appId&quot;:&quot;…&quot;}
+FIREBASE_SERVICE_ACCOUNT=./secrets/firebase-admin.json
+# mode: vm
+ICEBASE_DATABASE_URL=postgres://icebase:…@localhost:5432/acme
+ICEBASE_S3_ENDPOINT=https://&lt;account&gt;.r2.cloudflarestorage.com
+</pre></details>
+<details><summary><code>example-app/.gitignore</code></summary><pre>node_modules/
+.icebase/            # emulator data: SQLite db, storage blobs, logs
+icebase/.generated/  # generated by `icebase dev` / `icebase deploy`
+.env*
+!.env.example
+</pre></details>
+<details><summary><code>packages/icebase/src/admin.ts</code></summary><pre>// icebase/admin — server/backend access that bypasses rules (like firebase-admin). Same typed query API.
+import type { IceBaseConfig, EnvOf } from &#x27;./config&#x27;;
+import type { IceBaseApp } from &#x27;./app&#x27;;
+import type { Firestore } from &#x27;./firestore&#x27;;
+
+export declare function initializeAdminApp&lt;Cfg extends IceBaseConfig&lt;any, any&gt;&gt;(config: Cfg, env: EnvOf&lt;Cfg&gt;): IceBaseApp;
+export declare function getAdminFirestore(app: IceBaseApp): Firestore;
+export declare function getAdminAuth(app: IceBaseApp): {
+  getUser(uid: string): Promise&lt;{ uid: string; email?: string; customClaims?: Record&lt;string, unknown&gt; }&gt;;
+  setCustomUserClaims(uid: string, claims: Record&lt;string, unknown&gt;): Promise&lt;void&gt;;
+  verifyIdToken(token: string): Promise&lt;{ uid: string; [k: string]: unknown }&gt;;
+};
+</pre></details>
+<details><summary><code>packages/icebase/src/app.ts</code></summary><pre>// icebase/app — like firebase/app&#x27;s initializeApp, but takes the IceBase config + which environment to run.
+import type { EnvOf, IceBaseConfig } from &#x27;./config&#x27;;
+
+export interface IceBaseApp { readonly name: string; readonly env: string }
+
+/** initializeApp(config, &#x27;prod&#x27;) — picks the mode per service from config.environments.prod. */
+export declare function initializeApp&lt;Cfg extends IceBaseConfig&lt;any, any&gt;&gt;(config: Cfg, env: EnvOf&lt;Cfg&gt;): IceBaseApp;
+</pre></details>
+<details><summary><code>packages/icebase/src/auth.ts</code></summary><pre>// icebase/auth — same names as firebase/auth.
+import type { IceBaseApp } from &#x27;./app&#x27;;
+
+export interface User { uid: string; email: string | null; displayName: string | null; emailVerified: boolean; isAnonymous: boolean; getIdToken(force?: boolean): Promise&lt;string&gt; }
+export interface Auth { readonly currentUser: User | null }
+export interface UserCredential { user: User }
+
+export declare function getAuth(app: IceBaseApp): Auth;
+export declare function onAuthStateChanged(auth: Auth, cb: (u: User | null) =&gt; void): () =&gt; void;
+export declare function signInWithEmailAndPassword(auth: Auth, email: string, password: string): Promise&lt;UserCredential&gt;;
+export declare function createUserWithEmailAndPassword(auth: Auth, email: string, password: string): Promise&lt;UserCredential&gt;;
+export declare function signInAnonymously(auth: Auth): Promise&lt;UserCredential&gt;;
+export declare function signInWithPopup(auth: Auth, provider: AuthProvider): Promise&lt;UserCredential&gt;;
+export declare function sendPasswordResetEmail(auth: Auth, email: string): Promise&lt;void&gt;;
+export declare function signOut(auth: Auth): Promise&lt;void&gt;;
+export declare class GoogleAuthProvider { readonly providerId: &#x27;google.com&#x27; }
+export declare class GithubAuthProvider { readonly providerId: &#x27;github.com&#x27; }
+export type AuthProvider = GoogleAuthProvider | GithubAuthProvider;
+</pre></details>
+<details><summary><code>packages/icebase/src/config.ts</code></summary><pre>// icebase/config — the one config file (icebase.config.ts).
+import type { AnyCollection, Schema } from &#x27;./schema&#x27;;
+
+/** Where a service runs.
+ *  firebase — the real Firebase product (default).
+ *  emulator — local, SQLite + disk; for development. Fine with millions of docs, single writer.
+ *  vm       — self-hosted IceBase server (one Docker image) on Postgres; parallel transactions. */
+export type Mode = &#x27;firebase&#x27; | &#x27;emulator&#x27; | &#x27;vm&#x27;;
+export type Service = &#x27;firestore&#x27; | &#x27;auth&#x27; | &#x27;storage&#x27; | &#x27;functions&#x27; | &#x27;hosting&#x27;;
+
+export interface Environment {
+  /** Mode for every service in this environment… */
+  mode: Mode;
+  /** …unless overridden per service, e.g. Firestore on Firebase but functions on the VM. */
+  services?: Partial&lt;Record&lt;Service, Mode&gt;&gt;;
+}
+
+export interface IceBaseConfig&lt;C extends Record&lt;string, AnyCollection&gt;, E extends string&gt; {
+  name: string;
+  schema: Schema&lt;C&gt;;
+  /** Firebase rules syntax, used by every mode. */
+  rules: { firestore: string; storage?: string };
+  functions?: { source: string; runtime?: &#x27;nodejs20&#x27; | &#x27;nodejs22&#x27;; region?: string };
+  hosting?: { public: string; spa?: boolean; rewrites?: { source: string; function: string }[]; headers?: { source: string; headers: Record&lt;string, string&gt; }[] };
+  auth?: { providers: (&#x27;password&#x27; | &#x27;anonymous&#x27; | &#x27;emailLink&#x27; | &#x27;google&#x27; | &#x27;github&#x27; | &#x27;apple&#x27; | &#x27;microsoft&#x27;)[]; authorizedDomains?: string[] };
+  storage?: { maxUploadMb?: number };
+
+  /** Needed when any environment uses mode &#x27;firebase&#x27;. Secrets come from env vars, never from this file. */
+  firebase?: { projectId: string; webConfigEnv?: string; serviceAccountEnv?: string };
+  /** Needed when any environment uses mode &#x27;vm&#x27;. */
+  vm?: { url: string; databaseUrlEnv: string; blobs?: { kind: &#x27;disk&#x27;; dir: string } | { kind: &#x27;s3&#x27;; bucket: string; endpointEnv?: string } };
+  /** Emulator defaults: data in .icebase/, console on :4000, API on :4400. */
+  emulator?: { dataDir?: string; port?: number; seed?: string };
+
+  environments: Record&lt;E, Environment&gt;;
+  /** Same console GUI for every mode. */
+  console?: { port?: number; enabled?: boolean };
+}
+
+export declare function defineConfig&lt;const C extends Record&lt;string, AnyCollection&gt;, const E extends string&gt;(c: IceBaseConfig&lt;C, E&gt;): IceBaseConfig&lt;C, E&gt;;
+export type EnvOf&lt;Cfg&gt; = Cfg extends IceBaseConfig&lt;any, infer E&gt; ? E : never;
+</pre></details>
+<details><summary><code>packages/icebase/src/firestore.ts</code></summary><pre>// icebase/firestore — same function names and shapes as firebase/firestore (modular v9+), typed from the schema.
+// Index rule (same as Firebase): any single field can be filtered or sorted (single-field indexes are automatic).
+// A query that needs a COMPOSITE index compiles only if that composite index is declared in the schema.
+import type { AnyCollection, CompositeIndex, DocOf, IndexesOf, Timestamp } from &#x27;./schema&#x27;;
+import type { IceBaseApp } from &#x27;./app&#x27;;
+
+export interface Firestore { readonly app: IceBaseApp }
+export declare function getFirestore(app: IceBaseApp): Firestore;
+
+/** &#x27;users/{uid}/orders&#x27; → [uid: string] */
+type Params&lt;P extends string&gt; = P extends `${string}{${string}}${infer R}` ? [string, ...Params&lt;R&gt;] : [];
+
+export interface CollectionReference&lt;T, IX&gt; { readonly type: &#x27;collection&#x27;; readonly path: string; readonly __t?: T; readonly __ix?: IX }
+export interface DocumentReference&lt;T&gt; { readonly type: &#x27;document&#x27;; readonly id: string; readonly path: string; readonly __t?: T }
+export interface Query&lt;T, IX&gt; { readonly type: &#x27;query&#x27; | &#x27;collection&#x27;; readonly __t?: T; readonly __ix?: IX }
+
+export declare function collection&lt;C extends AnyCollection&gt;(db: Firestore, c: C, ...params: Params&lt;C[&#x27;path&#x27;]&gt;): CollectionReference&lt;DocOf&lt;C&gt;, IndexesOf&lt;C&gt;&gt;;
+export declare function collectionGroup&lt;C extends AnyCollection&gt;(db: Firestore, c: C): Query&lt;DocOf&lt;C&gt;, IndexesOf&lt;C&gt;&gt;;
+export declare function doc&lt;T, IX&gt;(ref: CollectionReference&lt;T, IX&gt;, id?: string): DocumentReference&lt;T&gt;;
+
+export type WhereFilterOp = &#x27;==&#x27; | &#x27;!=&#x27; | &#x27;&lt;&#x27; | &#x27;&lt;=&#x27; | &#x27;&gt;&#x27; | &#x27;&gt;=&#x27; | &#x27;in&#x27; | &#x27;not-in&#x27; | &#x27;array-contains&#x27; | &#x27;array-contains-any&#x27;;
+type ValueFor&lt;V, Op extends WhereFilterOp&gt; =
+  Op extends &#x27;in&#x27; | &#x27;not-in&#x27; ? V[] :
+  Op extends &#x27;array-contains&#x27; ? (V extends (infer E)[] ? E : never) :
+  Op extends &#x27;array-contains-any&#x27; ? (V extends (infer E)[] ? E[] : never) :
+  V;
+
+/** How a constraint uses its field, for the composite-index check. */
+export type Use = &#x27;eq&#x27; | &#x27;range&#x27; | &#x27;order&#x27; | &#x27;contains&#x27; | &#x27;none&#x27;;
+type UseOf&lt;Op extends WhereFilterOp&gt; = Op extends &#x27;==&#x27; | &#x27;in&#x27; ? &#x27;eq&#x27; : Op extends &#x27;array-contains&#x27; | &#x27;array-contains-any&#x27; ? &#x27;contains&#x27; : &#x27;range&#x27;;
+
+declare const constraint: unique symbol;
+export interface QueryConstraint&lt;T, F extends string, U extends Use&gt; { readonly [constraint]: [T, F, U] }
+
+/** where(&#x27;role&#x27;, &#x27;==&#x27;, &#x27;admin&#x27;) — any schema field; value must match the field&#x27;s type. */
+export declare function where&lt;T, F extends keyof T &amp; string, Op extends WhereFilterOp&gt;(field: F, op: Op, value: ValueFor&lt;T[F], Op&gt;): QueryConstraint&lt;T, F, UseOf&lt;Op&gt;&gt;;
+export declare function orderBy&lt;T, F extends keyof T &amp; string&gt;(field: F, dir?: &#x27;asc&#x27; | &#x27;desc&#x27;): QueryConstraint&lt;T, F, &#x27;order&#x27;&gt;;
+export declare function limit&lt;T&gt;(n: number): QueryConstraint&lt;T, never, &#x27;none&#x27;&gt;;
+export declare function startAfter&lt;T&gt;(...values: unknown[]): QueryConstraint&lt;T, never, &#x27;none&#x27;&gt;;
+
+// ── composite-index check at the type level ──
+type FieldsUsed&lt;Cs, U extends Use&gt; = Cs extends readonly (infer C)[] ? (C extends QueryConstraint&lt;any, infer F, infer UU&gt; ? (UU extends U ? F : never) : never) : never;
+type U2I&lt;U&gt; = (U extends unknown ? (x: U) =&gt; void : never) extends (x: infer I) =&gt; void ? I : never;
+type IsUnion&lt;T&gt; = [T] extends [never] ? false : [T] extends [U2I&lt;T&gt;] ? false : true;
+/** Composite needed when a range/orderBy is combined with any other field (eq, contains, range or order). */
+type NeedsComposite&lt;Cs&gt; = [FieldsUsed&lt;Cs, &#x27;range&#x27; | &#x27;order&#x27;&gt;] extends [never] ? false : IsUnion&lt;FieldsUsed&lt;Cs, &#x27;eq&#x27; | &#x27;contains&#x27; | &#x27;range&#x27; | &#x27;order&#x27;&gt;&gt;;
+type SameSet&lt;A, B&gt; = [Exclude&lt;A, B&gt;] extends [never] ? ([Exclude&lt;B, A&gt;] extends [never] ? true : false) : false;
+type HasIndex&lt;Req, IX&gt; = true extends (IX extends CompositeIndex&lt;infer S&gt; ? SameSet&lt;S, Req&gt; : false) ? true : false;
+type CompositeCheck&lt;Cs, IX&gt; = NeedsComposite&lt;Cs&gt; extends true
+  ? (HasIndex&lt;FieldsUsed&lt;Cs, &#x27;eq&#x27; | &#x27;contains&#x27; | &#x27;range&#x27; | &#x27;order&#x27;&gt;, IX&gt; extends true ? unknown : { missingCompositeIndex: FieldsUsed&lt;Cs, &#x27;eq&#x27; | &#x27;contains&#x27; | &#x27;range&#x27; | &#x27;order&#x27;&gt; })
+  : unknown;
+
+/** Same call shape as Firebase: query(ref, ...constraints) — up to 8 constraints.
+ *  If the combination needs a composite index that is not declared, the result is a MissingCompositeIndex
+ *  instead of a Query, so getDocs()/onSnapshot() on it is a compile error that names the fields. */
+export interface MissingCompositeIndex&lt;F extends string&gt; { readonly error: &#x27;missing composite index — declare it in the schema&#x27;; readonly fields: F }
+export declare function query&lt;T, IX, F1 extends string = never, U1 extends Use = &#x27;none&#x27;, F2 extends string = never, U2 extends Use = &#x27;none&#x27;, F3 extends string = never, U3 extends Use = &#x27;none&#x27;, F4 extends string = never, U4 extends Use = &#x27;none&#x27;, F5 extends string = never, U5 extends Use = &#x27;none&#x27;, F6 extends string = never, U6 extends Use = &#x27;none&#x27;, F7 extends string = never, U7 extends Use = &#x27;none&#x27;, F8 extends string = never, U8 extends Use = &#x27;none&#x27;&gt;(
+  q: Query&lt;T, IX&gt; | CollectionReference&lt;T, IX&gt;, c1?: QueryConstraint&lt;T, F1, U1&gt;, c2?: QueryConstraint&lt;T, F2, U2&gt;, c3?: QueryConstraint&lt;T, F3, U3&gt;, c4?: QueryConstraint&lt;T, F4, U4&gt;, c5?: QueryConstraint&lt;T, F5, U5&gt;, c6?: QueryConstraint&lt;T, F6, U6&gt;, c7?: QueryConstraint&lt;T, F7, U7&gt;, c8?: QueryConstraint&lt;T, F8, U8&gt;
+): CompositeCheck&lt;[QueryConstraint&lt;T, F1, U1&gt;, QueryConstraint&lt;T, F2, U2&gt;, QueryConstraint&lt;T, F3, U3&gt;, QueryConstraint&lt;T, F4, U4&gt;, QueryConstraint&lt;T, F5, U5&gt;, QueryConstraint&lt;T, F6, U6&gt;, QueryConstraint&lt;T, F7, U7&gt;, QueryConstraint&lt;T, F8, U8&gt;], IX&gt; extends { missingCompositeIndex: infer F extends string } ? MissingCompositeIndex&lt;F&gt; : Query&lt;T, IX&gt;;
+
+export interface DocumentSnapshot&lt;T&gt; { readonly id: string; readonly ref: DocumentReference&lt;T&gt;; exists(): boolean; data(): T | undefined }
+export interface QueryDocumentSnapshot&lt;T&gt; extends DocumentSnapshot&lt;T&gt; { data(): T }
+export interface QuerySnapshot&lt;T&gt; { readonly docs: QueryDocumentSnapshot&lt;T&gt;[]; readonly size: number; readonly empty: boolean; docChanges(): { type: &#x27;added&#x27; | &#x27;modified&#x27; | &#x27;removed&#x27;; doc: QueryDocumentSnapshot&lt;T&gt; }[] }
+
+export declare function getDoc&lt;T&gt;(ref: DocumentReference&lt;T&gt;): Promise&lt;DocumentSnapshot&lt;T&gt;&gt;;
+export declare function getDocs&lt;T, IX&gt;(q: Query&lt;T, IX&gt; | CollectionReference&lt;T, IX&gt;): Promise&lt;QuerySnapshot&lt;T&gt;&gt;;
+export declare function getCountFromServer&lt;T, IX&gt;(q: Query&lt;T, IX&gt;): Promise&lt;{ data(): { count: number } }&gt;;
+
+/** Write-time sentinels, same as Firebase. */
+export interface FieldValue { readonly __fieldValue: true }
+export declare function serverTimestamp(): FieldValue &amp; Timestamp;
+export declare function increment(n: number): FieldValue &amp; number;
+export declare function arrayUnion&lt;E&gt;(...e: E[]): FieldValue &amp; E[];
+export declare function arrayRemove&lt;E&gt;(...e: E[]): FieldValue &amp; E[];
+export declare function deleteField(): FieldValue &amp; undefined;
+
+export declare function addDoc&lt;T, IX&gt;(ref: CollectionReference&lt;T, IX&gt;, data: T): Promise&lt;DocumentReference&lt;T&gt;&gt;;
+export declare function setDoc&lt;T&gt;(ref: DocumentReference&lt;T&gt;, data: T): Promise&lt;void&gt;;
+export declare function setDoc&lt;T&gt;(ref: DocumentReference&lt;T&gt;, data: Partial&lt;T&gt;, opts: { merge: true }): Promise&lt;void&gt;;
+export declare function updateDoc&lt;T&gt;(ref: DocumentReference&lt;T&gt;, data: Partial&lt;T&gt;): Promise&lt;void&gt;;
+export declare function deleteDoc&lt;T&gt;(ref: DocumentReference&lt;T&gt;): Promise&lt;void&gt;;
+
+export declare function onSnapshot&lt;T&gt;(ref: DocumentReference&lt;T&gt;, next: (s: DocumentSnapshot&lt;T&gt;) =&gt; void, error?: (e: Error) =&gt; void): () =&gt; void;
+export declare function onSnapshot&lt;T, IX&gt;(q: Query&lt;T, IX&gt; | CollectionReference&lt;T, IX&gt;, next: (s: QuerySnapshot&lt;T&gt;) =&gt; void, error?: (e: Error) =&gt; void): () =&gt; void;
+
+export interface Transaction { get&lt;T&gt;(r: DocumentReference&lt;T&gt;): Promise&lt;DocumentSnapshot&lt;T&gt;&gt;; set&lt;T&gt;(r: DocumentReference&lt;T&gt;, d: T): Transaction; update&lt;T&gt;(r: DocumentReference&lt;T&gt;, d: Partial&lt;T&gt;): Transaction; delete&lt;T&gt;(r: DocumentReference&lt;T&gt;): Transaction }
+export declare function runTransaction&lt;R&gt;(db: Firestore, fn: (tx: Transaction) =&gt; Promise&lt;R&gt;): Promise&lt;R&gt;;
+export interface WriteBatch { set&lt;T&gt;(r: DocumentReference&lt;T&gt;, d: T): WriteBatch; update&lt;T&gt;(r: DocumentReference&lt;T&gt;, d: Partial&lt;T&gt;): WriteBatch; delete&lt;T&gt;(r: DocumentReference&lt;T&gt;): WriteBatch; commit(): Promise&lt;void&gt; }
+export declare function writeBatch(db: Firestore): WriteBatch;
+</pre></details>
+<details><summary><code>packages/icebase/src/functions-v2.ts</code></summary><pre>// icebase/functions/v2 — server-side triggers, same names as firebase-functions/v2, typed from the schema.
+// Same source deploys to Cloud Functions (mode firebase) or the IceBase server (emulator / vm).
+import type { AnyCollection, DocOf } from &#x27;./schema&#x27;;
+
+export interface CallableRequest&lt;T&gt; { data: T; auth?: { uid: string; token: Record&lt;string, unknown&gt; } }
+export declare class HttpsError extends Error { constructor(code: &#x27;invalid-argument&#x27; | &#x27;not-found&#x27; | &#x27;permission-denied&#x27; | &#x27;unauthenticated&#x27; | &#x27;failed-precondition&#x27; | &#x27;internal&#x27;, message: string) }
+
+export declare function onCall&lt;Req, Res&gt;(handler: (req: CallableRequest&lt;Req&gt;) =&gt; Promise&lt;Res&gt; | Res): { __callable: [Req, Res] };
+export declare function onRequest(handler: (req: Request) =&gt; Promise&lt;Response&gt; | Response): { __http: true };
+
+type Params&lt;P extends string&gt; = P extends `${string}{${infer N}}${infer R}` ? { [K in N]: string } &amp; Params&lt;R&gt; : {};
+export interface DocEvent&lt;C extends AnyCollection&gt; { params: Params&lt;C[&#x27;path&#x27;]&gt; &amp; { docId: string }; data: { id: string; data(): DocOf&lt;C&gt; } }
+export interface DocChangeEvent&lt;C extends AnyCollection&gt; { params: Params&lt;C[&#x27;path&#x27;]&gt; &amp; { docId: string }; data: { before: { data(): DocOf&lt;C&gt; }; after: { data(): DocOf&lt;C&gt; } } }
+
+export declare function onDocumentCreated&lt;C extends AnyCollection&gt;(c: C, h: (e: DocEvent&lt;C&gt;) =&gt; Promise&lt;void&gt; | void): { __trigger: &#x27;created&#x27; };
+export declare function onDocumentUpdated&lt;C extends AnyCollection&gt;(c: C, h: (e: DocChangeEvent&lt;C&gt;) =&gt; Promise&lt;void&gt; | void): { __trigger: &#x27;updated&#x27; };
+export declare function onDocumentDeleted&lt;C extends AnyCollection&gt;(c: C, h: (e: DocEvent&lt;C&gt;) =&gt; Promise&lt;void&gt; | void): { __trigger: &#x27;deleted&#x27; };
+export declare function onSchedule(cron: string, h: () =&gt; Promise&lt;void&gt; | void): { __trigger: &#x27;schedule&#x27; };
+export declare function beforeUserCreated(h: (e: { data: { uid: string; email?: string } }) =&gt; Promise&lt;void&gt; | void): { __trigger: &#x27;beforeUserCreated&#x27; };
+</pre></details>
+<details><summary><code>packages/icebase/src/functions.ts</code></summary><pre>// icebase/functions — client side, same as firebase/functions. Server-side triggers are in icebase/functions/v2.
+import type { IceBaseApp } from &#x27;./app&#x27;;
+
+export interface Functions { readonly app: IceBaseApp }
+export declare function getFunctions(app: IceBaseApp, region?: string): Functions;
+export declare function httpsCallable&lt;Req, Res&gt;(f: Functions, name: string): (data: Req) =&gt; Promise&lt;{ data: Res }&gt;;
+</pre></details>
+<details><summary><code>packages/icebase/src/schema.ts</code></summary><pre>// icebase/schema — explicit schema + explicit indexes. The only place data shape is declared.
+// Indexed fields become real columns in SQLite/Postgres; the whole document lives in one JSONB column.
+
+export interface Timestamp { readonly seconds: number; readonly nanoseconds: number; toDate(): Date }
+export interface DocumentReference&lt;T = unknown&gt; { readonly id: string; readonly path: string; readonly __doc?: T }
+
+export interface Field&lt;T&gt; { readonly kind: string; readonly optional: boolean; readonly __t?: T }
+
+type FieldMap = Record&lt;string, Field&lt;any&gt;&gt;;
+type Req&lt;S extends FieldMap&gt; = { [K in keyof S as S[K] extends Field&lt;infer T&gt; ? (undefined extends T ? never : K) : never]: S[K] extends Field&lt;infer T&gt; ? T : never };
+type Opt&lt;S extends FieldMap&gt; = { [K in keyof S as S[K] extends Field&lt;infer T&gt; ? (undefined extends T ? K : never) : never]?: S[K] extends Field&lt;infer T&gt; ? Exclude&lt;T, undefined&gt; : never };
+type Flat&lt;T&gt; = { [K in keyof T]: T[K] } &amp; {};
+/** The TypeScript type of a document, inferred from its field map. */
+export type Infer&lt;S extends FieldMap&gt; = Flat&lt;Req&lt;S&gt; &amp; Opt&lt;S&gt;&gt;;
+
+export declare const f: {
+  string(opts?: { min?: number; max?: number }): Field&lt;string&gt;;
+  number(opts?: { int?: boolean; min?: number; max?: number }): Field&lt;number&gt;;
+  boolean(): Field&lt;boolean&gt;;
+  timestamp(): Field&lt;Timestamp&gt;;
+  enum&lt;const E extends readonly string[]&gt;(values: E): Field&lt;E[number]&gt;;
+  array&lt;T&gt;(of: Field&lt;T&gt;, opts?: { max?: number }): Field&lt;T[]&gt;;
+  map&lt;S extends FieldMap&gt;(fields: S): Field&lt;Infer&lt;S&gt;&gt;;
+  ref&lt;C extends AnyCollection&gt;(to: C): Field&lt;DocumentReference&lt;DocOf&lt;C&gt;&gt;&gt;;
+  geopoint(): Field&lt;{ latitude: number; longitude: number }&gt;;
+  optional&lt;T&gt;(field: Field&lt;T&gt;): Field&lt;T | undefined&gt;;
+};
+
+/** &quot;createdAt desc&quot;, &quot;tags contains&quot; … one entry per field in a composite index. */
+export type IndexEntry&lt;K extends string&gt; = K | `${K} asc` | `${K} desc` | `${K} contains`;
+export type FieldOf&lt;E&gt; = E extends `${infer K} ${&#x27;asc&#x27; | &#x27;desc&#x27; | &#x27;contains&#x27;}` ? K : E;
+
+/** One declared composite index = the set of fields it covers (order/direction checked at runtime). */
+export interface CompositeIndex&lt;F extends string&gt; { readonly f: F }
+type IndexSetOf&lt;I&gt; = I extends readonly (infer E)[] ? (E extends readonly string[] ? CompositeIndex&lt;FieldOf&lt;E[number]&gt;&gt; : never) : never;
+
+export interface Collection&lt;P extends string, T, IX&gt; {
+  readonly path: P;
+  readonly indexes: readonly (readonly string[])[];
+  readonly __doc?: T;
+  /** Union of declared composite indexes, e.g. CompositeIndex&lt;&#x27;category&#x27; | &#x27;priceCents&#x27;&gt; | CompositeIndex&lt;&#x27;active&#x27; | &#x27;stock&#x27;&gt; */
+  readonly __ix?: IX;
+}
+export type AnyCollection = Collection&lt;string, any, any&gt;;
+export type DocOf&lt;C&gt; = C extends Collection&lt;string, infer T, any&gt; ? T : never;
+export type IndexesOf&lt;C&gt; = C extends Collection&lt;string, any, infer IX&gt; ? IX : never;
+
+/** Declare a collection. `path` may contain {params} for subcollections: &#x27;users/{uid}/orders&#x27;.
+ *  `indexes` lists COMPOSITE indexes only — single-field indexes are automatic (like Firebase).
+ *  Every index entry must name a declared field — a typo is a compile error. */
+export declare function collection&lt;
+  const P extends string,
+  S extends FieldMap,
+  const I extends readonly (readonly IndexEntry&lt;keyof S &amp; string&gt;[])[],
+&gt;(path: P, def: { fields: S; indexes: I; noIndex?: readonly (keyof S &amp; string)[]; ttl?: keyof S &amp; string }): Collection&lt;P, Infer&lt;S&gt;, IndexSetOf&lt;I&gt;&gt;;
+
+export interface Schema&lt;C extends Record&lt;string, AnyCollection&gt;&gt; { readonly collections: C }
+export declare function defineSchema&lt;const C extends Record&lt;string, AnyCollection&gt;&gt;(collections: C): Schema&lt;C&gt;;
+</pre></details>
+<details><summary><code>packages/icebase/src/storage.ts</code></summary><pre>// icebase/storage — same names as firebase/storage.
+import type { IceBaseApp } from &#x27;./app&#x27;;
+
+export interface FirebaseStorage { readonly app: IceBaseApp }
+export interface StorageReference { readonly fullPath: string; readonly name: string }
+export declare function getStorage(app: IceBaseApp): FirebaseStorage;
+export declare function ref(storage: FirebaseStorage, path: string): StorageReference;
+export declare function uploadBytes(r: StorageReference, data: Blob | Uint8Array, meta?: { contentType?: string; customMetadata?: Record&lt;string, string&gt; }): Promise&lt;{ ref: StorageReference }&gt;;
+export declare function getDownloadURL(r: StorageReference): Promise&lt;string&gt;;
+export declare function deleteObject(r: StorageReference): Promise&lt;void&gt;;
+export declare function listAll(r: StorageReference): Promise&lt;{ items: StorageReference[]; prefixes: StorageReference[] }&gt;;
+</pre></details>
+</main></div></body></html>

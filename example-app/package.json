@@ -1,0 +1,9 @@
+{
+  "name": "acme-shop",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": { "icebase": "*" }
+}

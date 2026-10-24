@@ -1,0 +1,21 @@
+{
+  "name": "icebase-monorepo",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "example-app"
+  ],
+  "scripts": {
+    "build": "npm run build -w icebase",
+    "typecheck": "tsc -p packages/icebase && tsc -p example-app",
+    "test": "npm test -w icebase",
+    "test:firebase": "scripts/emu.sh firestore,auth,database,storage \"cd packages/icebase && ICEBASE_EMU=1 npx vitest run --exclude test/functions.emu.test.ts\"",
+    "test:functions": "scripts/emu-fixture.sh \"npx vitest run test/functions.emu.test.ts\"",
+    "test:all": "npm run typecheck && npm test && npm run test:firebase && npm run test:functions"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "Apache-2.0"
+}

@@ -1,0 +1,7 @@
+{
+  "name": "icebase-functions-fixture",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "engines": { "node": "22" }
+}

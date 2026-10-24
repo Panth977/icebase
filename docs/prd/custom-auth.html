@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>IceBase · Custom auth (no vendor lock-in)</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --ink:#e7e9ee; --mute:#9aa3b2; --line:#262b36; --acc:#7cc4ff; --warn:#ffcf7a; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f7f8fa; --card:#fff; --ink:#151821; --mute:#5b6372; --line:#e3e6ec; --acc:#0b6bcb; --warn:#9a6400; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 28px 18px 60px; }
+  h1 { font-size: 26px; margin: 0 0 4px; } h2 { font-size: 19px; margin: 32px 0 8px; } h3 { font-size: 16px; margin: 18px 0 6px; }
+  .sub { color: var(--mute); margin: 0 0 18px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin: 10px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; vertical-align: top; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--mute); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  code { font: 12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; background: color-mix(in srgb, var(--line) 60%, transparent); padding: 1px 5px; border-radius: 5px; }
+  pre { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; overflow-x: auto; font: 12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .note { border-left: 3px solid var(--warn); padding-left: 10px; color: var(--mute); }
+  ol li, ul li { margin: 3px 0; }
+</style>
+</head>
+<body>
+<main>
+<h1>Custom auth — no vendor lock-in</h1>
+<p class="sub">IceBase PRD addendum · ORCH-26 · from Panth's answer, 2026-10-24 · reference implementation: VardayiniDairy <code>~/Dev/VDP/backend/functions/src/</code> (<code>challenge.ts</code>, <code>limits.ts</code>, <code>policy-limits.ts</code>, <code>whatsapp.ts</code>, <code>email.ts</code>, <code>sessions.ts</code>, auth endpoints in <code>index.ts</code>)</p>
+
+<h2>1. Goal</h2>
+<div class="card"><ul>
+  <li>Even with <code>auth</code> on <b>firebase</b> mode, the <b>login process</b> can be taken over by IceBase: your own SMTP, your own WhatsApp account / SMS gateway, your own Google OAuth client, your own message templates.</li>
+  <li>Firebase Auth is still used for what comes <b>after</b> login: user records, ID tokens / JWT, refresh, custom claims, <code>request.auth</code> in rules. IceBase signs in by minting a Firebase <b>custom token</b>.</li>
+  <li>App code does not change: frontend and backend call the <b>same Firebase API names</b>. The project config decides which sign-in method is native and which is custom.</li>
+  <li>End to end, not a kit: IceBase ships the endpoints, the challenge store, rate limits, blocks, approval page and default templates. The developer only provides credentials (or, optionally, their own send handler).</li>
+  <li>The same custom flows run unchanged in <b>emulator</b> mode (senders can be pointed at a local outbox shown in the console).</li>
+</ul></div>
+
+<h2>2. Config</h2>
+<pre>// icebase.config.ts
+import { defineConfig, senders } from 'icebase/config';
+
+export default defineConfig({
+  auth: {
+    providers: ['password', 'emailLink', 'phone', 'google'],
+
+    // Any method listed here is taken over by IceBase. The rest stay native Firebase.
+    custom: {
+      email: {
+        // What is sent: sign-in (link or approval), password reset, email verification.
+        sender: senders.smtp({ urlEnv: 'SMTP_URL', from: 'Acme &lt;no-reply@acme.com&gt;' }),
+        // or: sender: senders.resend({ apiKeyEnv: 'RESEND_KEY', from: … })
+        // or: sender: { handler: 'auth/sendEmail' }   ← your own function, see §5
+        signIn: 'approval',              // 'approval' (VDP style, cross-device) | 'link' | 'code'
+        templates: 'icebase/auth/templates', // optional overrides: signin.html, reset.html, verify.html (+ .txt)
+      },
+      phone: {
+        sender: senders.whatsappCloud({ tokenEnv: 'WA_TOKEN', phoneNumberIdEnv: 'WA_PHONE_ID', template: 'otp_login', language: 'en' }),
+        // or: senders.twilio({ … }) · senders.msg91({ … }) · { handler: 'auth/sendPhoneCode' }
+        codeLength: 6,
+      },
+      google: {
+        clientIdEnv: 'GOOGLE_CLIENT_ID',
+        clientSecretEnv: 'GOOGLE_CLIENT_SECRET',
+        // redirect URI is served by IceBase: https://&lt;app&gt;/__/icebase/auth/google/callback
+      },
+      // The security layer, shared by every custom method.
+      security: {
+        store: { database: 'default', path: '_icebase/auth' }, // Realtime Database instance + root path
+        limits: {
+          perIdentifier: { perHour: 5, perDay: 20 },  // one email / phone
+          perIp: { perHour: 30 },
+          global: { phoneSendsPerDay: 2000 },          // spend cap on paid channels
+        },
+        challenge: { ttlMinutes: 10, maxAttempts: 5 },
+        blockMinutes: 5,                               // "this wasn't me" on the approval page
+        allow: { emailDomains: ['*'], phoneCountries: ['IN', 'US'] },
+      },
+    },
+  },
+});</pre>
+<p class="note">Secrets are env-var <b>names</b>, as everywhere in IceBase. <code>icebase deploy</code> refuses to deploy a custom method whose env vars are missing.</p>
+
+<h2>3. Same API, routed by config</h2>
+<div class="card"><table>
+<tr><th>App calls (unchanged Firebase name)</th><th>Native</th><th>When <code>custom.*</code> is set</th></tr>
+<tr><td><code>sendSignInLinkToEmail(auth, email, settings)</code></td><td>Firebase sends its email</td><td>IceBase <code>email/start</code>: challenge + your sender + your template</td></tr>
+<tr><td><code>isSignInWithEmailLink</code> / <code>signInWithEmailLink</code></td><td>Firebase</td><td>link mode: IceBase verifies the link token, mints a custom token, signs in</td></tr>
+<tr><td><code>sendPasswordResetEmail(auth, email)</code></td><td>Firebase email</td><td>IceBase sends its own reset mail; <code>confirmPasswordReset(auth, code, pw)</code> checks the IceBase code and sets the password via Admin <code>updateUser</code></td></tr>
+<tr><td><code>sendEmailVerification(user)</code></td><td>Firebase email</td><td>IceBase mail; on confirm sets <code>emailVerified: true</code> via Admin</td></tr>
+<tr><td><code>signInWithEmailAndPassword</code> / <code>createUserWithEmailAndPassword</code></td><td colspan="2">Always native Firebase (no email is sent, nothing to take over). Rate limits still apply via the IceBase gateway in emulator mode.</td></tr>
+<tr><td><code>signInWithPhoneNumber(auth, phone, verifier)</code> → <code>confirm(code)</code></td><td>Firebase SMS + reCAPTCHA</td><td>IceBase <code>phone/start</code> sends the code over your WhatsApp/SMS; <code>confirm(code)</code> hits <code>phone/verify</code> → custom token. <code>verifier</code> is optional (IceBase uses its own limits; App Check later).</td></tr>
+<tr><td><code>signInWithPopup / signInWithRedirect(auth, new GoogleAuthProvider())</code></td><td>Firebase Google provider</td><td>IceBase OAuth code flow with your client id; verifies Google's id_token; finds or creates the user (by provider uid, then verified email); custom token</td></tr>
+<tr><td><code>onAuthStateChanged</code>, <code>getIdToken</code>, <code>getIdTokenResult</code>, <code>signOut</code></td><td colspan="2">Native Firebase in every case — the session after login is a normal Firebase session.</td></tr>
+</table></div>
+
+<h3>Extra APIs (only where Firebase has no shape for it)</h3>
+<div class="card"><table>
+<tr><th>API</th><th>Why</th></tr>
+<tr><td><code>waitForEmailApproval(auth, pending, { onState })</code></td><td>approval mode: the tab waits (RTDB listener on a public status node, not polling) and collects the token once the mail's button is pressed — VDP's <code>authEmailS1..S4</code></td></tr>
+<tr><td><code>customEmailAuth(auth)</code> · <code>customPhoneAuth(auth)</code> · <code>customGoogleOAuth(auth)</code></td><td>explicit entry points (start / verify / collect / cancel) for apps that want their own UI states; the standard names in §3 are thin wrappers over these</td></tr>
+<tr><td>Admin: <code>getAuthSecurity(app).unblock(identifier)</code>, <code>.listAttempts(identifier)</code>, <code>.resetLimits(identifier)</code></td><td>ops on the security store; also shown in the console's Auth › Security page</td></tr>
+<tr><td>Admin: <code>linkCustomIdentity(uid, { email | phone | google })</code>, <code>unlinkCustomIdentity</code></td><td>attach a second verified identifier to an existing account (VDP <code>authUnlink</code>)</td></tr>
+</table></div>
+
+<h2>4. What IceBase ships (end to end)</h2>
+<div class="card"><ol>
+  <li><b>Auth endpoints</b> — one HTTPS function <code>icebaseAuth</code> generated and deployed by <code>icebase deploy</code> (firebase mode: Cloud Functions; emulator: the local server), routes <code>/email/start|collect|approve|reject|page</code>, <code>/phone/start|verify</code>, <code>/google/start|callback</code>, <code>/reset/start|confirm</code>, <code>/verify/start|confirm</code>. Hosting gets a <code>/__/icebase/auth/**</code> rewrite.</li>
+  <li><b>Challenge store</b> in RTDB at <code>security.store.path</code>: secrets stored only as SHA-256, compared in constant time, single use, TTL, max attempts; public status node split from the secret node (VDP <code>signin/{id}</code> vs <code>…/challenge/state</code>). Database rules for the path are generated and merged into <code>database.rules.json</code> (secret nodes: no client access).</li>
+  <li><b>Three secrets for approval mode</b>: <code>approvalToken</code> (in the mail; can only approve), <code>clientSecret</code> (only in the starting tab; can only collect), code (phone only). The custom token never travels through the email.</li>
+  <li><b>Rate limiting + blocks</b> in RTDB: per identifier (hashed in the path), per IP, global spend cap on paid channels; counters via atomic <code>increment</code>; "this wasn't me" blocks the device signature for <code>blockMinutes</code>.</li>
+  <li><b>Approval page</b> served by IceBase: names the device and the site being signed into; approve / reject.</li>
+  <li><b>Default templates</b> (HTML + text) for sign-in, reset, verify, and WhatsApp authentication template guidance; overridable per file.</li>
+  <li><b>Senders</b>: <code>smtp</code>, <code>resend</code>, <code>whatsappCloud</code>, <code>twilio</code>, <code>msg91</code>, <code>console</code> (emulator: shown in the IceBase console outbox), or your own handler.</li>
+  <li><b>User linking</b>: custom sign-ins create/find Firebase users with stable uids; email and phone are written onto the Firebase user (<code>emailVerified</code> true after proof), so rules and Admin APIs see the same thing as native sign-in.</li>
+  <li><b>Audit trail</b> of starts / failures / blocks under the store path, with TTL cleanup (scheduled function), visible in the console later.</li>
+</ol></div>
+
+<h2>5. Own handler (optional)</h2>
+<pre>// icebase/functions/src/auth.ts — only if you want full control over sending
+import { defineEmailSender, definePhoneSender } from 'icebase/auth/server';
+
+export const sendEmail = defineEmailSender(async (m) =&gt; {
+  // m.kind: 'signIn' | 'passwordReset' | 'verifyEmail'
+  // m.to, m.link (approval/sign-in/reset URL), m.code?, m.device, m.site, m.rendered { subject, html, text }
+  await myMailer.send({ to: m.to, subject: m.rendered.subject, html: m.rendered.html });
+});
+
+export const sendPhoneCode = definePhoneSender(async (m) =&gt; {
+  // m.to (E.164), m.code, m.site
+  await myWhatsApp.sendTemplate(m.to, 'otp_login', [m.code]);
+});</pre>
+<p>Two handlers are all a developer ever writes, and only when the built-in senders don't fit. Everything else (challenges, limits, tokens, pages) stays IceBase's.</p>
+
+<h2>6. Acceptance</h2>
+<div class="card"><ul>
+  <li>An app with <code>auth.mode = firebase</code> and <code>custom.email</code> + <code>custom.phone</code> + <code>custom.google</code> signs in with no Firebase email/SMS ever sent; <code>request.auth.uid</code> in Firestore rules is the same uid as before the switch.</li>
+  <li>Removing <code>custom.email</code> from the config falls back to native Firebase email with no app code change.</li>
+  <li>Rate limit, attempt cap, TTL and block behave as configured (tests for each), in firebase and emulator mode.</li>
+  <li>Secrets never readable by a client (rules tests on the store path).</li>
+</ul></div>
+</main>
+</body>
+</html>

@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>IceBase · Phase 1 API cut</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --ink:#e7e9ee; --mute:#9aa3b2; --line:#262b36; --new:#7cc4ff; --cut:#ff9b8a; --ok:#8be0a4; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f7f8fa; --card:#fff; --ink:#151821; --mute:#5b6372; --line:#e3e6ec; --new:#0b6bcb; --cut:#c2412d; --ok:#1f8a46; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 28px 18px 60px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 19px; margin: 34px 0 8px; }
+  .sub { color: var(--mute); margin: 0 0 18px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin: 10px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; vertical-align: top; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--mute); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  td:first-child { white-space: nowrap; font-weight: 600; }
+  code { font: 12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; background: color-mix(in srgb, var(--line) 60%, transparent); padding: 1px 5px; border-radius: 5px; }
+  .tag { display:inline-block; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; border: 1px solid currentColor; margin-left: 6px; }
+  .new { color: var(--new); } .cut { color: var(--cut); } .ok { color: var(--ok); }
+  ul { margin: 6px 0; padding-left: 20px; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
+  .stat { background: var(--card); border:1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+  .stat b { font-size: 22px; display:block; }
+  .stat span { color: var(--mute); font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+<h1>IceBase · Phase 1 API cut</h1>
+<p class="sub">ORCH-26 · <b>approved by Panth 2026-10-24</b> · from PRD rev 8 §10 + Panth's 2026-10-24 list. Only the APIs nearly every Firebase app calls; everything else waits for phase 4+.</p>
+
+<div class="grid">
+  <div class="stat"><b>~170</b><span>APIs kept in phase 1 (of 1,054)</span></div>
+  <div class="stat"><b>6</b><span>services: app, auth, firestore, RTDB, storage, hosting</span></div>
+  <div class="stat"><b>15</b><span><span class="new">new</span> management APIs (create db / schema / rules from code)</span></div>
+  <div class="stat"><b>yes</b><span>functions: minimum set (onCall, onRequest, doc triggers, onSchedule)</span></div>
+</div>
+
+<h2>Decisions (Panth, 2026-10-24)</h2>
+<div class="card"><ul>
+  <li>API cut: approved as drafted.</li>
+  <li>Cloud Functions: <b>in</b>, the minimum set below.</li>
+  <li>Modes in phase 1: <b>firebase + emulator (SQLite)</b> together. vm mode stays phase 3.</li>
+  <li>Console GUI: after the SDK + CLI work.</li>
+  <li>License: Apache-2.0.</li>
+  <li>Auth: no vendor lock-in even in firebase mode — custom email / phone / Google OAuth flows with your own senders. See <code>custom-auth.html</code>.</li>
+  <li>Firebase test project: the build may create one for e2e.</li>
+</ul></div>
+
+<h2>How to read this</h2>
+<div class="card">
+<ul>
+  <li><b>Client</b> = <code>icebase/&lt;svc&gt;</code> (mirrors <code>firebase/&lt;svc&gt;</code>). <b>Admin</b> = <code>icebase/admin</code> (mirrors <code>firebase-admin</code>).</li>
+  <li><b>Manage</b> <span class="tag new">new</span> = IceBase-only, lets code do what the Firebase console GUI does. In firebase mode they call Google's management REST APIs with the service account; in emulator/vm they act on the IceBase server.</li>
+  <li>Same names, same argument shapes as Firebase. Typed from the schema (PRD §6, §9).</li>
+  <li><b>Cut</b> <span class="tag cut">later</span> = exists in Firebase, deliberately not in phase 1.</li>
+</ul>
+</div>
+
+<h2>App (core)</h2>
+<div class="card"><table>
+<tr><th>Side</th><th>APIs</th></tr>
+<tr><td>Client</td><td><code>initializeApp(config, env)</code> <code>getApp</code> <code>getApps</code> <code>deleteApp</code></td></tr>
+<tr><td>Admin</td><td><code>initializeAdminApp(config, env)</code> <code>getApp</code> <code>deleteApp</code> <code>cert</code> <code>applicationDefault</code></td></tr>
+<tr><td>Config</td><td><code>defineConfig</code> <code>defineSchema</code> <code>collection</code> <code>f.*</code> (string, number, boolean, timestamp, enum, array, map, ref, geopoint, optional)</td></tr>
+<tr><td>Cut</td><td><span class="tag cut">later</span> <code>initializeServerApp</code> (SSR), <code>onLog</code>, <code>registerVersion</code></td></tr>
+</table></div>
+
+<h2>Authentication</h2>
+<div class="card"><table>
+<tr><th>Side</th><th>APIs</th></tr>
+<tr><td>Client · setup</td><td><code>getAuth</code> <code>onAuthStateChanged</code> <code>onIdTokenChanged</code> <code>signOut</code> <code>auth.currentUser</code> <code>setPersistence</code></td></tr>
+<tr><td>Google</td><td><code>GoogleAuthProvider</code> <code>signInWithPopup</code> <code>signInWithRedirect</code> <code>getRedirectResult</code> <code>signInWithCredential</code></td></tr>
+<tr><td>Phone</td><td><code>RecaptchaVerifier</code> <code>signInWithPhoneNumber</code> → <code>confirmationResult.confirm(code)</code></td></tr>
+<tr><td>Email + password</td><td><code>createUserWithEmailAndPassword</code> <code>signInWithEmailAndPassword</code> <code>sendPasswordResetEmail</code> <code>confirmPasswordReset</code> <code>sendEmailVerification</code> <code>updatePassword</code> <code>reauthenticateWithCredential</code></td></tr>
+<tr><td>Email link</td><td><code>sendSignInLinkToEmail</code> <code>isSignInWithEmailLink</code> <code>signInWithEmailLink</code></td></tr>
+<tr><td>Other sign-in</td><td><code>signInAnonymously</code> <code>signInWithCustomToken</code></td></tr>
+<tr><td>User</td><td><code>updateProfile</code> <code>updateEmail</code> → <code>verifyBeforeUpdateEmail</code> <code>deleteUser</code> <code>getIdToken</code> <code>getIdTokenResult</code> (typed claims) <code>linkWithCredential</code></td></tr>
+<tr><td>Admin</td><td><code>getAuth</code> <code>verifyIdToken</code> <code>createCustomToken</code> <code>getUser</code> <code>getUserByEmail</code> <code>getUserByPhoneNumber</code> <code>listUsers</code> <code>createUser</code> <code>updateUser</code> (incl. <code>disabled: true/false</code> = enable/disable) <code>deleteUser</code> <code>setCustomUserClaims</code> (typed) <code>revokeRefreshTokens</code> <code>generatePasswordResetLink</code> <code>generateEmailVerificationLink</code> <code>generateSignInWithEmailLink</code></td></tr>
+<tr><td>Manage <span class="tag new">new</span></td><td><code>setProviders({ password, emailLink, google, phone, anonymous })</code> — enable/disable sign-in methods from code · <code>setAuthorizedDomains([...])</code></td></tr>
+<tr><td>Cut</td><td><span class="tag cut">later</span> MFA, SAML/OIDC, other OAuth providers (Apple, GitHub, …), tenants, <code>importUsers</code> (moves to <code>icebase migrate</code>), session cookies, blocking functions</td></tr>
+</table></div>
+
+<h2>Cloud Firestore</h2>
+<div class="card"><table>
+<tr><th>Side</th><th>APIs</th></tr>
+<tr><td>Setup</td><td><code>getFirestore</code> <code>initializeFirestore</code> <code>terminate</code></td></tr>
+<tr><td>References</td><td><code>collection(db, schemaColl, ...params)</code> <code>collectionGroup</code> <code>doc</code> <code>documentId</code></td></tr>
+<tr><td>Reads</td><td><code>getDoc</code> <code>getDocs</code> <code>onSnapshot</code> (doc + query) · snapshots: <code>data()</code> <code>exists()</code> <code>id</code> <code>ref</code> <code>docs</code> <code>docChanges()</code> <code>size</code> <code>empty</code></td></tr>
+<tr><td>Writes</td><td><code>addDoc</code> <code>setDoc</code> (incl. <code>{ merge }</code>) <code>updateDoc</code> <code>deleteDoc</code></td></tr>
+<tr><td>Queries (index-checked)</td><td><code>query</code> <code>where</code> (all operators) <code>orderBy</code> <code>limit</code> <code>limitToLast</code> <code>startAt</code> <code>startAfter</code> <code>endAt</code> <code>endBefore</code> <code>and</code> <code>or</code></td></tr>
+<tr><td>Aggregates</td><td><code>getCountFromServer</code> <code>getAggregateFromServer</code> <code>count</code> <code>sum</code> <code>average</code></td></tr>
+<tr><td>Transactions / batch</td><td><code>runTransaction</code> (<code>tx.get/set/update/delete</code>) <code>writeBatch</code> (<code>set/update/delete/commit</code>)</td></tr>
+<tr><td>Field values</td><td><code>serverTimestamp</code> <code>increment</code> <code>arrayUnion</code> <code>arrayRemove</code> <code>deleteField</code> · types <code>Timestamp</code> <code>GeoPoint</code></td></tr>
+<tr><td>Admin</td><td>same set through <code>getAdminFirestore(app)</code> (bypasses rules) + <code>getAll</code> <code>listCollections</code> <code>recursiveDelete</code></td></tr>
+<tr><td>Manage <span class="tag new">new</span></td><td><code>createDb(id, { location })</code> · <code>setSchema(schema)</code> · <code>setIndexes()</code> (from schema → deploys composites) · <code>setRules(firestore.rules)</code></td></tr>
+<tr><td>Cut</td><td><span class="tag cut">later</span> offline persistence &amp; cache APIs (16), bundles, vector search, BSON/Decimal types, <code>BulkWriter</code>, <code>onSnapshotsInSync</code>, <code>FromCache/FromServer</code> variants, pipelines</td></tr>
+</table></div>
+
+<h2>Realtime Database</h2>
+<div class="card"><table>
+<tr><th>Side</th><th>APIs</th></tr>
+<tr><td>Refs</td><td><code>getDatabase</code> <code>ref(db, pathTemplate, params)</code> <code>child</code> · typed by the RTDB path schema</td></tr>
+<tr><td>Read / write</td><td><code>get</code> <code>set</code> <code>update</code> <code>push</code> <code>remove</code> <code>runTransaction</code></td></tr>
+<tr><td>Listen</td><td><code>onValue</code> <code>onChildAdded</code> <code>onChildChanged</code> <code>onChildRemoved</code> <code>off</code> (and unsubscribe fn)</td></tr>
+<tr><td>Queries</td><td><code>query</code> <code>orderByChild</code> (needs <code>.indexOn</code>) <code>orderByKey</code> <code>orderByValue</code> <code>equalTo</code> <code>startAt</code> <code>endAt</code> <code>limitToFirst</code> <code>limitToLast</code></td></tr>
+<tr><td>Values / presence</td><td><code>serverTimestamp</code> <code>increment</code> <code>onDisconnect().set/remove</code></td></tr>
+<tr><td>Admin</td><td>same through <code>getAdminDatabase(app)</code></td></tr>
+<tr><td>Manage <span class="tag new">new</span></td><td><code>createDb(instance, { location })</code> · <code>setSchema</code> · <code>setRules(database.rules.json)</code> (with generated <code>.indexOn</code>)</td></tr>
+<tr><td>Cut</td><td><span class="tag cut">later</span> <code>onChildMoved</code>, <code>goOffline/goOnline</code>, <code>keepSynced</code>, <code>startAfter/endBefore</code></td></tr>
+</table></div>
+
+<h2>Cloud Storage</h2>
+<div class="card"><table>
+<tr><th>Side</th><th>APIs</th></tr>
+<tr><td>Client</td><td><code>getStorage</code> <code>ref</code> <code>uploadBytes</code> (put) <code>uploadBytesResumable</code> (progress) <code>uploadString</code> <code>getDownloadURL</code> <code>getBytes</code> (get) <code>getMetadata</code> <code>updateMetadata</code> <code>deleteObject</code> (del) <code>list</code> <code>listAll</code></td></tr>
+<tr><td>Admin</td><td><code>getStorage().bucket()</code> → <code>file()</code> <code>.save</code> <code>.download</code> <code>.delete</code> <code>.getSignedUrl</code> <code>.getMetadata</code> <code>.exists</code> · <code>getDownloadURL(file)</code> · <code>bucket.getFiles</code></td></tr>
+<tr><td>Manage <span class="tag new">new</span></td><td><code>createBucket(name, { location })</code> (+ link to Firebase) · <code>setSchema</code> (content types / max size per path) · <code>setRules(storage.rules)</code></td></tr>
+<tr><td>Cut</td><td><span class="tag cut">later</span> <code>getStream</code>/<code>getBlob</code>, CORS/lifecycle management, signed policy uploads</td></tr>
+</table></div>
+
+<h2>Hosting</h2>
+<div class="card"><table>
+<tr><th>Side</th><th>APIs</th></tr>
+<tr><td>Config</td><td><code>hosting</code> block in <code>icebase.config.ts</code>: <code>public</code>, <code>spa</code>, <code>rewrites</code>, <code>redirects</code>, <code>headers</code>, <code>cleanUrls</code>, <code>trailingSlash</code></td></tr>
+<tr><td>Manage <span class="tag new">new</span></td><td><code>createSite(siteId)</code> · <code>deploy(siteId, dir)</code> (version → upload → finalize → release; also <code>icebase deploy --only hosting</code>) · <code>setDNS(siteId, domain)</code> (adds custom domain, returns the DNS records to set + status)</td></tr>
+<tr><td>Cut</td><td><span class="tag cut">later</span> preview channels, rollback UI, i18n rewrites, multiple targets per app</td></tr>
+</table></div>
+
+<h2>Cloud Functions — in (minimum)</h2>
+<div class="card">
+<p>Panth: yes, minimum set.</p>
+<ul>
+  <li>Client: <code>getFunctions</code> <code>httpsCallable</code> (typed from schema)</li>
+  <li>Server (<code>icebase/functions/v2</code>): <code>onCall</code> <code>onRequest</code> <code>HttpsError</code> <code>onDocumentCreated/Updated/Deleted/Written</code> <code>onSchedule</code> · auth <code>beforeUserCreated</code> later</li>
+</ul>
+<p>Hosting <code>rewrites → function</code> only works if this is in.</p>
+</div>
+
+<h2>Around the APIs (phase 1, from the PRD)</h2>
+<div class="card"><ul>
+  <li>Schema runtime validation on every write; typed reads (SCH-1/2).</li>
+  <li>Composite-index check at compile time (<code>MissingCompositeIndex</code>) and at runtime (IDX-1/2).</li>
+  <li>CLI: <code>icebase init</code>, <code>icebase deploy --env X</code>, <code>icebase indexes check</code>.</li>
+  <li>Console: after the SDK + CLI work (Panth).</li>
+</ul></div>
+
+</main>
+</body>
+</html>

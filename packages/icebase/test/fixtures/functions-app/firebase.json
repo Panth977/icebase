@@ -1,0 +1,10 @@
+{
+  "functions": { "source": "functions", "runtime": "nodejs22" },
+  "emulators": {
+    "functions": { "port": 5011 },
+    "firestore": { "port": 8085 },
+    "auth": { "port": 9099 },
+    "ui": { "enabled": false },
+    "singleProjectMode": true
+  }
+}

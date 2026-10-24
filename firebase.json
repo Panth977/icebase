@@ -1,0 +1,11 @@
+{
+  "emulators": {
+    "firestore": { "port": 8085 },
+    "auth": { "port": 9099 },
+    "database": { "port": 9000 },
+    "storage": { "port": 9199 },
+    "ui": { "enabled": false },
+    "singleProjectMode": true
+  },
+  "storage": { "rules": "packages/icebase/test/fixtures/storage.rules" }
+}
