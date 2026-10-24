@@ -88,6 +88,8 @@ export interface EmulatorOptions {
    * 'owner' — fine on a developer machine, never on a server others can reach.
    */
   adminToken?: string;
+  /** Learning mode: a query whose index is not declared is reported here and answered (never in production). */
+  learnIndexes?: (missing: { collection: string; suggestion: string }) => void;
 }
 
 export interface RunningEmulator {
@@ -128,7 +130,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
   const projectId = config.firebase?.projectId ?? `demo-${config.name}`;
   const adminToken = opts.adminToken ?? (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.ICEBASE_ADMIN_TOKEN ?? 'owner';
 
-  const firestore = new FirestoreEngine({ file: memory ? ':memory:' : join(dataDir, 'firestore.sqlite'), schema: config.schema });
+  const firestore = new FirestoreEngine({ file: memory ? ':memory:' : join(dataDir, 'firestore.sqlite'), schema: config.schema, ...(opts.learnIndexes ? { learn: opts.learnIndexes } : {}) });
   const services = new Map<string, Service>();
   const ctx: EmulatorContext = {
     config,

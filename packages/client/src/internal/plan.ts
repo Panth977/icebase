@@ -110,22 +110,40 @@ function serves(ix: ParsedIndex, n: Need): boolean {
 
 const code = (p: string[]) => (p.length === 1 ? `'${p[0]}'` : `[${p.map((s) => `'${s}'`).join(', ')}]`);
 
+/** A path to suggest in index(…): a key under a record (data, like an id) is any key, '*'. */
+function general(c: AnyCollection, p: string[]): string[] {
+  const out: string[] = [];
+  let parent: { kind: string; of?: unknown; fields?: Record<string, { def: unknown }>; rest?: { def: unknown } } | null = { kind: 'map', fields: c.fields, ...(c.rest ? { rest: c.rest } : {}) };
+  for (const k of p) {
+    if (parent?.kind === 'record') {
+      out.push('*');
+      parent = ((parent.of as { def: typeof parent }) ?? null)?.def ?? null;
+    } else {
+      out.push(k);
+      const next: { def: unknown } | null | undefined = parent?.kind === 'map' ? (parent.fields?.[k] ?? parent.rest) : null;
+      parent = (next?.def as typeof parent) ?? null;
+    }
+  }
+  return out;
+}
+
 /** The index serving one conjunction, a list of single-field indexes merged, or what is missing. */
 function choose(c: AnyCollection, n: Need): { ok: true; uses: ParsedIndex[] } | { ok: false; missing: IndexNeed } {
   // One field: its single-field index (an array field's serves array-contains too).
   if (n.fields.length === 1) {
     const p = n.fields[0]!;
     const ix = findSingle(c, p);
-    return ix ? { ok: true, uses: [ix] } : { ok: false, missing: { fields: [p], suggestion: `index(${code(p)})` } };
+    return ix ? { ok: true, uses: [ix] } : { ok: false, missing: { fields: [p], suggestion: `index(${code(general(c, p))})` } };
   }
   const composite = c.indexes.find((x) => !single(x) && serves(x, n));
   if (composite) return { ok: true, uses: [composite] };
   // Equality / contains only: Firestore merges single-field indexes, so every field's will do.
   if (n.ordered.length === 0 && n.fields.every((p) => declaresSingle(c, p))) return { ok: true, uses: n.fields.map((p) => findSingle(c, p)!) };
-  const parts = [...n.eq.map(code), ...(n.contains ? [`contains(${code(n.contains)})`] : []), ...n.ordered.map((o) => (o.dir === 'desc' ? `desc(${code(o.field)})` : code(o.field)))];
+  const g = (p: string[]) => code(general(c, p));
+  const parts = [...n.eq.map(g), ...(n.contains ? [`contains(${g(n.contains)})`] : []), ...n.ordered.map((o) => (o.dir === 'desc' ? `desc(${g(o.field)})` : g(o.field)))];
   if (n.ordered.length === 0) {
     const lacking = n.fields.filter((p) => !declaresSingle(c, p));
-    return { ok: false, missing: { fields: lacking, suggestion: lacking.map((p) => `index(${code(p)})`).join(', ') } };
+    return { ok: false, missing: { fields: lacking, suggestion: lacking.map((p) => `index(${code(general(c, p))})`).join(', ') } };
   }
   return { ok: false, missing: { fields: n.fields, suggestion: `index(${parts.join(', ')})` } };
 }

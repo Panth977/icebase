@@ -179,6 +179,8 @@ export interface EngineOptions {
   /** SQLite file, or ':memory:'. */
   file: string;
   schema: Schema<Record<string, AnyCollection>, any, any>;
+  /** Learning mode: report a missing index instead of refusing the query (never in production). */
+  learn?: (missing: { collection: string; suggestion: string }) => void;
 }
 
 export class FirestoreEngine {
@@ -191,7 +193,9 @@ export class FirestoreEngine {
   private version: number;
   private lastTime = 0;
 
+  private readonly learn: EngineOptions['learn'];
   constructor(opts: EngineOptions) {
+    this.learn = opts.learn;
     this.db = new DatabaseSync(opts.file);
     this.db.exec(`
       PRAGMA journal_mode = WAL;
@@ -340,6 +344,10 @@ export class FirestoreEngine {
     // The SDK checks before sending; the server checks again so no client can skip it.
     for (const c of spec.path === null ? this.colls.filter((x) => x.id === spec.collectionId && x.group) : coll ? [coll] : []) {
       const plan = planQuery(c, spec);
+      if (!plan.ok && this.learn) {
+        this.learn({ collection: c.path, suggestion: plan.missing.suggestion });
+        continue;
+      }
       if (!plan.ok) throw new IceBaseError('failed-precondition', `The query requires an index on ${plan.missing.fields.map(showPath).join(' + ')}: add ${plan.missing.suggestion} to collection('${c.path}')`, { reason: 'missing-index', index: plan.missing.suggestion });
     }
     const order = fullOrder(spec);
