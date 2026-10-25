@@ -54,4 +54,20 @@ describe('auth · signed tokens', () => {
     const r = await fetch(`${emu.url}/__/icebase/admin/auth/createCustomToken`, { method: 'POST', headers: { authorization: 'Bearer owner', 'content-type': 'application/json' }, body: JSON.stringify({ uid: 'x' }) });
     expect(r.status).toBe(403);
   });
+
+  it('the emulator\'s open doors are admin only: other users, codes and links stay on the server', async () => {
+    const c = await createUserWithEmailAndPassword(getAuth(app), 'door@x.test', 'secret1');
+    const post = (path: string, body: object, token?: string) =>
+      fetch(`${emu.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
+    expect((await post('/identitytoolkit.googleapis.com/v1/accounts:delete?key=x', { localId: c.user.uid })).status).toBe(403);
+    expect((await post('/identitytoolkit.googleapis.com/v1/projects/demo-icebase/accounts:update', { localId: c.user.uid, customAttributes: '{"admin":true}' })).status).toBe(403);
+    expect((await post('/identitytoolkit.googleapis.com/v1/projects/demo-icebase/accounts', { email: 'new@x.test' })).status).toBe(403);
+    expect((await fetch(`${emu.url}/emulator/v1/projects/demo-icebase/oobCodes`)).status).toBe(403);
+    expect((await fetch(`${emu.url}/emulator/v1/projects/demo-icebase/accounts`, { method: 'DELETE' })).status).toBe(403);
+    const reset = await (await post('/identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=x', { requestType: 'PASSWORD_RESET', email: 'door@x.test', returnOobLink: true })).json();
+    expect(reset.oobLink).toBeUndefined();
+    // The admin (its token) still can.
+    expect((await getAdminAuth(admin).getUser(c.user.uid)).email).toBe('door@x.test');
+    expect((await fetch(`${emu.url}/emulator/v1/projects/demo-icebase/oobCodes`, { headers: { authorization: 'Bearer secret-admin' } })).status).toBe(200);
+  });
 });

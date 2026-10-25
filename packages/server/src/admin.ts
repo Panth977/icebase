@@ -93,6 +93,14 @@ export function getAdminAuth<Cfg extends AnyConfig>(app: IceBaseApp<Cfg>): Admin
         if (!res.ok || j.error) throw Object.assign(new Error(j.error?.message ?? `auth ${res.status}`), { code: j.error?.code ?? 'auth/internal-error' });
         return j;
       };
+      // firebase-admin sends 'Bearer owner' to an emulator; this server's admin token may be another.
+      const http = (native as unknown as { authRequestHandler?: { httpClient?: { getToken?: () => Promise<string> } } }).authRequestHandler?.httpClient;
+      if (http?.getToken) {
+        http.getToken = async () => {
+          const { callerToken } = await import('@panth977/icebase/internal');
+          return (await callerToken(app)) ?? 'owner';
+        };
+      }
       typed.verifyIdToken = async (idToken: string, checkRevoked?: boolean) => (await call<{ claims: never }>('verifyIdToken', { idToken, checkRevoked: !!checkRevoked })).claims;
       typed.createCustomToken = async (uid: string, claims?: object) => (await call<{ token: string }>('createCustomToken', { uid, ...(claims ? { claims } : {}) })).token;
     }

@@ -1,0 +1,79 @@
+// `icebase serve`: one port for the services, the functions and hosting (function rewrites run in
+// the same process), production file serving, signed tokens and a secret admin token.
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { gunzipSync } from 'node:zlib';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { defineConfig } from '@panth977/icebase/config';
+import { serve, type RunningEmulator } from '@panth977/icebase-cli/emulator';
+
+import fixture from './fixtures/functions-app/functions/config.js';
+
+describe('icebase serve', () => {
+  let s: RunningEmulator;
+  let url: string;
+  const web = mkdtempSync(join(tmpdir(), 'icebase-serve-'));
+  const data = mkdtempSync(join(tmpdir(), 'icebase-serve-data-'));
+  beforeAll(async () => {
+    writeFileSync(join(web, 'index.html'), '<!doctype html><title>app</title>');
+    mkdirSync(join(web, 'assets'));
+    writeFileSync(join(web, 'assets', 'app.123.js'), `console.log(${JSON.stringify('x'.repeat(4000))});`);
+    const config = defineConfig({
+      name: 'serve',
+      schema: fixture.schema,
+      functions: { source: 'functions' },
+      firebase: { projectId: 'demo-icebase', storageBucket: 'demo-icebase.appspot.com' },
+      hosting: { public: web, spa: true, rewrites: [{ source: '/api/**', function: 'hello' }], headers: [{ source: '**/*.js', headers: { 'x-served': 'yes' } }] },
+      environments: { local: { mode: 'emulator' } },
+    });
+    delete process.env.ICEBASE_ADMIN_TOKEN;
+    s = await serve({ config, env: 'local', root: resolve(import.meta.dirname, 'fixtures/functions-app'), port: 0, host: '127.0.0.1', dataDir: data, log: () => {} });
+    url = s.url;
+  });
+  afterAll(async () => {
+    await s.close();
+    delete process.env.ICEBASE_ADMIN_TOKEN;
+  });
+
+  it('hosting: files, the SPA fallback, compression, ETag and long caching of hashed assets', async () => {
+    const page = await fetch(`${url}/boards/x`);
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain('<title>app</title>');
+    expect(page.headers.get('cache-control')).toBe('no-cache');
+    const js = await fetch(`${url}/assets/app.123.js`, { headers: { 'accept-encoding': 'gzip' } });
+    expect(js.headers.get('cache-control')).toContain('immutable');
+    expect(js.headers.get('x-served')).toBe('yes');
+    const etag = js.headers.get('etag')!;
+    expect(etag).toBeTruthy();
+    const again = await fetch(`${url}/assets/app.123.js`, { headers: { 'if-none-match': etag } });
+    expect(again.status).toBe(304);
+    // fetch decodes gzip itself; the raw body is checked through node's http.
+    const http = await import('node:http');
+    const raw = await new Promise<{ enc: string | undefined; body: Buffer }>((ok) =>
+      http.get(`${url}/assets/app.123.js`, { headers: { 'accept-encoding': 'gzip' } }, (r) => {
+        const chunks: Buffer[] = [];
+        r.on('data', (c) => chunks.push(c));
+        r.on('end', () => ok({ enc: r.headers['content-encoding'], body: Buffer.concat(chunks) }));
+      }),
+    );
+    expect(raw.enc).toBe('gzip');
+    expect(gunzipSync(raw.body).toString()).toContain('xxxx');
+  });
+
+  it('a function rewrite runs in the same process and sees the original path', async () => {
+    const r = await fetch(`${url}/api/things?q=1`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ a: 1 }) });
+    expect(await r.json()).toEqual({ path: '/api/things', method: 'POST', body: { a: 1 } });
+  });
+
+  it('the services answer on the same port; the admin token is a secret kept in the data directory', async () => {
+    const health = await (await fetch(`${url}/__/icebase/health`)).json();
+    expect(health.services).toContain('firestore');
+    const { readFileSync } = await import('node:fs');
+    const token = readFileSync(join(data, 'admin-token'), 'utf8').trim();
+    expect(token.length).toBeGreaterThan(20);
+    expect(process.env.ICEBASE_ADMIN_TOKEN).toBe(token);
+    expect((await fetch(`${url}/emulator/v1/projects/demo-icebase/oobCodes`, { headers: { authorization: 'Bearer owner' } })).status).toBe(403);
+    expect((await fetch(`${url}/emulator/v1/projects/demo-icebase/oobCodes`, { headers: { authorization: `Bearer ${token}` } })).status).toBe(200);
+  });
+});

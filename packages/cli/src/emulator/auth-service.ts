@@ -186,6 +186,9 @@ export function authService(ctx: EmulatorContext): Service {
     return r;
   };
   const claimsOf = (t: string) => verifyJwt(t);
+  /** Tokens are signed: a server others can reach, so the emulator's open doors are admin only. */
+  const secure = !!ctx.signingKey;
+  const adminOnly = () => json({ error: { code: 403, message: 'PERMISSION_DENIED : admin only on this server', status: 'PERMISSION_DENIED' } }, 403);
 
   // Rules (and every other service) learn who is calling from here.
   ctx.verify = async (token) => {
@@ -466,7 +469,7 @@ export function authService(ctx: EmulatorContext): Service {
   };
 
   return {
-    async handle(req, url) {
+    async handle(req, url, caller) {
       const path = url.pathname;
       try {
         if (path.startsWith('/identitytoolkit.googleapis.com/')) {
@@ -474,6 +477,7 @@ export function authService(ctx: EmulatorContext): Service {
           if (req.method === 'GET') {
             const m = /^projects\/[^/]+\/accounts:batchGet$/.exec(rest);
             if (m) {
+              if (secure && !caller.admin) return adminOnly();
               const max = Math.min(Number(url.searchParams.get('maxResults') ?? 1000), 1000);
               const after = url.searchParams.get('nextPageToken') ?? '';
               const users = (q.page.all(after, max) as { rec: string }[]).map(read).filter((x): x is UserRec => !!x);
@@ -483,7 +487,14 @@ export function authService(ctx: EmulatorContext): Service {
             return null;
           }
           const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+          if (secure && !caller.admin) {
+            // A server others reach: links and codes go out by your senders, never back to the caller,
+            // and only an admin acts on another user.
+            delete body.returnOobLink;
+            if (rest.replace(/^accounts:/, '') === 'delete' && body.localId) return adminOnly();
+          }
           const proj = /^projects\/[^/]+\/(.+)$/.exec(rest);
+          if (proj && secure && !caller.admin) return adminOnly(); // firebase-admin's calls
           if (proj) {
             const fn = admin[proj[1]!] ?? client[proj[1]!.replace(/^accounts:/, '')];
             if (fn) return json(await fn(body));
@@ -526,6 +537,7 @@ export function authService(ctx: EmulatorContext): Service {
         }
         const emu = /^\/emulator\/v1\/projects\/[^/]+\/(oobCodes|verificationCodes|accounts)$/.exec(path);
         if (emu) {
+          if (secure && !caller.admin) return adminOnly();
           if (emu[1] === 'oobCodes') return json({ oobCodes: (q.oobAll.all() as { code: string; email: string; kind: string; link: string }[]).map((r) => ({ email: r.email, requestType: r.kind, oobCode: r.code, oobLink: r.link })) });
           if (emu[1] === 'verificationCodes') return json({ verificationCodes: (q.codeAll.all() as { phone: string; code: string; session: string }[]).map((r) => ({ phoneNumber: r.phone, code: r.code, sessionInfo: r.session })) });
           if (req.method === 'DELETE') {

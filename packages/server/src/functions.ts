@@ -270,32 +270,32 @@ const meta = (raw: fs.FirestoreEvent<unknown, Record<string, string>>) => ({ par
 /** Typed trigger: e.params.uid comes from 'users/{uid}/orders', e.data.data() is the order type. */
 export function onDocumentCreated<C extends AnyCollection>(c: C, handler: (e: DocEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentCreated<C extends AnyCollection>(c: C, opts: DocumentOptions, handler: (e: DocEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
-export function onDocumentCreated(pattern: string, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
-export function onDocumentCreated(pattern: string, opts: DocumentOptions, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentCreated<P extends string>(pattern: P, handler: (e: fs.FirestoreEvent<fs.QueryDocumentSnapshot | undefined, ParamsOf<P>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentCreated<P extends string>(pattern: P, opts: DocumentOptions, handler: (e: fs.FirestoreEvent<fs.QueryDocumentSnapshot | undefined, ParamsOf<P>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentCreated<C extends AnyCollection>(c: C, a: any, b?: any) {
   if (typeof c === 'string') return patternTrigger('created', c, a, b);
   return trigger<C, DocEvent<C>>('created', c, a, b, async (raw) => ({ ...meta(raw), data: (await snap(raw.data)) as DocEvent<C>['data'] }) as DocEvent<C>);
 }
 export function onDocumentDeleted<C extends AnyCollection>(c: C, handler: (e: DocEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentDeleted<C extends AnyCollection>(c: C, opts: DocumentOptions, handler: (e: DocEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
-export function onDocumentDeleted(pattern: string, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
-export function onDocumentDeleted(pattern: string, opts: DocumentOptions, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentDeleted<P extends string>(pattern: P, handler: (e: fs.FirestoreEvent<fs.QueryDocumentSnapshot | undefined, ParamsOf<P>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentDeleted<P extends string>(pattern: P, opts: DocumentOptions, handler: (e: fs.FirestoreEvent<fs.QueryDocumentSnapshot | undefined, ParamsOf<P>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentDeleted<C extends AnyCollection>(c: C, a: any, b?: any) {
   if (typeof c === 'string') return patternTrigger('deleted', c, a, b);
   return trigger<C, DocEvent<C>>('deleted', c, a, b, async (raw) => ({ ...meta(raw), data: (await snap(raw.data)) as DocEvent<C>['data'] }) as DocEvent<C>);
 }
 export function onDocumentUpdated<C extends AnyCollection>(c: C, handler: (e: DocChangeEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentUpdated<C extends AnyCollection>(c: C, opts: DocumentOptions, handler: (e: DocChangeEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
-export function onDocumentUpdated(pattern: string, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
-export function onDocumentUpdated(pattern: string, opts: DocumentOptions, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentUpdated<P extends string>(pattern: P, handler: (e: fs.FirestoreEvent<fs.Change<fs.QueryDocumentSnapshot> | undefined, ParamsOf<P>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentUpdated<P extends string>(pattern: P, opts: DocumentOptions, handler: (e: fs.FirestoreEvent<fs.Change<fs.QueryDocumentSnapshot> | undefined, ParamsOf<P>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentUpdated<C extends AnyCollection>(c: C, a: any, b?: any) {
   if (typeof c === 'string') return patternTrigger('updated', c, a, b);
   return trigger<C, DocChangeEvent<C>>('updated', c, a, b, async (raw) => ({ ...meta(raw), data: { before: await snap(raw.data.before), after: await snap(raw.data.after) } }) as DocChangeEvent<C>);
 }
 export function onDocumentWritten<C extends AnyCollection>(c: C, handler: (e: DocWriteEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentWritten<C extends AnyCollection>(c: C, opts: DocumentOptions, handler: (e: DocWriteEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
-export function onDocumentWritten(pattern: string, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
-export function onDocumentWritten(pattern: string, opts: DocumentOptions, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentWritten<P extends string>(pattern: P, handler: (e: fs.FirestoreEvent<fs.Change<fs.DocumentSnapshot> | undefined, ParamsOf<P>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentWritten<P extends string>(pattern: P, opts: DocumentOptions, handler: (e: fs.FirestoreEvent<fs.Change<fs.DocumentSnapshot> | undefined, ParamsOf<P>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentWritten<C extends AnyCollection>(c: C, a: any, b?: any) {
   if (typeof c === 'string') return patternTrigger('written', c, a, b);
   return trigger<C, DocWriteEvent<C>>('written', c, a, b, async (raw) => ({ ...meta(raw), data: { before: await snap(raw.data.before), after: await snap(raw.data.after) } }) as DocWriteEvent<C>);
@@ -425,8 +425,12 @@ export function onTaskDispatched(a: unknown, b?: unknown) {
 // ─── auth ──────────────────────────────────────────────────────────────────────
 
 export type AuthBlockingEvent = identity.AuthBlockingEvent;
-type BeforeCreateHandler = Parameters<typeof identity.beforeUserCreated>[0] extends infer H ? (H extends (...a: any[]) => any ? H : never) : never;
-type BeforeSignInHandler = Parameters<typeof identity.beforeUserSignedIn>[0] extends infer H ? (H extends (...a: any[]) => any ? H : never) : never;
+// The response types are not exported by firebase-functions: derived from the (opts, handler) overload.
+type BlockingResult<F extends (opts: never, handler: (e: identity.AuthBlockingEvent) => unknown) => unknown> = Exclude<Awaited<ReturnType<Parameters<F>[1]>>, void>;
+export type BeforeCreateResponse = BlockingResult<typeof identity.beforeUserCreated>;
+export type BeforeSignInResponse = BlockingResult<typeof identity.beforeUserSignedIn>;
+type BeforeCreateHandler = (event: identity.AuthBlockingEvent) => BeforeCreateResponse | void | Promise<BeforeCreateResponse | void>;
+type BeforeSignInHandler = (event: identity.AuthBlockingEvent) => BeforeSignInResponse | void | Promise<BeforeSignInResponse | void>;
 type BlockingFn = ReturnType<typeof identity.beforeUserCreated>;
 /** Runs before a user is created; throw HttpsError to refuse, or return changes (customClaims, displayName, disabled …). */
 export function beforeUserCreated(handler: BeforeCreateHandler): BlockingFn;

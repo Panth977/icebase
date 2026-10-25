@@ -114,6 +114,12 @@ export interface EmulatorOptions {
    * others can reach (a VM). Off by default: like Firebase's emulator, tokens are unsigned.
    */
   signTokens?: boolean;
+  /**
+   * Serve config.hosting on the same port (`icebase serve`): a request no service takes goes to
+   * hosting, whose function rewrites run in this process. 'production' also caches, compresses
+   * and sets long cache headers on hashed assets.
+   */
+  hosting?: boolean | 'production';
   /** Learning mode: a query whose index is not declared is reported here and answered (never in production). */
   learnIndexes?: (missing: { collection: string; suggestion: string }) => void;
 }
@@ -145,6 +151,9 @@ const CORS = {
   'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
   'access-control-expose-headers': 'x-goog-upload-url, x-goog-upload-status, x-goog-upload-chunk-granularity, x-goog-upload-control-url, x-goog-upload-size, location',
 };
+
+/** The service APIs' paths (everything else is hosting's when the server also hosts). */
+const SERVICE_PATH = /^\/(v1\/(fs|db|rt)\/|v1\/rt$|v0\/b\/|identitytoolkit\.googleapis\.com\/|securetoken\.googleapis\.com\/|emulator\/|__\/icebase\/)/;
 
 /** The signing key: random per run in memory, else made once and kept in the data directory. */
 function signTokens(opts: EmulatorOptions, dataDir: string, memory: boolean): Buffer | null {
@@ -205,8 +214,32 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
     }
   }
 
+  let hosting: ((req: Request) => Promise<Response>) | null = null;
+  if (opts.hosting) {
+    if (!config.hosting) throw new IceBaseError('failed-precondition', 'hosting: icebase.config has no hosting section');
+    const { hostingHandler } = await import('./hosting.ts');
+    hosting = hostingHandler({
+      config,
+      root,
+      production: opts.hosting === 'production',
+      // A function rewrite: the functions service, in this process.
+      callFunction: async (req, fn, region, pathAndQuery) => {
+        const inner = new Request(`${new URL(req.url).origin}/${projectId}/${region}/${fn}${pathAndQuery}`, {
+          method: req.method,
+          headers: req.headers,
+          signal: req.signal,
+          ...(req.method !== 'GET' && req.method !== 'HEAD' ? { body: await req.arrayBuffer() } : {}),
+        });
+        const svc = services.get('functions');
+        const caller = await ctx.verify(null);
+        return (await svc?.handle(inner, new URL(inner.url), caller)) ?? json({ error: { code: 'not-found', message: `no function ${fn}` } }, 404);
+      },
+    });
+  }
+
   const handler = async (req: Request): Promise<Response> => {
-    if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+    // Preflight for the service APIs; with hosting, anything else is the app's (a function may answer it).
+    if (req.method === 'OPTIONS' && (!hosting || SERVICE_PATH.test(new URL(req.url).pathname))) return new Response(null, { status: 204, headers: CORS });
     const url = new URL(req.url);
     try {
       if (url.pathname === '/__/icebase/health') return json({ ok: true, project: projectId, services: [...services.keys()], documents: firestore.count() });
@@ -220,6 +253,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
           return new Response(r.body, { status: r.status, statusText: r.statusText, headers: h });
         }
       }
+      if (hosting) return await hosting(req);
       return json({ error: { code: 'not-found', message: `No route ${req.method} ${url.pathname}` } }, 404, CORS);
     } catch (e) {
       const r = errorResponse(e);
@@ -308,4 +342,48 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
       firestore.close();
     },
   };
+}
+
+// ─── icebase serve ─────────────────────────────────────────────────────────────
+
+export interface ServeOptions extends Omit<EmulatorOptions, 'hosting' | 'signTokens' | 'listen'> {
+  /** Default PORT, else 8080. */
+  port?: number;
+  /** Default 0.0.0.0: a server others reach. */
+  host?: string;
+}
+
+/**
+ * `icebase serve`: the IceBase server for production on one port — every service, the functions,
+ * and config.hosting (with its function rewrites run in this process). ID tokens are signed, and
+ * the admin token is ICEBASE_ADMIN_TOKEN or one made once and kept in the data directory
+ * (never 'owner'). In-process admin apps get it through ICEBASE_ADMIN_TOKEN.
+ */
+export async function serve(opts: ServeOptions): Promise<RunningEmulator> {
+  const env = (globalThis as { process?: { env: Record<string, string | undefined> } }).process!.env;
+  const root = resolve(opts.root ?? process.cwd());
+  const memory = opts.dataDir === ':memory:';
+  const dataDir = memory ? ':memory:' : resolve(root, opts.dataDir ?? env.ICEBASE_DATA_DIR ?? opts.config.emulator?.dataDir ?? '.icebase');
+  if (!memory) mkdirSync(dataDir, { recursive: true });
+  let adminToken = opts.adminToken ?? env.ICEBASE_ADMIN_TOKEN;
+  if (!adminToken) {
+    if (memory) adminToken = randomBytes(24).toString('base64url');
+    else {
+      const file = join(dataDir, 'admin-token');
+      if (!existsSync(file)) writeFileSync(file, randomBytes(24).toString('base64url'), { mode: 0o600 });
+      adminToken = readFileSync(file, 'utf8').trim();
+    }
+  }
+  if (adminToken === 'owner') throw new IceBaseError('failed-precondition', "serve: the admin token 'owner' is the emulator's well-known one; set ICEBASE_ADMIN_TOKEN to a secret");
+  env.ICEBASE_ADMIN_TOKEN = adminToken;
+  return startEmulator({
+    ...opts,
+    root,
+    dataDir,
+    adminToken,
+    signTokens: true,
+    hosting: opts.config.hosting ? 'production' : false,
+    port: opts.port ?? (env.PORT ? Number(env.PORT) : 8080),
+    host: opts.host ?? '0.0.0.0',
+  });
 }

@@ -14,6 +14,10 @@ const HELP = `icebase <command>
                                 Create icebase.config.ts, schema, rules, functions; optionally import a Firebase project
   login [--reauth]              Sign in to Firebase (deploy and the management APIs use this login)
   dev [--env X]                 Start the emulator (SQLite) for every service in emulator mode, hosting, seed, reloads
+  serve [--env X] [--port N] [--host H] [--data DIR]
+                                Production server on one port (PORT, default 8080): every service in emulator mode,
+                                the functions and hosting; signed ID tokens; admin token ICEBASE_ADMIN_TOKEN or
+                                one kept in DIR/admin-token
   deploy --env X [--only a,b]   Deploy rules, indexes, auth providers, functions, hosting for environment X
                                 (--only: firestore, database, storage, auth, functions, hosting, rules, indexes)
   indexes check [--project tsconfig.json]
@@ -152,6 +156,28 @@ async function main(argv: string[]): Promise<number> {
       const { dev } = await import('./dev.ts');
       await dev(config, cwd, log, { ...(str(f.env) ? { env: str(f.env)! } : {}) });
       // Runs until Ctrl-C.
+      await new Promise(() => {});
+      return 0;
+    }
+    case 'serve': {
+      const { config } = await loadConfig(cwd);
+      const { devEnv } = await import('./dev.ts');
+      const { serve } = await import('../emulator/server.ts');
+      const env = devEnv(config, str(f.env) ?? process.env.ICEBASE_ENV);
+      process.env.ICEBASE_ENV = env;
+      const s = await serve({
+        config,
+        root: cwd,
+        env,
+        log,
+        ...(str(f.port) ? { port: Number(f.port) } : {}),
+        ...(str(f.host) ? { host: str(f.host)! } : {}),
+        ...(str(f.data) ? { dataDir: str(f.data)! } : {}),
+      });
+      log(`IceBase serving ${config.name} (env ${env}) on :${s.port}${config.hosting ? ' with hosting' : ''}`);
+      const stop = () => void s.close().then(() => process.exit(0));
+      process.once('SIGTERM', stop);
+      process.once('SIGINT', stop);
       await new Promise(() => {});
       return 0;
     }
