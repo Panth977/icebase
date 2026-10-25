@@ -38,7 +38,9 @@ export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
 
   /** Rules context for one document path: request.resource / resource as rules see them. */
   const allow = async (caller: Caller, method: 'get' | 'list' | 'create' | 'update' | 'delete', path: string, resource: StoredDoc | null, requestData: Record<string, Json> | null, query?: QuerySpec) => {
-    if (caller.admin || !rules) return;
+    if (caller.admin) return;
+    if (!rules && ctx.signingKey) throw new IceBaseError('permission-denied', 'firestore: no rules file, so only the admin may read or write on this server');
+    if (!rules) return;
     const ok = await rules.allows({
       method,
       path: `${db}/${path}`,
@@ -62,7 +64,9 @@ export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
    */
   const ANY = '\u0000any';
   const allowList = async (caller: Caller, spec: QuerySpec, _docs: StoredDoc[]) => {
-    if (caller.admin || !rules) return;
+    if (caller.admin) return;
+    if (!rules && ctx.signingKey) throw new IceBaseError('permission-denied', 'firestore: no rules file, so only the admin may read or write on this server');
+    if (!rules) return;
     let path: string;
     if (spec.path !== null) path = `${spec.path}/${ANY}`;
     else {
@@ -95,6 +99,7 @@ export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
   const commit = async (caller: Caller, writes: Write[], pre: Precondition[], unchecked = false) => {
     // An admin may write without the schema check (seeding legacy-shaped data); no one else.
     if (!(unchecked && caller.admin)) for (const w of writes) checkSchema(w);
+    if (!caller.admin && !rules && ctx.signingKey) throw new IceBaseError('permission-denied', 'firestore: no rules file, so only the admin may read or write on this server');
     if (!caller.admin && rules) {
       const preview = { s: 0, n: 0 };
       for (const w of writes) {

@@ -292,7 +292,9 @@ export function databaseService(ctx: EmulatorContext): Service {
   if (rulesFile) rules = loadDatabaseRules(readFileSync(resolve(ctx.root, rulesFile), 'utf8'));
 
   const canRead = (c: Caller, path: string) => {
-    if (c.admin || !rules) return;
+    if (c.admin) return;
+    if (!rules && ctx.signingKey) throw new IceBaseError('permission-denied', 'database: no rules file, so only the admin may read or write on this server');
+    if (!rules) return;
     if (!rules.canRead(path, c.auth, root)) throw new IceBaseError('permission-denied', `Permission denied (read ${path || '/'})`);
   };
 
@@ -332,6 +334,7 @@ export function databaseService(ctx: EmulatorContext): Service {
   const write = (c: Caller, ops: { path: string; value: unknown }[]) => {
     let next = root;
     for (const o of ops) next = setAt(next, o.path, resolveSentinels(o.value, getAt(next, o.path)));
+    if (!c.admin && !rules && ctx.signingKey) throw new IceBaseError('permission-denied', 'database: no rules file, so only the admin may read or write on this server');
     if (!c.admin && rules) for (const o of ops) if (!rules.canWrite(o.path, c.auth, root, next)) throw new IceBaseError('permission-denied', `Permission denied (write ${o.path || '/'})`);
     const prev = root;
     root = next;

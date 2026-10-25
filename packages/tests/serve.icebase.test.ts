@@ -117,4 +117,12 @@ describe('icebase serve', () => {
     // … and /b/<board> is the web app.
     expect(await (await fetch(`${url}/b/board-1`)).text()).toContain('<title>app</title>');
   });
+
+  it('no rules file: only the admin reads and writes (Firebase\'s default for a live project)', async () => {
+    const get = (token?: string) => fetch(`${url}/v1/fs/get`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ paths: ['products/p1'] }) });
+    expect((await get()).status).toBe(403);
+    expect((await get(process.env.ICEBASE_ADMIN_TOKEN)).status).toBe(200);
+    const db = await fetch(`${url}/v1/db/get`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: 'rooms', query: null }) });
+    expect(db.status).toBe(403);
+  });
 });

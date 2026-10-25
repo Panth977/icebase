@@ -109,7 +109,9 @@ export function storageService(ctx: EmulatorContext): Service {
 
   const ruleRes = (m: Meta | null) => (m ? { name: m.name, bucket: m.bucket, size: m.size, contentType: m.contentType, md5Hash: m.md5Hash, crc32c: m.crc32c, generation: m.generation, metageneration: m.metageneration, timeCreated: { __ib: 'ts', s: Math.floor(Date.parse(m.timeCreated) / 1000), n: 0, k: '' }, updated: m.updated, metadata: m.metadata, contentDisposition: m.contentDisposition ?? null, contentEncoding: m.contentEncoding ?? null, contentLanguage: m.contentLanguage ?? null, cacheControl: m.cacheControl ?? null } : null);
   const allow = async (c: Caller, method: 'get' | 'list' | 'create' | 'update' | 'delete', bucket: string, name: string, cur: Meta | null, next: Meta | null) => {
-    if (c.admin || !rules) return;
+    if (c.admin) return;
+    if (!rules && ctx.signingKey) throw new IceBaseError('permission-denied', 'storage: no rules file, so only the admin may read or write on this server');
+    if (!rules) return;
     const ok = await rules.allows({
       method,
       path: `/b/${bucket}/o/${name}`,
