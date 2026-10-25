@@ -78,10 +78,15 @@ export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
     for (const conj of conjs.length ? conjs : [[]]) {
       const fixed: Record<string, Json> = {};
       for (const f of conj) {
-        if (f.op !== '==' || isName(f.field)) continue;
+        if ((f.op !== '==' && f.op !== 'array-contains') || isName(f.field)) continue;
         let node = fixed;
         for (const k of f.field.slice(0, -1)) node = (node[k] && typeof node[k] === 'object' ? node[k] : (node[k] = {})) as Record<string, Json>;
-        node[f.field[f.field.length - 1]!] = f.value as Json;
+        const key = f.field[f.field.length - 1]!;
+        // array-contains: the list holds this value (and nothing else is known about it).
+        if (f.op === 'array-contains') {
+          const cur = node[key] as unknown as { __contains?: unknown[] } | undefined;
+          node[key] = { __contains: [...(cur?.__contains ?? []), f.value] } as unknown as Json;
+        } else node[key] = f.value as Json;
       }
       await allow(caller, 'list', path, { path, id: ANY, data: fixed, createTime: { s: 0, n: 0 }, updateTime: { s: 0, n: 0 }, version: 0 }, null, spec);
     }

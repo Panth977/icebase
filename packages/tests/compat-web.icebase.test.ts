@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { defineConfig } from '@panth977/icebase/config';
 import { startEmulator, type RunningEmulator } from '@panth977/icebase-cli/emulator';
-import { collection as coll, defineSchema, dbPath, f, index } from '@panth977/icebase/schema';
+import { collection as coll, contains, defineSchema, dbPath, f, index } from '@panth977/icebase/schema';
 import * as fs from '@panth977/icebase/compat/firestore';
 import * as rd from '@panth977/icebase/compat/database';
 
@@ -19,11 +19,16 @@ service cloud.firestore {
       match /tickets/{t} { allow read, write: if request.auth != null; }
     }
     match /secret/{id} { allow read, write: if false; }
+    match /shared/{id} {
+      allow get, list: if request.auth != null && request.auth.uid in resource.data.readers;
+      allow write: if request.auth != null;
+    }
   }
 }`;
 const DB_RULES = JSON.stringify({ rules: { presence: { $b: { '.read': true, $u: { '.read': true, '.write': 'auth != null && auth.uid == $u' } } }, open: { '.read': true, '.write': true } } });
 
 const secret = coll('secret', { fields: { x: f.string() }, indexes: [] });
+const shared = coll('shared', { fields: { readers: f.array(f.string()) }, indexes: [index(contains('readers'))] });
 const boards = coll('boards', { fields: { name: f.string(), n: f.number({ int: true }), owner: f.optional(f.ref(secret)), at: f.optional(f.timestamp()), tags: f.optional(f.array(f.string())) }, indexes: [index('n')] });
 const tickets = coll('boards/{b}/tickets', { fields: { title: f.string(), stage: f.string(), rank: f.number() }, indexes: [index('stage', 'rank'), index('rank')], group: true });
 
@@ -35,7 +40,7 @@ describe('compat · web modular API on the IceBase server', () => {
   writeFileSync(join(dir, 'database.rules.json'), DB_RULES);
   const config = defineConfig({
     name: 'compat-web',
-    schema: defineSchema({ boards, tickets, secret }, { paths: { presence: dbPath('presence/{b}/{u}', f.map({ online: f.boolean(), at: f.number() })), open: dbPath('open/{id}', f.map({ hi: f.number() })) } }),
+    schema: defineSchema({ boards, tickets, secret, shared }, { paths: { presence: dbPath('presence/{b}/{u}', f.map({ online: f.boolean(), at: f.number() })), open: dbPath('open/{id}', f.map({ hi: f.number() })) } }),
     rules: { firestore: 'firestore.rules', database: 'database.rules.json' },
     auth: { providers: ['password'] },
     firebase: { projectId: 'demo-icebase' },
@@ -172,5 +177,15 @@ describe('compat · web modular API on the IceBase server', () => {
     fs.refreshIceBaseAuth();
     expect(events[0]).toMatch(/^snap:/);
     expect(events[1]).toBe('error:permission-denied');
+  });
+
+  it('list rules: array-contains proves `uid in resource.data.readers`; a query without it is refused', async () => {
+    const me = JSON.parse(Buffer.from(token!.split('.')[1]!, 'base64url').toString()).user_id as string;
+    await fs.setDoc(fs.doc(db, 'shared/s1'), { readers: [me, 'other'] });
+    await fs.setDoc(fs.doc(db, 'shared/s2'), { readers: ['other'] });
+    const mine = await fs.getDocs(fs.query(fs.collection(db, 'shared'), fs.where('readers', 'array-contains', me)));
+    expect(mine.docs.map((d) => d.id)).toEqual(['s1']);
+    await expect(fs.getDocs(fs.query(fs.collection(db, 'shared'), fs.where('readers', 'array-contains', 'other')))).rejects.toMatchObject({ code: 'permission-denied' });
+    await expect(fs.getDocs(fs.collection(db, 'shared'))).rejects.toMatchObject({ code: 'permission-denied' });
   });
 });

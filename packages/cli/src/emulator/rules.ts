@@ -352,7 +352,14 @@ const isTs = (v: unknown): v is Ts => !!v && typeof v === 'object' && (v as Ts).
 const isDur = (v: unknown): v is Dur => !!v && typeof v === 'object' && '__dur' in (v as object);
 const isPath = (v: unknown): v is PathV => !!v && typeof v === 'object' && '__path' in (v as object);
 const isFloat = (v: unknown): v is { __float: number } => !!v && typeof v === 'object' && '__float' in (v as object);
-const isMap = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v) && !(v as { __ib?: unknown }).__ib && !isDur(v) && !isPath(v) && !isFloat(v) && !('__diff' in (v as object));
+/**
+ * Part of a list, known from a query's array-contains (list rules): `x in it`, hasAny and hasAll
+ * hold for what it is known to contain; anything else about it is unknown, which denies.
+ */
+export type KnownElements = { __contains: unknown[] };
+const isKnown = (v: unknown): v is KnownElements => !!v && typeof v === 'object' && Array.isArray((v as KnownElements).__contains);
+const knownHas = (k: KnownElements, x: unknown): boolean => k.__contains.some((y) => eq(x, y)) || err('the query does not say what else the list holds');
+const isMap = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v) && !(v as { __ib?: unknown }).__ib && !isDur(v) && !isPath(v) && !isFloat(v) && !('__diff' in (v as object)) && !isKnown(v);
 const num = (v: unknown): number => (typeof v === 'number' ? v : isFloat(v) ? v.__float : err(`expected a number, got ${typeName(v)}`));
 const tsMs = (t: Ts) => t.s * 1000 + Math.floor(t.n / 1e6);
 const msTs = (ms: number): Ts => {
@@ -502,6 +509,12 @@ function method(recv: unknown, name: string, args: unknown[]): unknown {
       case 'toUtf8':
         return { __ib: 'bytes', b: Buffer.from(recv).toString('base64') };
     }
+  }
+  if (isKnown(recv)) {
+    const arg = (args[0] ?? []) as unknown[];
+    if (name === 'hasAll') return arg.every((x) => knownHas(recv, x));
+    if (name === 'hasAny') return arg.some((x) => recv.__contains.some((y) => eq(x, y))) || err('the query does not say what else the list holds');
+    return err(`${name}() of a list the query knows only part of`);
   }
   if (Array.isArray(recv)) {
     const has = (x: unknown) => recv.some((y) => eq(x, y));
@@ -734,6 +747,7 @@ function ev(e: Expr, scope: Scope, req: RulesRequest, depth = 0): unknown {
           return cmp(l, r) >= 0;
         case 'in':
           if (Array.isArray(r)) return r.some((x) => eq(l, x));
+          if (isKnown(r)) return knownHas(r, l);
           if (isMap(r)) return String(l) in r;
           return err(`in needs a list or map, got ${typeName(r)}`);
         case '+':
