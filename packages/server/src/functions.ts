@@ -5,6 +5,12 @@
 import * as fs from 'firebase-functions/v2/firestore';
 import * as https from 'firebase-functions/v2/https';
 import * as scheduler from 'firebase-functions/v2/scheduler';
+import * as storageFns from 'firebase-functions/v2/storage';
+import * as databaseFns from 'firebase-functions/v2/database';
+import * as tasks from 'firebase-functions/v2/tasks';
+import * as identity from 'firebase-functions/v2/identity';
+import * as v1auth from 'firebase-functions/v1/auth';
+import type { CloudEvent } from 'firebase-functions/v2';
 import type { CloudFunction } from 'firebase-functions/v2';
 import { adminApps, type IceBaseApp } from '@panth977/icebase/app';
 import type { AnyConfig, EnvOf, IceBaseConfig } from '@panth977/icebase/config';
@@ -23,7 +29,11 @@ export type IceBaseFunctionRecord =
   | { kind: 'call'; handler: (req: https.CallableRequest<unknown>) => unknown; input?: Field<unknown>; output?: Field<unknown>; region?: string }
   | { kind: 'request'; handler: (req: Request) => Response | Promise<Response>; express?: ExpressHandler; region?: string }
   | { kind: 'document'; event: 'created' | 'updated' | 'deleted' | 'written'; collection: AnyCollection; handler: (e: unknown) => unknown }
-  | { kind: 'schedule'; schedule: string; handler: () => unknown };
+  | { kind: 'schedule'; schedule: string; handler: () => unknown }
+  | { kind: 'storage'; event: 'finalized' | 'deleted' | 'metadataUpdated'; bucket?: string; handler: (e: CloudEvent<storageFns.StorageObjectData>) => unknown }
+  | { kind: 'database'; event: 'created' | 'updated' | 'deleted' | 'written'; ref: string; handler: (e: unknown) => unknown }
+  | { kind: 'task'; handler: (req: tasks.Request<unknown>) => unknown; retry: { maxAttempts: number; minBackoffSeconds: number; maxBackoffSeconds: number }; region?: string }
+  | { kind: 'auth'; event: 'beforeCreate' | 'beforeSignIn' | 'created' | 'deleted'; handler: (e: unknown) => unknown };
 
 const tag = <F extends object>(f: F, rec: IceBaseFunctionRecord): F & { __icebase: IceBaseFunctionRecord } => Object.assign(f, { __icebase: rec });
 
@@ -174,6 +184,160 @@ export function onDocumentWritten<C extends AnyCollection>(c: C, a: any, b?: any
 export function onSchedule(schedule: string | scheduler.ScheduleOptions, handler: (e: scheduler.ScheduledEvent) => void | Promise<void>): scheduler.ScheduleFunction {
   const fn = scheduler.onSchedule(schedule as scheduler.ScheduleOptions, handler);
   return tag(fn, { kind: 'schedule', schedule: typeof schedule === 'string' ? schedule : schedule.schedule, handler: () => handler({ scheduleTime: new Date().toISOString() } as scheduler.ScheduledEvent) });
+}
+
+// ─── storage ───────────────────────────────────────────────────────────────────
+
+type StorageOpts = storageFns.StorageOptions | string;
+type StorageHandler = (e: storageFns.StorageEvent) => unknown;
+function storageTrigger(event: 'finalized' | 'deleted' | 'metadataUpdated', a: StorageOpts | StorageHandler, b?: StorageHandler) {
+  const opts = typeof a === 'function' ? {} : typeof a === 'string' ? { bucket: a } : a;
+  const handler = (typeof a === 'function' ? a : b) as StorageHandler;
+  const native =
+    event === 'finalized' ? storageFns.onObjectFinalized(opts, handler) : event === 'deleted' ? storageFns.onObjectDeleted(opts, handler) : storageFns.onObjectMetadataUpdated(opts, handler);
+  return tag(native, { kind: 'storage', event, ...(opts.bucket ? { bucket: opts.bucket as string } : {}), handler: handler as (e: CloudEvent<storageFns.StorageObjectData>) => unknown });
+}
+/** A stored object was written (created or replaced). Same event as firebase-functions. */
+export function onObjectFinalized(handler: StorageHandler): CloudFunction<storageFns.StorageEvent>;
+export function onObjectFinalized(opts: StorageOpts, handler: StorageHandler): CloudFunction<storageFns.StorageEvent>;
+export function onObjectFinalized(a: StorageOpts | StorageHandler, b?: StorageHandler): CloudFunction<storageFns.StorageEvent> {
+  return storageTrigger('finalized', a, b);
+}
+export function onObjectDeleted(handler: StorageHandler): CloudFunction<storageFns.StorageEvent>;
+export function onObjectDeleted(opts: StorageOpts, handler: StorageHandler): CloudFunction<storageFns.StorageEvent>;
+export function onObjectDeleted(a: StorageOpts | StorageHandler, b?: StorageHandler): CloudFunction<storageFns.StorageEvent> {
+  return storageTrigger('deleted', a, b);
+}
+export function onObjectMetadataUpdated(handler: StorageHandler): CloudFunction<storageFns.StorageEvent>;
+export function onObjectMetadataUpdated(opts: StorageOpts, handler: StorageHandler): CloudFunction<storageFns.StorageEvent>;
+export function onObjectMetadataUpdated(a: StorageOpts | StorageHandler, b?: StorageHandler): CloudFunction<storageFns.StorageEvent> {
+  return storageTrigger('metadataUpdated', a, b);
+}
+
+// ─── Realtime Database ─────────────────────────────────────────────────────────
+
+/** One side of a Realtime Database change, the same in both modes. */
+export interface ValueSnapshot<T = unknown> {
+  readonly key: string | null;
+  exists(): boolean;
+  val(): T | null;
+}
+export interface ValueEvent<T = unknown> {
+  params: Record<string, string>;
+  id: string;
+  time: string;
+  data: ValueSnapshot<T>;
+}
+export interface ValueChangeEvent<T = unknown> {
+  params: Record<string, string>;
+  id: string;
+  time: string;
+  data: { before: ValueSnapshot<T>; after: ValueSnapshot<T> };
+}
+type DbRef = string | { readonly kind: 'dbPath'; readonly path: string };
+const refOf = (r: DbRef) => `/${(typeof r === 'string' ? r : r.path).replace(/^\/+/, '')}`;
+const fromNativeSnap = (s: { key: string | null; exists(): boolean; val(): unknown }): ValueSnapshot => ({ key: s.key, exists: () => s.exists(), val: () => s.val() });
+
+function dbTrigger(event: 'created' | 'updated' | 'deleted' | 'written', r: DbRef, a: Omit<databaseFns.ReferenceOptions, 'ref'> | ((e: never) => unknown), b?: (e: never) => unknown) {
+  const opts = { ...(typeof a === 'function' ? {} : a), ref: refOf(r) } as databaseFns.ReferenceOptions;
+  const handler = (typeof a === 'function' ? a : b) as (e: unknown) => unknown;
+  // One event shape in both modes: the native event's snapshots become ValueSnapshots.
+  const wrap = (raw: databaseFns.DatabaseEvent<any, Record<string, string>>) => {
+    const d = raw.data as { before?: never; after?: never } & { key: string | null; exists(): boolean; val(): unknown };
+    const data = d && 'before' in d && d.before ? { before: fromNativeSnap(d.before), after: fromNativeSnap(d.after!) } : fromNativeSnap(d);
+    return handler({ params: raw.params, id: raw.id, time: raw.time, data });
+  };
+  const native =
+    event === 'created'
+      ? databaseFns.onValueCreated(opts, wrap)
+      : event === 'updated'
+        ? databaseFns.onValueUpdated(opts, wrap)
+        : event === 'deleted'
+          ? databaseFns.onValueDeleted(opts, wrap)
+          : databaseFns.onValueWritten(opts, wrap);
+  return tag(native, { kind: 'database', event, ref: opts.ref, handler });
+}
+/** dbPath from the schema (typed) or a ref pattern '/rooms/{roomId}'. */
+export function onValueCreated<T = unknown>(ref: DbRef, handler: (e: ValueEvent<T>) => unknown): CloudFunction<databaseFns.DatabaseEvent<any>>;
+export function onValueCreated<T = unknown>(ref: DbRef, opts: Omit<databaseFns.ReferenceOptions, 'ref'>, handler: (e: ValueEvent<T>) => unknown): CloudFunction<databaseFns.DatabaseEvent<any>>;
+export function onValueCreated(ref: DbRef, a: any, b?: any) {
+  return dbTrigger('created', ref, a, b);
+}
+export function onValueDeleted<T = unknown>(ref: DbRef, handler: (e: ValueEvent<T>) => unknown): CloudFunction<databaseFns.DatabaseEvent<any>>;
+export function onValueDeleted<T = unknown>(ref: DbRef, opts: Omit<databaseFns.ReferenceOptions, 'ref'>, handler: (e: ValueEvent<T>) => unknown): CloudFunction<databaseFns.DatabaseEvent<any>>;
+export function onValueDeleted(ref: DbRef, a: any, b?: any) {
+  return dbTrigger('deleted', ref, a, b);
+}
+export function onValueUpdated<T = unknown>(ref: DbRef, handler: (e: ValueChangeEvent<T>) => unknown): CloudFunction<databaseFns.DatabaseEvent<any>>;
+export function onValueUpdated<T = unknown>(ref: DbRef, opts: Omit<databaseFns.ReferenceOptions, 'ref'>, handler: (e: ValueChangeEvent<T>) => unknown): CloudFunction<databaseFns.DatabaseEvent<any>>;
+export function onValueUpdated(ref: DbRef, a: any, b?: any) {
+  return dbTrigger('updated', ref, a, b);
+}
+export function onValueWritten<T = unknown>(ref: DbRef, handler: (e: ValueChangeEvent<T>) => unknown): CloudFunction<databaseFns.DatabaseEvent<any>>;
+export function onValueWritten<T = unknown>(ref: DbRef, opts: Omit<databaseFns.ReferenceOptions, 'ref'>, handler: (e: ValueChangeEvent<T>) => unknown): CloudFunction<databaseFns.DatabaseEvent<any>>;
+export function onValueWritten(ref: DbRef, a: any, b?: any) {
+  return dbTrigger('written', ref, a, b);
+}
+
+// ─── task queues ───────────────────────────────────────────────────────────────
+
+export type TaskQueueOptions = tasks.TaskQueueOptions;
+/** A task queue's worker; enqueue with taskQueue(app, name).enqueue(data) (icebase/admin). */
+export function onTaskDispatched<Args = any>(handler: (req: tasks.Request<Args>) => void | Promise<void>): tasks.TaskQueueFunction<Args>;
+export function onTaskDispatched<Args = any>(opts: TaskQueueOptions, handler: (req: tasks.Request<Args>) => void | Promise<void>): tasks.TaskQueueFunction<Args>;
+export function onTaskDispatched(a: unknown, b?: unknown) {
+  const opts = (typeof a === 'function' ? {} : a) as TaskQueueOptions;
+  const handler = (typeof a === 'function' ? a : b) as (req: tasks.Request<unknown>) => void | Promise<void>;
+  const native = tasks.onTaskDispatched(opts, handler);
+  const rc = opts.retryConfig ?? {};
+  const num = (v: unknown, d: number) => (typeof v === 'number' ? v : d);
+  return tag(native, {
+    kind: 'task',
+    handler: handler as (req: tasks.Request<unknown>) => unknown,
+    retry: { maxAttempts: num(rc.maxAttempts, 3), minBackoffSeconds: num(rc.minBackoffSeconds, 1), maxBackoffSeconds: num(rc.maxBackoffSeconds, 60) },
+    ...(typeof opts.region === 'string' ? { region: opts.region } : {}),
+  });
+}
+
+// ─── auth ──────────────────────────────────────────────────────────────────────
+
+export type AuthBlockingEvent = identity.AuthBlockingEvent;
+type BeforeCreateHandler = Parameters<typeof identity.beforeUserCreated>[0] extends infer H ? (H extends (...a: any[]) => any ? H : never) : never;
+type BeforeSignInHandler = Parameters<typeof identity.beforeUserSignedIn>[0] extends infer H ? (H extends (...a: any[]) => any ? H : never) : never;
+type BlockingFn = ReturnType<typeof identity.beforeUserCreated>;
+/** Runs before a user is created; throw HttpsError to refuse, or return changes (customClaims, displayName, disabled …). */
+export function beforeUserCreated(handler: BeforeCreateHandler): BlockingFn;
+export function beforeUserCreated(opts: identity.BlockingOptions, handler: BeforeCreateHandler): BlockingFn;
+export function beforeUserCreated(a: any, b?: any) {
+  const handler = typeof a === 'function' ? a : b;
+  const native = typeof a === 'function' ? identity.beforeUserCreated(a) : identity.beforeUserCreated(a, b);
+  return tag(native, { kind: 'auth', event: 'beforeCreate', handler });
+}
+/** Runs before each sign-in; throw HttpsError to refuse, or return changes (sessionClaims …). */
+export function beforeUserSignedIn(handler: BeforeSignInHandler): BlockingFn;
+export function beforeUserSignedIn(opts: identity.BlockingOptions, handler: BeforeSignInHandler): BlockingFn;
+export function beforeUserSignedIn(a: any, b?: any) {
+  const handler = typeof a === 'function' ? a : b;
+  const native = typeof a === 'function' ? identity.beforeUserSignedIn(a) : identity.beforeUserSignedIn(a, b);
+  return tag(native, { kind: 'auth', event: 'beforeSignIn', handler });
+}
+/** A user was created / deleted (any way: sign-up, admin, custom auth). Uses firebase-functions v1's auth trigger in firebase mode. */
+export interface UserRecordLike {
+  uid: string;
+  email?: string;
+  displayName?: string;
+  phoneNumber?: string;
+  photoURL?: string;
+  disabled: boolean;
+  emailVerified: boolean;
+  customClaims?: Record<string, unknown>;
+  providerData: { providerId: string; uid: string; email?: string }[];
+}
+export function onUserCreated(handler: (user: UserRecordLike) => unknown): ReturnType<ReturnType<typeof v1auth.user>['onCreate']> {
+  return tag(v1auth.user().onCreate((u) => handler(u as unknown as UserRecordLike)), { kind: 'auth', event: 'created', handler: handler as (e: unknown) => unknown });
+}
+export function onUserDeleted(handler: (user: UserRecordLike) => unknown): ReturnType<ReturnType<typeof v1auth.user>['onDelete']> {
+  return tag(v1auth.user().onDelete((u) => handler(u as unknown as UserRecordLike)), { kind: 'auth', event: 'deleted', handler: handler as (e: unknown) => unknown });
 }
 
 // ─── custom auth endpoint ──────────────────────────────────────────────────────

@@ -5,6 +5,8 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import type { IceBaseFunctionRecord } from '@panth977/icebase-server/functions';
 import { matchCollectionPath } from '@panth977/icebase/schema';
@@ -63,12 +65,16 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
     // The functions' own icebase apps reach this server through this variable.
     process.env.ICEBASE_EMULATOR_HOST = ctx.origin.replace(/^http:\/\//, '');
     process.env.FUNCTIONS_EMULATOR = 'true';
+    // What Cloud Functions provides: the project, its default bucket and database (storage and database triggers read them).
+    const fb = ctx.config.firebase;
+    process.env.GCLOUD_PROJECT ??= ctx.projectId;
+    process.env.FIREBASE_CONFIG ??= JSON.stringify({ projectId: ctx.projectId, storageBucket: fb?.storageBucket ?? `${ctx.projectId}.appspot.com`, databaseURL: fb?.databaseURL ?? `https://${ctx.projectId}-default-rtdb.firebaseio.com` });
     if (ctx.env) process.env.ICEBASE_ENV = ctx.env;
     const { importTs } = await import('../cli/load.ts');
     const mod = (await importTs(`${pathToFileURL(entry).href}?v=${Date.now()}`)) as Record<string, { __icebase?: Rec }>;
     ctx.functionExports = mod;
     for (const [name, v] of Object.entries(mod)) if (v && (typeof v === 'object' || typeof v === 'function') && v.__icebase) fns.set(name, v.__icebase);
-    log(`functions: ${[...fns.entries()].map(([n, r]) => `${n} (${r.kind === 'document' ? `${r.event} ${r.collection.path}` : r.kind})`).join(', ') || 'none'}`);
+    log(`functions: ${[...fns.entries()].map(([n, r]) => `${n} (${r.kind === 'document' ? `${r.event} ${r.collection.path}` : 'event' in r ? `${r.kind} ${r.event}` : r.kind})`).join(', ') || 'none'}`);
   };
   // Loaded once the server listens (functions need its address), and again on `icebase dev` reloads.
   let loading: Promise<void> | null = null;
@@ -97,6 +103,166 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
     })();
   });
 
+  const fail = (name: string) => (e: unknown) => log(`functions: ${name} failed: ${(e as Error).stack ?? e}`);
+  const eventId = () => randomUUID();
+
+  // Storage triggers (onObjectFinalized …).
+  ctx.hooks.storage.push(({ event, object }) => {
+    void (async () => {
+      await ready();
+      for (const [name, r] of fns) {
+        if (r.kind !== 'storage' || r.event !== event) continue;
+        if (r.bucket && r.bucket !== object.bucket) continue;
+        const e = {
+          specversion: '1.0',
+          id: eventId(),
+          source: `//storage.googleapis.com/projects/_/buckets/${object.bucket}`,
+          type: `google.cloud.storage.object.v1.${event}`,
+          time: new Date().toISOString(),
+          subject: `objects/${object.name}`,
+          bucket: object.bucket,
+          data: object,
+        };
+        Promise.resolve(r.handler(e as never)).catch(fail(name));
+      }
+    })();
+  });
+
+  // Realtime Database triggers (onValueWritten …): every location a pattern names that the write changed.
+  ctx.hooks.database.push(({ paths, before, after }) => {
+    void (async () => {
+      await ready();
+      const rs = [...fns].filter(([, r]) => r.kind === 'database') as [string, Extract<Rec, { kind: 'database' }>][];
+      if (!rs.length) return;
+      const keys = (v: unknown) => (v && typeof v === 'object' ? Object.keys(v) : []);
+      for (const [name, r] of rs) {
+        const pat = r.ref.split('/').filter(Boolean);
+        const hits = new Map<string, Record<string, string>>();
+        for (const p of paths) {
+          const segs = p.split('/').filter(Boolean);
+          // Walk the pattern along the written path, then into the data below it.
+          const walk = (i: number, at: string[], params: Record<string, string>) => {
+            if (i === pat.length) return void hits.set(at.join('/'), params);
+            const want = pat[i]!;
+            const m = /^\{([^}]+)\}$/.exec(want);
+            if (i < segs.length) {
+              if (m) walk(i + 1, [...at, segs[i]!], { ...params, [m[1]!]: segs[i]! });
+              else if (want === segs[i]) walk(i + 1, [...at, want], params);
+              return;
+            }
+            const here = at.join('/');
+            const children = m ? [...new Set([...keys(before(here)), ...keys(after(here))])] : [want];
+            for (const k of children) walk(i + 1, [...at, k], m ? { ...params, [m[1]!]: k } : params);
+          };
+          walk(0, [], {});
+        }
+        for (const [loc, params] of hits) {
+          const b = before(loc);
+          const a = after(loc);
+          const had = b !== null && b !== undefined;
+          const has = a !== null && a !== undefined;
+          if (JSON.stringify(b ?? null) === JSON.stringify(a ?? null)) continue;
+          const kind = !had ? 'created' : !has ? 'deleted' : 'updated';
+          if (r.event !== 'written' && r.event !== kind) continue;
+          const snap = (v: unknown) => ({ key: loc.split('/').pop() ?? null, exists: () => v !== null && v !== undefined, val: () => (v === undefined ? null : v) });
+          const data = r.event === 'created' ? snap(a) : r.event === 'deleted' ? snap(b) : { before: snap(b), after: snap(a) };
+          Promise.resolve(r.handler({ params, id: eventId(), time: new Date().toISOString(), data })).catch(fail(name));
+        }
+      }
+    })();
+  });
+
+  // Auth: created / deleted events, and the blocking functions.
+  ctx.hooks.auth.push(({ event, user }) => {
+    void (async () => {
+      await ready();
+      for (const [name, r] of fns) if (r.kind === 'auth' && r.event === event) Promise.resolve(r.handler(user)).catch(fail(name));
+    })();
+  });
+  const blocking = (event: 'beforeCreate' | 'beforeSignIn') => async (user: Record<string, unknown>, how: string) => {
+    await ready();
+    const fn = [...fns.values()].find((r) => r.kind === 'auth' && r.event === event) as Extract<Rec, { kind: 'auth' }> | undefined;
+    if (!fn) return;
+    const provider = { password: 'password', emailLink: 'password', anonymous: 'anonymous', phone: 'phone', custom: 'custom' }[how] ?? how;
+    return (await fn.handler({
+      data: user,
+      eventId: eventId(),
+      eventType: `providers/cloud.auth/eventTypes/user.${event}:${provider}`,
+      authType: 'USER',
+      resource: { service: 'identitytoolkit.googleapis.com', name: `projects/${ctx.projectId}` },
+      timestamp: new Date().toUTCString(),
+      locale: 'en',
+      ipAddress: '127.0.0.1',
+      userAgent: 'icebase',
+      additionalUserInfo: { providerId: provider, isNewUser: event === 'beforeCreate' },
+      params: {},
+    })) as Record<string, unknown> | void;
+  };
+  ctx.hooks.beforeCreate = blocking('beforeCreate');
+  ctx.hooks.beforeSignIn = blocking('beforeSignIn');
+
+  // Task queues (onTaskDispatched): durable in the data directory, retried with backoff.
+  const tq = new DatabaseSync(ctx.dataDir === ':memory:' ? ':memory:' : join(ctx.dataDir, 'tasks.sqlite'));
+  tq.exec(`PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 10000;
+    CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, fn TEXT NOT NULL, data TEXT NOT NULL, run_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, scheduled TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS tasks_due ON tasks (run_at);`);
+  const enqueue = (fn: string, data: unknown, o: { id?: string; scheduleDelaySeconds?: number; scheduleTime?: string }) => {
+    const at = o.scheduleTime ? Date.parse(o.scheduleTime) : Date.now() + (o.scheduleDelaySeconds ?? 0) * 1000;
+    const id = o.id ?? randomUUID();
+    try {
+      tq.prepare(`INSERT INTO tasks (id, fn, data, run_at, scheduled) VALUES (?, ?, ?, ?, ?)`).run(id, fn, JSON.stringify(data ?? null), at, new Date(at).toISOString());
+    } catch (e) {
+      if (/UNIQUE/.test(String(e))) throw Object.assign(new Error(`A task with id ${id} already exists`), { code: 'functions/task-already-exists' });
+      throw e;
+    }
+    kick();
+    return id;
+  };
+  let busy = false;
+  let wake: ReturnType<typeof setTimeout> | null = null;
+  const kick = () => {
+    if (wake) clearTimeout(wake);
+    wake = setTimeout(() => void dispatch(), 0);
+  };
+  const dispatch = async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      await ready();
+      for (;;) {
+        const t = tq.prepare(`SELECT * FROM tasks WHERE run_at <= ? ORDER BY run_at LIMIT 1`).get(Date.now()) as { id: string; fn: string; data: string; attempts: number; scheduled: string } | undefined;
+        if (!t) break;
+        const r = fns.get(t.fn);
+        if (r?.kind !== 'task') {
+          log(`functions: task for ${t.fn}, which is not a task queue function — dropped`);
+          tq.prepare(`DELETE FROM tasks WHERE id = ?`).run(t.id);
+          continue;
+        }
+        try {
+          await r.handler({ data: JSON.parse(t.data), queueName: t.fn, id: t.id, retryCount: t.attempts, executionCount: t.attempts, scheduledTime: t.scheduled, previousResponse: undefined, retryReason: undefined, headers: {} } as never);
+          tq.prepare(`DELETE FROM tasks WHERE id = ?`).run(t.id);
+        } catch (e) {
+          const n = t.attempts + 1;
+          if (n >= r.retry.maxAttempts) {
+            fail(t.fn)(e);
+            log(`functions: task ${t.id} for ${t.fn} gave up after ${n} attempt(s)`);
+            tq.prepare(`DELETE FROM tasks WHERE id = ?`).run(t.id);
+          } else {
+            const backoff = Math.min(r.retry.minBackoffSeconds * 2 ** (n - 1), r.retry.maxBackoffSeconds) * 1000;
+            tq.prepare(`UPDATE tasks SET attempts = ?, run_at = ? WHERE id = ?`).run(n, Date.now() + backoff, t.id);
+          }
+        }
+      }
+    } finally {
+      busy = false;
+      const next = tq.prepare(`SELECT MIN(run_at) at FROM tasks`).get() as { at: number | null };
+      if (next.at !== null) {
+        if (wake) clearTimeout(wake);
+        wake = setTimeout(() => void dispatch(), Math.max(0, Math.min(next.at - Date.now(), 60_000)));
+      }
+    }
+  };
+
   // Schedules: check once a minute, on the minute.
   let timer: ReturnType<typeof setTimeout> | null = null;
   const tick = () => {
@@ -109,7 +275,7 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
   timer = setTimeout(tick, 60_000 - (Date.now() % 60_000));
 
   return {
-    started: () => void ready(),
+    started: () => void ready().then(() => kick()),
     async handle(req, url, caller) {
       const m = /^\/([^/]+)\/([a-z]+-[a-z]+\d+)\/([A-Za-z0-9_-]+)(\/.*)?$/.exec(url.pathname);
       if (!m) {
@@ -121,6 +287,19 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
           if (r?.kind !== 'schedule') return json({ error: { code: 'not-found', message: `no scheduled function ${name}` } }, 404);
           await r.handler();
           return json({ ok: true });
+        }
+        if (url.pathname === '/__/icebase/tasks/enqueue') {
+          if (!caller.admin) return json({ error: { code: 'permission-denied', message: 'enqueue is admin only' } }, 403);
+          const b = (await req.json().catch(() => ({}))) as { name?: string; data?: unknown; id?: string; scheduleDelaySeconds?: number; scheduleTime?: string };
+          if (!b.name) return json({ error: { code: 'invalid-argument', message: 'name' } }, 400);
+          try {
+            return json({ id: enqueue(b.name, b.data, b) });
+          } catch (e) {
+            return json({ error: { code: 'already-exists', message: (e as Error).message } }, 409);
+          }
+        }
+        if (url.pathname === '/__/icebase/tasks' && caller.admin) {
+          return json({ tasks: tq.prepare(`SELECT id, fn, run_at, attempts FROM tasks ORDER BY run_at`).all() });
         }
         if (url.pathname === '/__/icebase/functions/reload' && caller.admin) {
           loading = null;
@@ -154,6 +333,8 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
     close() {
       unsub();
       if (timer) clearTimeout(timer);
+      if (wake) clearTimeout(wake);
+      tq.close();
     },
   };
 }

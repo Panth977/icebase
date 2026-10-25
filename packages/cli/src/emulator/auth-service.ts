@@ -179,11 +179,68 @@ export function authService(ctx: EmulatorContext): Service {
     return { admin: false, auth: { uid: c.user_id, token: c } };
   };
 
+  // ── events and blocking functions ───────────────────────────────────────────
+
+  /** A user as Cloud Functions' auth events carry it (firebase-admin's UserRecord). */
+  const userEvent = (u: UserRec) => ({
+    uid: u.localId,
+    ...(u.email ? { email: u.email } : {}),
+    emailVerified: !!u.emailVerified,
+    ...(u.displayName ? { displayName: u.displayName } : {}),
+    ...(u.photoUrl ? { photoURL: u.photoUrl } : {}),
+    ...(u.phoneNumber ? { phoneNumber: u.phoneNumber } : {}),
+    disabled: !!u.disabled,
+    metadata: { creationTime: new Date(Number(u.createdAt)).toUTCString(), lastSignInTime: u.lastLoginAt ? new Date(Number(u.lastLoginAt)).toUTCString() : null },
+    providerData: u.providerUserInfo.map((p) => ({ providerId: p.providerId, uid: p.rawId, ...(p.email ? { email: p.email } : {}) })),
+    ...(u.customAttributes ? { customClaims: JSON.parse(u.customAttributes) as Record<string, unknown> } : {}),
+    tenantId: null,
+  });
+  const emitAuth = (event: 'created' | 'deleted', u: UserRec) => {
+    for (const h of ctx.hooks.auth) h({ event, user: userEvent(u) });
+  };
+  /** Apply what a blocking function returned (displayName, photoURL, emailVerified, disabled, customClaims; sessionClaims for this token). */
+  const applyPatch = (u: UserRec, patch: Record<string, unknown> | void): Record<string, unknown> | undefined => {
+    if (!patch) return undefined;
+    if (typeof patch.displayName === 'string') u.displayName = patch.displayName;
+    if (typeof patch.photoURL === 'string') u.photoUrl = patch.photoURL;
+    if (typeof patch.emailVerified === 'boolean') u.emailVerified = patch.emailVerified;
+    if (typeof patch.disabled === 'boolean') u.disabled = patch.disabled;
+    if (patch.customClaims && typeof patch.customClaims === 'object') u.customAttributes = JSON.stringify(patch.customClaims);
+    return patch.sessionClaims && typeof patch.sessionClaims === 'object' ? (patch.sessionClaims as Record<string, unknown>) : undefined;
+  };
+  const blocked = (e: unknown) => new AuthFail(`BLOCKING_FUNCTION_ERROR_RESPONSE : ${(e as Error).message ?? 'refused'}`);
+  /** A new user: beforeUserCreated, then saved, then the created event. */
+  const create = async (u: UserRec, how: string): Promise<UserRec> => {
+    if (ctx.hooks.beforeCreate) {
+      try {
+        applyPatch(u, await ctx.hooks.beforeCreate(userEvent(u), how));
+      } catch (e) {
+        throw blocked(e);
+      }
+    }
+    save(u);
+    emitAuth('created', u);
+    return u;
+  };
+  /** A sign-in: beforeUserSignedIn may refuse, change the user, or add claims to this session's token. */
+  const signIn = async (u: UserRec, how: string): Promise<UserRec> => {
+    if (!ctx.hooks.beforeSignIn) return u;
+    let session: Record<string, unknown> | undefined;
+    try {
+      session = applyPatch(u, await ctx.hooks.beforeSignIn(userEvent(u), how));
+    } catch (e) {
+      throw blocked(e);
+    }
+    save(u);
+    if (u.disabled) throw new AuthFail('USER_DISABLED');
+    return session ? { ...u, customAttributes: JSON.stringify({ ...(u.customAttributes ? JSON.parse(u.customAttributes) : {}), ...session }) } : u;
+  };
+
   // ── the routes ──────────────────────────────────────────────────────────────
 
   const client: Record<string, (b: Record<string, unknown>) => unknown> = {
-    signUp(b) {
-      if (!b.email && !b.password) return tokens(save(fresh({ isAnonymous: true })), 'anonymous');
+    async signUp(b) {
+      if (!b.email && !b.password) return tokens(await signIn(await create(fresh({ isAnonymous: true }), 'anonymous'), 'anonymous'), 'anonymous');
       const email = String(b.email ?? '').toLowerCase();
       if (!/^[^@\s]+@[^@\s]+$/.test(email)) throw new AuthFail('INVALID_EMAIL');
       if (String(b.password ?? '').length < 6) throw new AuthFail('WEAK_PASSWORD : Password should be at least 6 characters');
@@ -193,23 +250,24 @@ export function authService(ctx: EmulatorContext): Service {
       const u = anon ?? fresh();
       Object.assign(u, { email, passwordHash: hashPw(String(b.password)), isAnonymous: false, displayName: (b.displayName as string) ?? u.displayName });
       u.providerUserInfo = [...u.providerUserInfo.filter((x) => x.providerId !== 'password'), { providerId: 'password', rawId: email, email, federatedId: email }];
-      return tokens(save(u), 'password');
+      return tokens(await signIn(anon ? save(u) : await create(u, 'password'), 'password'), 'password');
     },
-    signInWithPassword(b) {
+    async signInWithPassword(b) {
       const u = getByEmail(String(b.email ?? ''));
       if (!u || !checkPw(String(b.password ?? ''), u.passwordHash)) throw new AuthFail(u ? 'INVALID_PASSWORD' : 'EMAIL_NOT_FOUND');
-      return tokens(live(u), 'password');
+      return tokens(await signIn(live(u), 'password'), 'password');
     },
-    signInWithCustomToken(b) {
+    async signInWithCustomToken(b) {
       const c = claimsOf(String(b.token ?? ''));
       if (!c || typeof c.uid !== 'string') throw new AuthFail('INVALID_CUSTOM_TOKEN');
-      const u = get(c.uid) ?? save(fresh({ localId: c.uid }));
+      const isNewUser = !get(c.uid);
+      const u = await signIn(live(get(c.uid) ?? (await create(fresh({ localId: c.uid }), 'custom'))), 'custom');
       if (c.claims && typeof c.claims === 'object') {
         // Developer claims from createCustomToken(uid, claims) ride on this session's tokens only.
         const merged = { ...(u.customAttributes ? JSON.parse(u.customAttributes) : {}), ...(c.claims as object) };
-        return tokens(live({ ...u, customAttributes: JSON.stringify(merged) }), 'custom', { isNewUser: false });
+        return tokens(live({ ...u, customAttributes: JSON.stringify(merged) }), 'custom', { isNewUser });
       }
-      return tokens(live(u), 'custom', { isNewUser: false });
+      return tokens(u, 'custom', { isNewUser });
     },
     lookup(b) {
       return { kind: 'identitytoolkit#GetAccountInfoResponse', users: [userInfo(fromIdToken(b.idToken))] };
@@ -268,16 +326,16 @@ export function authService(ctx: EmulatorContext): Service {
       q.oobDel.run(r.code);
       return { email: r.email, requestType: 'PASSWORD_RESET' };
     },
-    signInWithEmailLink(b) {
+    async signInWithEmailLink(b) {
       const r = takeOob(b.oobCode, 'EMAIL_SIGNIN');
       const email = String(b.email ?? '').toLowerCase();
       if (r.email !== email) throw new AuthFail('INVALID_EMAIL');
       q.oobDel.run(r.code);
       let u = getByEmail(email);
       const isNewUser = !u;
-      if (!u) u = fresh({ email, providerUserInfo: [{ providerId: 'password', rawId: email, email, federatedId: email }] });
+      if (!u) u = await create(fresh({ email, emailVerified: true, providerUserInfo: [{ providerId: 'password', rawId: email, email, federatedId: email }] }), 'emailLink');
       u.emailVerified = true;
-      return tokens(live(save(u)), 'emailLink', { isNewUser });
+      return tokens(await signIn(live(save(u)), 'emailLink'), 'emailLink', { isNewUser });
     },
     createAuthUri(b) {
       const u = getByEmail(String(b.identifier ?? ''));
@@ -285,7 +343,10 @@ export function authService(ctx: EmulatorContext): Service {
     },
     delete(b) {
       const u = b.localId ? get(String(b.localId)) : fromIdToken(b.idToken);
-      if (u) q.del.run(u.localId);
+      if (u) {
+        q.del.run(u.localId);
+        emitAuth('deleted', u);
+      }
       return { kind: 'identitytoolkit#DeleteAccountResponse' };
     },
     sendVerificationCode(b) {
@@ -295,14 +356,14 @@ export function authService(ctx: EmulatorContext): Service {
       q.codePut.run(sessionInfo, phone, String(randomInt(0, 1e6)).padStart(6, '0'), now());
       return { sessionInfo };
     },
-    signInWithPhoneNumber(b) {
+    async signInWithPhoneNumber(b) {
       const r = q.codeGet.get(String(b.sessionInfo ?? '')) as { phone: string; code: string } | undefined;
       if (!r) throw new AuthFail('INVALID_SESSION_INFO');
       if (r.code !== String(b.code)) throw new AuthFail('INVALID_CODE');
       let u = getByPhone(r.phone);
       const isNewUser = !u;
-      if (!u) u = save(fresh({ phoneNumber: r.phone, providerUserInfo: [{ providerId: 'phone', rawId: r.phone, phoneNumber: r.phone }] }));
-      return { ...tokens(live(u), 'phone'), phoneNumber: r.phone, isNewUser };
+      if (!u) u = await create(fresh({ phoneNumber: r.phone, providerUserInfo: [{ providerId: 'phone', rawId: r.phone, phoneNumber: r.phone }] }), 'phone');
+      return { ...tokens(await signIn(live(u), 'phone'), 'phone'), phoneNumber: r.phone, isNewUser };
     },
   };
 
@@ -321,7 +382,10 @@ export function authService(ctx: EmulatorContext): Service {
       if (b.emailVerified !== undefined) u.emailVerified = !!b.emailVerified;
       if (b.disabled !== undefined) u.disabled = !!b.disabled;
       if (get(u.localId)) throw new AuthFail('DUPLICATE_LOCAL_ID');
-      return { kind: 'identitytoolkit#SignupNewUserResponse', localId: save(u).localId };
+      // Admin SDK creates skip blocking functions (as in Firebase) but fire the created event.
+      save(u);
+      emitAuth('created', u);
+      return { kind: 'identitytoolkit#SignupNewUserResponse', localId: u.localId };
     },
     'accounts:lookup'(b) {
       const out: UserRec[] = [];
@@ -362,11 +426,17 @@ export function authService(ctx: EmulatorContext): Service {
       return { kind: 'identitytoolkit#SetAccountInfoResponse', localId: u.localId };
     },
     'accounts:delete'(b) {
+      const u = get(String(b.localId));
       q.del.run(String(b.localId));
+      if (u) emitAuth('deleted', u);
       return { kind: 'identitytoolkit#DeleteAccountResponse' };
     },
     'accounts:batchDelete'(b) {
-      for (const id of (b.localIds as string[]) ?? []) q.del.run(id);
+      for (const id of (b.localIds as string[]) ?? []) {
+        const u = get(id);
+        q.del.run(id);
+        if (u) emitAuth('deleted', u);
+      }
       return {};
     },
     'accounts:sendOobCode'(b) {
@@ -399,10 +469,10 @@ export function authService(ctx: EmulatorContext): Service {
           const proj = /^projects\/[^/]+\/(.+)$/.exec(rest);
           if (proj) {
             const fn = admin[proj[1]!] ?? client[proj[1]!.replace(/^accounts:/, '')];
-            if (fn) return json(fn(body));
+            if (fn) return json(await fn(body));
           }
           const fn = client[rest.replace(/^accounts:/, '')];
-          if (fn) return json(fn(body));
+          if (fn) return json(await fn(body));
           return null;
         }
         if (path === '/securetoken.googleapis.com/v1/token') {

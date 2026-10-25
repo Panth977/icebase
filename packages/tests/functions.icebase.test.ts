@@ -9,16 +9,18 @@ import { addDoc, collection, doc, getDoc, getFirestore, setDoc, updateDoc } from
 import { getFunctions, httpsCallable } from '@panth977/icebase/functions';
 import { collection as coll, defineSchema, f } from '@panth977/icebase/schema';
 
-const products = coll('products', { fields: { name: f.string(), stock: f.number({ int: true }) }, indexes: [] });
-const orders = coll('users/{uid}/orders', { fields: { product: f.ref(products), qty: f.number({ int: true, min: 1 }), note: f.optional(f.string()) }, indexes: [] });
-const make = (port?: number) => defineConfig({ name: 'fn-emu', schema: defineSchema({ products, orders }), functions: { source: 'functions' }, firebase: { projectId: 'demo-icebase' }, ...(port ? { emulator: { port } } : {}), environments: { local: { mode: 'emulator' } } });
+import fixture, { orders, products, rooms, seen } from './fixtures/functions-app/functions/config.js';
+const make = (port?: number) => defineConfig({ name: 'fn-emu', schema: fixture.schema, functions: { source: 'functions' }, firebase: { projectId: 'demo-icebase', storageBucket: 'demo-icebase.appspot.com' }, ...(port ? { emulator: { port } } : {}), environments: { local: { mode: 'emulator' } } });
+void coll;
+void f;
+void defineSchema;
 
 describe('functions · emulator mode', () => {
   let emu: RunningEmulator;
   let app: IceBaseApp;
   beforeAll(async () => {
-    emu = await startEmulator({ config: make(), env: 'local', root: resolve(import.meta.dirname, 'fixtures/functions-app'), port: 0, dataDir: ':memory:', log: () => {} });
-    app = initializeApp(make(emu.port), 'local', { name: 'fn-emu', firebase: { apiKey: 'demo', projectId: 'demo-icebase' } });
+    emu = await startEmulator({ config: make(), env: 'local', root: resolve(import.meta.dirname, 'fixtures/functions-app'), port: 0, dataDir: ':memory:', log: (l) => /failed|threw|gave up/.test(l) && console.log(l) });
+    app = initializeApp(make(emu.port), 'local', { name: 'fn-emu', firebase: { apiKey: 'demo', projectId: 'demo-icebase', storageBucket: 'demo-icebase.appspot.com' } });
   });
   afterAll(async () => {
     await deleteApp(app);
@@ -55,5 +57,62 @@ describe('functions · emulator mode', () => {
     await until(async () => (await getDoc(p)).data()?.stock === 9);
     const stockOf = httpsCallable<{ id: string }, { stock: number | null }>(getFunctions(app), 'stockOf');
     expect((await stockOf({ id: 'p1' })).data.stock).toBe(9);
+  });
+
+  const until = async (check: () => Promise<boolean>, what = 'the function') => {
+    for (let i = 0; i < 100; i++) {
+      if (await check()) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error(`${what} did not run`);
+  };
+  const seenDoc = (id: string) => getDoc(doc(collection(getFirestore(app), seen), id));
+
+  it('storage: onObjectFinalized gets the stored object', async () => {
+    const { getStorage, ref, uploadBytes } = await import('@panth977/icebase/storage');
+    await uploadBytes(ref(getStorage(app), 'in/a.txt'), new TextEncoder().encode('hello'), { contentType: 'text/plain' });
+    await until(async () => (await seenDoc('upload-in_a.txt')).exists());
+    expect((await seenDoc('upload-in_a.txt')).data()?.detail).toEqual({ name: 'in/a.txt', size: '5', contentType: 'text/plain' });
+  });
+
+  it('realtime database: onValueCreated with params, also for a write above the pattern', async () => {
+    const { getDatabase, ref, set } = await import('@panth977/icebase/database');
+    const rdb = getDatabase(app);
+    await set(ref(rdb, rooms, 'r1', 'm1'), { text: 'one' });
+    await until(async () => (await seenDoc('msg-r1-m1')).exists());
+    expect((await seenDoc('msg-r1-m1')).data()?.detail).toEqual({ text: 'one', params: { roomId: 'r1', msgId: 'm1' } });
+    await set(ref(rdb, rooms, 'r2'), { a: { text: 'x' }, b: { text: 'y' } });
+    await until(async () => (await seenDoc('msg-r2-a')).exists() && (await seenDoc('msg-r2-b')).exists());
+  });
+
+  it('task queues: enqueue, retry with backoff, delay', async () => {
+    const enqueue = httpsCallable<Record<string, unknown>, { ok: boolean }>(getFunctions(app), 'enqueueWork');
+    await enqueue({ key: 'k1' });
+    await enqueue({ key: 'k2', failOnce: true });
+    await until(async () => (await seenDoc('task-k1')).exists());
+    await until(async () => (await seenDoc('task-k2')).exists(), 'the retried task');
+    expect((await seenDoc('task-k2')).data()?.attempt).toBe(1);
+    const t0 = Date.now();
+    await enqueue({ key: 'k3', delay: 1 });
+    await until(async () => (await seenDoc('task-k3')).exists(), 'the delayed task');
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(900);
+  });
+
+  it('auth: beforeUserCreated can refuse or change the user; onUserCreated fires', async () => {
+    const { createUserWithEmailAndPassword, getAuth } = await import('@panth977/icebase/auth');
+    const auth = getAuth(app);
+    await expect(createUserWithEmailAndPassword(auth, 'eve@blocked.test', 'secret1')).rejects.toThrow(/blocked domain/);
+    const c = await createUserWithEmailAndPassword(auth, 'ann@ok.test', 'secret1');
+    expect(c.user.displayName).toBe('Gated');
+    expect((await c.user.getIdTokenResult(true)).claims.tier).toBe('free');
+    await until(async () => (await seenDoc(`user-${c.user.uid}`)).exists());
+  });
+
+  it('messaging: admin send lands in the outbox', async () => {
+    const notify = httpsCallable<{ token: string }, { id: string }>(getFunctions(app), 'notify');
+    const r = await notify({ token: 'device-1' });
+    expect(r.data.id).toMatch(/^projects\/demo-icebase\/messages\//);
+    const out = (await (await fetch(`${emu.url}/__/icebase/messaging/outbox`, { headers: { authorization: 'Bearer owner' } })).json()) as { messages: { message: { token: string } }[] };
+    expect(out.messages.at(-1)?.message.token).toBe('device-1');
   });
 });

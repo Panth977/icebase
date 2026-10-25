@@ -333,9 +333,14 @@ export function databaseService(ctx: EmulatorContext): Service {
     let next = root;
     for (const o of ops) next = setAt(next, o.path, resolveSentinels(o.value, getAt(next, o.path)));
     if (!c.admin && rules) for (const o of ops) if (!rules.canWrite(o.path, c.auth, root, next)) throw new IceBaseError('permission-denied', `Permission denied (write ${o.path || '/'})`);
+    const prev = root;
     root = next;
     persist();
     notify(ops.map((o) => segs(o.path).join('/')));
+    if (ctx.hooks.database.length) {
+      const e = { paths: ops.map((o) => segs(o.path).join('/')), before: (p: string) => exportVal(getAt(prev, p)), after: (p: string) => exportVal(getAt(next, p)) };
+      for (const h of ctx.hooks.database) h(e);
+    }
   };
 
   const disconnects = new Map<Live, { path: string; value: unknown; id: string }[]>();

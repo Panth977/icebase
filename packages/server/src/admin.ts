@@ -126,3 +126,100 @@ export function getAdminStorage(app: IceBaseApp): NativeAdminStorage {
     return nativeGetStorage(nativeAdminApp(app));
   });
 }
+
+// ─── task queues ───────────────────────────────────────────────────────────────
+
+export interface EnqueueOptions {
+  /** Run no sooner than this many seconds from now. */
+  scheduleDelaySeconds?: number;
+  /** Or at this time. */
+  scheduleTime?: Date;
+  /** A task id: enqueuing the same id twice fails (dedupe). */
+  id?: string;
+  dispatchDeadlineSeconds?: number;
+}
+
+export interface TaskQueue<T = unknown> {
+  enqueue(data: T, opts?: EnqueueOptions): Promise<void>;
+}
+
+/** The queue of an onTaskDispatched function: taskQueue(app, 'resizeImage').enqueue({ path }). */
+export function taskQueue<T = unknown>(app: IceBaseApp, functionName: string, opts: { region?: string } = {}): TaskQueue<T> {
+  if (app.kind !== 'admin') throw new IceBaseError('invalid-argument', 'taskQueue(app, name) needs an app from initializeAdminApp(config, env)', { reason: 'config' });
+  const region = opts.region ?? app.config.functions?.region ?? 'us-central1';
+  const mode = app.modes.functions;
+  if (mode === 'emulator') {
+    return {
+      async enqueue(data, o = {}) {
+        const { emulatorFetch } = await import('@panth977/icebase/app');
+        const { callerToken } = await import('@panth977/icebase/internal');
+        const token = await callerToken(app);
+        const res = await emulatorFetch(`${emulatorOrigin(app)}/__/icebase/tasks/enqueue`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify({ name: functionName, data, ...(o.id ? { id: o.id } : {}), ...(o.scheduleDelaySeconds !== undefined ? { scheduleDelaySeconds: o.scheduleDelaySeconds } : {}), ...(o.scheduleTime ? { scheduleTime: o.scheduleTime.toISOString() } : {}) }),
+        });
+        const j = (await res.json()) as { error?: { code: string; message: string } };
+        if (!res.ok || j.error) throw new IceBaseError((j.error?.code ?? 'internal') as IceBaseError['code'], j.error?.message ?? `enqueue ${res.status}`, { service: 'functions' });
+      },
+    };
+  }
+  if (mode === 'vm') throw new IceBaseError('unimplemented', 'task queues in vm mode are not built yet', { reason: 'mode', service: 'functions' });
+  return {
+    async enqueue(data, o = {}) {
+      const { getFunctions } = await import('firebase-admin/functions');
+      const q = getFunctions(nativeAdminApp(app)).taskQueue(`locations/${region}/functions/${functionName}`);
+      await q.enqueue(data as Record<string, unknown>, {
+        ...(o.scheduleDelaySeconds !== undefined ? { scheduleDelaySeconds: o.scheduleDelaySeconds } : {}),
+        ...(o.scheduleTime ? { scheduleTime: o.scheduleTime } : {}),
+        ...(o.id ? { id: o.id } : {}),
+        ...(o.dispatchDeadlineSeconds !== undefined ? { dispatchDeadlineSeconds: o.dispatchDeadlineSeconds } : {}),
+      } as never);
+    },
+  };
+}
+
+// ─── messaging ─────────────────────────────────────────────────────────────────
+
+/** firebase-admin's Message (token / topic / condition + notification, data, webpush …). */
+export type Message = import('firebase-admin/messaging').Message;
+
+export interface AdminMessaging {
+  /** Send one message; resolves to its message id. */
+  send(message: Message): Promise<string>;
+  sendEach(messages: Message[]): Promise<{ successCount: number; failureCount: number; responses: { success: boolean; messageId?: string; error?: Error }[] }>;
+}
+
+/** Push messages (Firebase Cloud Messaging). On the IceBase server they land in an outbox
+ * (GET /__/icebase/messaging/outbox) — and are delivered by web push when config.messaging.webPush is set. */
+export function getAdminMessaging(app: IceBaseApp): AdminMessaging {
+  if (app.kind !== 'admin') throw new IceBaseError('invalid-argument', 'getAdminMessaging(app) needs an app from initializeAdminApp(config, env)', { reason: 'config' });
+  return service(app, 'messaging', (): AdminMessaging => {
+    if (app.modes.functions !== 'emulator') {
+      const native = async () => (await import('firebase-admin/messaging')).getMessaging(nativeAdminApp(app));
+      return {
+        send: async (m) => (await native()).send(m),
+        sendEach: async (ms) => {
+          const r = await (await native()).sendEach(ms);
+          return { successCount: r.successCount, failureCount: r.failureCount, responses: r.responses.map((x) => ({ success: x.success, ...(x.messageId ? { messageId: x.messageId } : {}), ...(x.error ? { error: x.error as Error } : {}) })) };
+        },
+      };
+    }
+    const post = async (m: Message) => {
+      const { emulatorFetch } = await import('@panth977/icebase/app');
+      const { callerToken } = await import('@panth977/icebase/internal');
+      const token = await callerToken(app);
+      const res = await emulatorFetch(`${emulatorOrigin(app)}/__/icebase/messaging/send`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ message: m }) });
+      const j = (await res.json()) as { name?: string; error?: { code: string; message: string } };
+      if (!res.ok || j.error) throw new IceBaseError((j.error?.code ?? 'internal') as IceBaseError['code'], j.error?.message ?? `messaging ${res.status}`, { service: 'messaging' });
+      return j.name!;
+    };
+    return {
+      send: post,
+      sendEach: async (ms) => {
+        const responses = await Promise.all(ms.map((m) => post(m).then((messageId) => ({ success: true, messageId }), (error: Error) => ({ success: false, error }))));
+        return { successCount: responses.filter((r) => r.success).length, failureCount: responses.filter((r) => !r.success).length, responses };
+      },
+    };
+  });
+}

@@ -158,7 +158,15 @@ export function storageService(ctx: EmulatorContext): Service {
     await allow(c, cur ? 'update' : 'create', bucket, name, cur, meta);
     writeBlob(bucket, name, data);
     q.put.run(bucket, name, JSON.stringify(meta));
+    emit('finalized', meta);
     return meta;
+  };
+
+  /** Storage events for functions (onObjectFinalized …), in Cloud Storage's object shape. */
+  const emit = (event: 'finalized' | 'deleted' | 'metadataUpdated', m: Meta) => {
+    if (!ctx.hooks.storage.length) return;
+    const object = { name: m.name, bucket: m.bucket, contentType: m.contentType, size: String(m.size), md5Hash: m.md5Hash, crc32c: m.crc32c, generation: m.generation, metageneration: m.metageneration, timeCreated: m.timeCreated, updated: m.updated, metadata: m.metadata, storageClass: 'STANDARD', id: `${m.bucket}/${m.name}/${m.generation}`, kind: 'storage#object' };
+    for (const h of ctx.hooks.storage) h({ event, object });
   };
 
   /** Firebase's view (v0) and GCS's view (v1) of the same metadata. */
@@ -252,12 +260,14 @@ export function storageService(ctx: EmulatorContext): Service {
           checkSchema(name, next.size, next.contentType);
           await allow(caller, 'update', bucket, name, cur, next);
           q.put.run(bucket, name, JSON.stringify(next));
+          emit('metadataUpdated', next);
           return json(v0(next));
         }
         if (req.method === 'DELETE') {
           if (!cur) return notFound(name);
           await allow(caller, 'delete', bucket, name, cur, null);
           q.del.run(bucket, name);
+          emit('deleted', cur);
           dropBlob(bucket, name);
           return new Response(null, { status: 204 });
         }
@@ -320,11 +330,13 @@ export function storageService(ctx: EmulatorContext): Service {
             next.metadata = Object.fromEntries(Object.entries({ ...cur.metadata, ...meta }).filter(([, v]) => v !== null)) as Record<string, string>;
           }
           q.put.run(bucket, name, JSON.stringify(next));
+          emit('metadataUpdated', next);
           return json(v1(next));
         }
         if (req.method === 'DELETE') {
           if (!cur) return notFound(name);
           q.del.run(bucket, name);
+          emit('deleted', cur);
           dropBlob(bucket, name);
           return new Response(null, { status: 204 });
         }

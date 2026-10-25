@@ -10,15 +10,16 @@ import { collection as coll, defineSchema, f } from '@panth977/icebase/schema';
 
 const FS = process.env.FIRESTORE_EMULATOR_HOST;
 if (!FS) throw new Error('run under the fixture emulators');
-const products = coll('products', { fields: { name: f.string(), stock: f.number({ int: true }) }, indexes: [] });
-const orders = coll('users/{uid}/orders', { fields: { product: f.ref(products), qty: f.number({ int: true, min: 1 }), note: f.optional(f.string()) }, indexes: [] });
-const config = defineConfig({ name: 'fn-client', schema: defineSchema({ products, orders }), firebase: { projectId: 'demo-icebase' }, environments: { test: { mode: 'firebase' } } });
+import fixture, { orders, products, rooms, seen } from './fixtures/functions-app/functions/config.js';
+void coll;
+void defineSchema;
+const config = defineConfig({ name: 'fn-client', schema: fixture.schema, firebase: { projectId: 'demo-icebase', storageBucket: 'demo-icebase.appspot.com', databaseURL: 'http://127.0.0.1:9009/?ns=demo-icebase-default-rtdb' }, environments: { test: { mode: 'firebase' } } });
 
 // The type of a server callable, as the client would import it with `import type`.
 declare const addFn: ReturnType<typeof onCall<{ a: number; b: number }, { sum: number; uid: string | null }>>;
 
 describe('functions · firebase mode', () => {
-  const app = initializeApp(config, 'test', { name: 'fn', firebase: { apiKey: 'demo', projectId: 'demo-icebase' } });
+  const app = initializeApp(config, 'test', { name: 'fn', firebase: { apiKey: 'demo', projectId: 'demo-icebase', storageBucket: 'demo-icebase.appspot.com', databaseURL: 'http://127.0.0.1:9009/?ns=demo-icebase-default-rtdb' } });
   const fns = getFunctions(app);
   connectFunctionsEmulator(fns, '127.0.0.1', 5011);
   const db = getFirestore(app);
@@ -61,5 +62,54 @@ describe('functions · firebase mode', () => {
     await until(async () => (await getDoc(p)).data()?.stock === 9);
     const stockOf = httpsCallable<{ id: string }, { stock: number | null }>(fns, 'stockOf');
     expect((await stockOf({ id: 'p1' })).data.stock).toBe(9);
+  });
+
+  const until = async (check: () => Promise<boolean>, what = 'the function') => {
+    for (let i = 0; i < 120; i++) {
+      if (await check()) return;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    throw new Error(`${what} did not run`);
+  };
+  const seenDoc = (id: string) => getDoc(doc(collection(db, seen), id));
+
+  it('storage: onObjectFinalized gets the stored object', async () => {
+    const { connectStorageEmulator, getStorage, ref, uploadBytes } = await import('@panth977/icebase/storage');
+    const st = getStorage(app);
+    connectStorageEmulator(st, '127.0.0.1', 9199);
+    await uploadBytes(ref(st, 'in/a.txt'), new TextEncoder().encode('hello'), { contentType: 'text/plain' });
+    await until(async () => (await seenDoc('upload-in_a.txt')).exists());
+    expect((await seenDoc('upload-in_a.txt')).data()?.detail).toEqual({ name: 'in/a.txt', size: '5', contentType: 'text/plain' });
+  });
+
+  it('realtime database: onValueCreated with params, also for a write above the pattern', async () => {
+    const { connectDatabaseEmulator, getDatabase, ref, set } = await import('@panth977/icebase/database');
+    const rdb = getDatabase(app);
+    connectDatabaseEmulator(rdb, '127.0.0.1', 9009);
+    await set(ref(rdb, rooms, 'r1', 'm1'), { text: 'one' });
+    await until(async () => (await seenDoc('msg-r1-m1')).exists());
+    expect((await seenDoc('msg-r1-m1')).data()?.detail).toEqual({ text: 'one', params: { roomId: 'r1', msgId: 'm1' } });
+    await set(ref(rdb, rooms, 'r2'), { a: { text: 'x' }, b: { text: 'y' } });
+    await until(async () => (await seenDoc('msg-r2-a')).exists() && (await seenDoc('msg-r2-b')).exists());
+  });
+
+  it('task queues: enqueue, retry, delay', async () => {
+    const enqueue = httpsCallable<Record<string, unknown>, { ok: boolean }>(fns, 'enqueueWork');
+    await enqueue({ key: 'k1' });
+    await enqueue({ key: 'k2', failOnce: true });
+    await until(async () => (await seenDoc('task-k1')).exists());
+    await until(async () => (await seenDoc('task-k2')).exists(), 'the retried task');
+    expect((await seenDoc('task-k2')).data()?.attempt).toBe(1);
+  });
+
+  it('auth: beforeUserCreated can refuse or change the user; onUserCreated fires', async () => {
+    const { connectAuthEmulator, createUserWithEmailAndPassword, getAuth } = await import('@panth977/icebase/auth');
+    const auth = getAuth(app);
+    connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
+    await expect(createUserWithEmailAndPassword(auth, 'eve@blocked.test', 'secret1')).rejects.toThrow(/blocked domain/);
+    const c = await createUserWithEmailAndPassword(auth, 'ann@ok.test', 'secret1');
+    expect(c.user.displayName).toBe('Gated');
+    expect((await c.user.getIdTokenResult(true)).claims.tier).toBe('free');
+    await until(async () => (await seenDoc(`user-${c.user.uid}`)).exists());
   });
 });

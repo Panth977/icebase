@@ -61,6 +61,23 @@ export interface EmulatorContext {
   functionExports: Record<string, unknown>;
   /** The token that makes a caller an admin. */
   adminToken: string;
+  /** Events between services: storage / database / auth changes, and auth's blocking functions. */
+  hooks: EmulatorHooks;
+}
+
+/** A stored object as Cloud Functions' storage events carry it. */
+export type StorageObjectEvent = Record<string, unknown> & { name: string; bucket: string };
+/** A user as auth events carry it (firebase-admin's UserRecord shape). */
+export type AuthUserEvent = Record<string, unknown> & { uid: string };
+
+export interface EmulatorHooks {
+  storage: ((e: { event: 'finalized' | 'deleted' | 'metadataUpdated'; object: StorageObjectEvent }) => void)[];
+  /** The paths a write touched, and the whole tree before and after it. */
+  database: ((e: { paths: string[]; before: (path: string) => unknown; after: (path: string) => unknown }) => void)[];
+  auth: ((e: { event: 'created' | 'deleted'; user: AuthUserEvent }) => void)[];
+  /** Blocking functions: may refuse (throw) or return changes to the user / its token. */
+  beforeCreate: ((user: AuthUserEvent, how: string) => Promise<Record<string, unknown> | void>) | null;
+  beforeSignIn: ((user: AuthUserEvent, how: string) => Promise<Record<string, unknown> | void>) | null;
 }
 
 export interface EmulatorOptions {
@@ -143,6 +160,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
     firestore,
     functionExports: {},
     adminToken,
+    hooks: { storage: [], database: [], auth: [], beforeCreate: null, beforeSignIn: null },
     // Until the auth service is up, only the admin token is understood.
     verify: async (token) => ({ admin: token === adminToken, auth: null }),
   };
@@ -156,6 +174,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
     ['storage', async () => (await import('./storage-service.ts')).storageService(ctx)],
     ['functions', async () => (await import('./functions-service.ts')).functionsService(ctx, log)],
     ['customAuth', async () => (await import('./custom-auth-service.ts')).customAuthService(ctx)],
+    ['messaging', async () => (await import('./messaging-service.ts')).messagingService(ctx)],
   ];
   for (const [name, make] of optional) {
     if (without.has(name)) continue;

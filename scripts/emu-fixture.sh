@@ -10,4 +10,4 @@ fi
 root="$(cd "$(dirname "$0")/.." && pwd)"
 (cd "$root" && npm run build --silent)
 cd "$root/packages/tests/fixtures/functions-app"
-exec "$root/node_modules/.bin/firebase" emulators:exec --only functions,firestore,auth --project demo-icebase "cd $root/packages/tests && ICEBASE_EMU=1 $*"
+exec "$root/node_modules/.bin/firebase" emulators:exec --only functions,firestore,auth,storage,database,tasks --project demo-icebase "cd $root/packages/tests && ICEBASE_EMU=1 $*"
