@@ -87,11 +87,12 @@ extension ApiCalls on IceBaseFunctions {
     final path = e.path!.replaceAllMapped(RegExp(r'\{([^}]+)\}'), (m) => Uri.encodeComponent('${rest.remove(m[1])}'));
     final bodyless = e.method == 'GET' || e.method == 'DELETE';
     var uri = Uri.parse(base.replaceAll(RegExp(r'/$'), '') + path);
-    if (bodyless && rest.isNotEmpty)
+    if (bodyless && rest.isNotEmpty) {
       uri = uri.replace(queryParameters: {
         for (final x in rest.entries)
           if (x.value != null) x.key: x.value is String ? x.value as String : jsonEncode(x.value)
       });
+    }
     final token = idToken ?? (app.idToken == null ? null : await app.idToken!());
     final headers = {if (!bodyless) 'content-type': 'application/json', if (token != null) 'authorization': 'Bearer $token'};
     final req = http.Request(e.method!, uri)..headers.addAll(headers);
