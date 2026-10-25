@@ -10,13 +10,14 @@ import * as databaseFns from 'firebase-functions/v2/database';
 import * as tasks from 'firebase-functions/v2/tasks';
 import * as identity from 'firebase-functions/v2/identity';
 import * as v1auth from 'firebase-functions/v1/auth';
+import * as v1 from 'firebase-functions/v1';
 import type { CloudEvent } from 'firebase-functions/v2';
 import type { CloudFunction } from 'firebase-functions/v2';
 import { adminApps, type IceBaseApp } from '@panth977/icebase/app';
 import type { AnyConfig, EnvOf, IceBaseConfig } from '@panth977/icebase/config';
 import { IceBaseError } from '@panth977/icebase/errors';
 import { DocumentSnapshot, QueryDocumentSnapshot, docFromPath, type Firestore } from '@panth977/icebase/firestore';
-import { sendResponse, toRequest } from './internal/node-http.ts';
+import { sendResponse, serveFetch, toRequest } from './internal/node-http.ts';
 import { validateValue, type AnyCollection, type DocOf, type Field } from '@panth977/icebase/schema';
 import { checkInput, checkOutput, fromWire, toWire, type AnyEndpoint, type Endpoint, type InputOf, type OutputOf } from '@panth977/icebase/api';
 import { Buffer } from 'node:buffer';
@@ -179,9 +180,7 @@ export function onRequest(a: unknown, b?: unknown, c?: unknown): https.HttpsFunc
   const handler = (typeof a === 'function' ? a : b) as FetchHandler | ExpressHandler;
   if (handler.length >= 2) return tag(https.onRequest(opts, handler as ExpressHandler), { kind: 'request', handler: () => new Response('express-style handlers run on Cloud Functions only', { status: 501 }), express: handler as ExpressHandler });
   const fetchHandler = handler as FetchHandler;
-  const fn = https.onRequest(opts, async (req, res) => {
-    await sendResponse(res as unknown as import('node:http').ServerResponse, await fetchHandler(await toRequest(req as unknown as import('node:http').IncomingMessage & { rawBody?: Buffer })));
-  });
+  const fn = https.onRequest(opts, (req, res) => serveFetch(req as unknown as import('node:http').IncomingMessage & { rawBody?: Buffer }, res as unknown as import('node:http').ServerResponse, fetchHandler));
   return tag(fn, { kind: 'request', handler: fetchHandler });
 }
 
@@ -457,11 +456,31 @@ export interface UserRecordLike {
   customClaims?: Record<string, unknown>;
   providerData: { providerId: string; uid: string; email?: string }[];
 }
-export function onUserCreated(handler: (user: UserRecordLike) => unknown): ReturnType<ReturnType<typeof v1auth.user>['onCreate']> {
-  return tag(v1auth.user().onCreate((u) => handler(u as unknown as UserRecordLike)), { kind: 'auth', event: 'created', handler: handler as (e: unknown) => unknown });
+/** v1 options for the auth triggers (firebase mode): region and runtime options such as secrets. */
+export interface UserTriggerOptions {
+  region?: string;
+  secrets?: string[];
+  memory?: v1.RuntimeOptions['memory'];
+  timeoutSeconds?: number;
 }
-export function onUserDeleted(handler: (user: UserRecordLike) => unknown): ReturnType<ReturnType<typeof v1auth.user>['onDelete']> {
-  return tag(v1auth.user().onDelete((u) => handler(u as unknown as UserRecordLike)), { kind: 'auth', event: 'deleted', handler: handler as (e: unknown) => unknown });
+const userBuilder = (o: UserTriggerOptions) => {
+  const { region, ...run } = o;
+  let b: v1.FunctionBuilder | typeof v1 = v1;
+  if (region) b = b.region(region);
+  if (Object.keys(run).length) b = b.runWith(run as v1.RuntimeOptions);
+  return b.auth.user();
+};
+export function onUserCreated(handler: (user: UserRecordLike) => unknown): ReturnType<ReturnType<typeof v1auth.user>['onCreate']>;
+export function onUserCreated(opts: UserTriggerOptions, handler: (user: UserRecordLike) => unknown): ReturnType<ReturnType<typeof v1auth.user>['onCreate']>;
+export function onUserCreated(a: any, b?: any) {
+  const handler = (typeof a === 'function' ? a : b) as (user: UserRecordLike) => unknown;
+  return tag(userBuilder(typeof a === 'function' ? {} : a).onCreate((u) => handler(u as unknown as UserRecordLike)), { kind: 'auth', event: 'created', handler: handler as (e: unknown) => unknown });
+}
+export function onUserDeleted(handler: (user: UserRecordLike) => unknown): ReturnType<ReturnType<typeof v1auth.user>['onDelete']>;
+export function onUserDeleted(opts: UserTriggerOptions, handler: (user: UserRecordLike) => unknown): ReturnType<ReturnType<typeof v1auth.user>['onDelete']>;
+export function onUserDeleted(a: any, b?: any) {
+  const handler = (typeof a === 'function' ? a : b) as (user: UserRecordLike) => unknown;
+  return tag(userBuilder(typeof a === 'function' ? {} : a).onDelete((u) => handler(u as unknown as UserRecordLike)), { kind: 'auth', event: 'deleted', handler: handler as (e: unknown) => unknown });
 }
 
 // ─── custom auth endpoint ──────────────────────────────────────────────────────

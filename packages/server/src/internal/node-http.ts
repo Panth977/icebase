@@ -8,7 +8,7 @@ import { Buffer } from 'node:buffer';
 export type FetchHandler = (req: Request) => Promise<Response> | Response;
 
 /** Turn a node request into a fetch Request. `base` is the public origin (+ path prefix) the handler sees. */
-export async function toRequest(req: IncomingMessage & { rawBody?: Buffer; body?: unknown }, base?: string): Promise<Request> {
+export async function toRequest(req: IncomingMessage & { rawBody?: Buffer; body?: unknown }, base?: string, signal?: AbortSignal): Promise<Request> {
   const host = req.headers['x-forwarded-host'] ?? req.headers.host ?? 'localhost';
   const proto = (req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0] ?? 'http';
   const url = base ? `${base.replace(/\/$/, '')}${req.url ?? '/'}` : `${proto}://${host}${req.url ?? '/'}`;
@@ -27,7 +27,7 @@ export async function toRequest(req: IncomingMessage & { rawBody?: Buffer; body?
       body = Buffer.concat(chunks);
     }
   }
-  return new Request(url, { method: req.method ?? 'GET', headers, ...(body && body.length ? { body: new Uint8Array(body) } : {}) });
+  return new Request(url, { method: req.method ?? 'GET', headers, ...(signal ? { signal } : {}), ...(body && body.length ? { body: new Uint8Array(body) } : {}) });
 }
 
 export async function sendResponse(res: ServerResponse, r: Response): Promise<void> {
@@ -39,13 +39,29 @@ export async function sendResponse(res: ServerResponse, r: Response): Promise<vo
   res.writeHead(r.status, headers);
   if (r.body) {
     const reader = r.body.getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      res.write(value);
+    // The client went away: stop reading (a stream such as server-sent events ends here).
+    const gone = () => void reader.cancel().catch(() => {});
+    res.once('close', gone);
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done || res.destroyed) break;
+        res.write(value);
+      }
+    } finally {
+      res.off('close', gone);
     }
   }
   res.end();
+}
+
+/** Run a fetch handler for a node request: the Request's signal aborts when the client disconnects. */
+export async function serveFetch(req: IncomingMessage & { rawBody?: Buffer }, res: ServerResponse, handler: FetchHandler, base?: string): Promise<void> {
+  const ac = new AbortController();
+  res.once('close', () => {
+    if (!res.writableFinished) ac.abort();
+  });
+  await sendResponse(res, await handler(await toRequest(req, base, ac.signal)));
 }
 
 /** A node (req, res) listener for a fetch handler. */
@@ -53,7 +69,7 @@ export function nodeListener(handler: FetchHandler, base?: string): (req: Incomi
   return (req: IncomingMessage, res: ServerResponse): void => {
     void (async () => {
       try {
-        await sendResponse(res, await handler(await toRequest(req, base)));
+        await serveFetch(req, res, handler, base);
       } catch (e) {
         console.error('[icebase]', e);
         if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain' });
