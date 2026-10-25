@@ -152,11 +152,47 @@ of firebase-admin cannot share an app.
 no port. Admin apps reach it with `{ emulator: { embedded: name, adminToken } }`. A single
 VM's backend uses this to keep its data in IceBase (SQLite).
 
+## Running a Firebase app on the IceBase server
+
+`icebase serve` is the IceBase server for production, on one port (PORT, default 8080):
+every service, the functions and `config.hosting`. Function rewrites run in the same process.
+
+- **Tokens:** ID tokens are signed (HMAC; the key stays in the data directory).
+- **Admin token:** `ICEBASE_ADMIN_TOKEN`, or one made once and kept in `DATA/admin-token`.
+  The emulator's well-known `owner` is refused.
+- **Locked down:** with no rules file, only the admin reads and writes, as on a live Firebase
+  project. The emulator's open doors are admin only: account deletion, out-of-band links, the
+  GCS API and `/emulator/*`.
+- **Hosting:** files are cached and compressed (brotli / gzip) with ETags. Hashed assets get
+  long cache headers. Rewrites use firebase.json's form, including `{ functionId, region }` and
+  `!` globs.
+- **Auth emails:** a `sendAuthEmail({ kind, to, link })` export in the functions source mails
+  sign-in, reset, verify and change-email links. The links go straight to the app's
+  `continueUrl`.
+- **Storage:** `getSignedUrl` works without a service account (the server signs, on
+  `ICEBASE_PUBLIC_URL`). Range requests and `file.copy()` work too.
+- **Moving users in:** `importAuthUsers(app, users)` keeps uids. Passwords hashed as
+  `scrypt$N$r$p$salt$key` keep working.
+
+The web app keeps Firebase's modular API:
+
+- **Firestore and the Realtime Database:** alias `firebase/firestore` and `firebase/database`
+  to `@panth977/icebase/compat/firestore` and `@panth977/icebase/compat/database`. Paths are
+  strings; the server checks the schema, the indexes and the rules.
+- **Auth and Storage:** keep Firebase's own SDKs, aimed at the page's origin
+  (`connectAuthEmulator(auth, location.origin)`).
+- **Wiring:** `configureIceBase({ idToken })` hands the signed-in user's token to the compat
+  modules; `refreshIceBaseAuth()` re-runs open listeners when it changes.
+
+Debugging: `ICEBASE_LOG_ERRORS=1` logs every refused or failed request and listener;
+`ICEBASE_LOG_REQUESTS=1` logs every request.
+
 ## CLI
 
 | Command | What it does |
 | --- | --- |
 | `icebase init [--import DIR] [--project ID --sample N]` | Create the project structure; import an existing Firebase project's rules and indexes, and draft a schema from sampled documents |
+| `icebase serve [--port N] [--data DIR]` | Production server on one port: every service, the functions and hosting; signed tokens; locked down |
 | `icebase dev [--env X]` | The IceBase emulator (Firestore, Auth, Realtime Database, Storage, Functions, custom auth) on one port, hosting on another, the seed script on an empty database, reloads on change |
 | `icebase deploy --env X [--only …]` | Firestore indexes/TTL/exemptions from the schema, rules, auth providers, functions (bundled, with the custom-auth endpoint), hosting |
 | `icebase indexes check` | Every query that needs an undeclared composite index, with file:line (exit 1 if any) |

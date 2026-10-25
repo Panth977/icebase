@@ -10,7 +10,7 @@
 import type { IceBaseApp } from '../app.ts';
 import { createEmulatorDriver } from '../drivers/firestore-emulator.ts';
 import { IceBaseError } from '../errors.ts';
-import type { FirestoreDriver, RawDoc, RawQueryResult, TxDriver } from '../internal/firestore-driver.ts';
+import type { BatchDriver, FirestoreDriver, RawDoc, RawQueryResult, TxDriver } from '../internal/firestore-driver.ts';
 import { autoId } from '../internal/firestore-driver.ts';
 import { fullOrder, isName, type FilterNode, type QuerySpec } from '../internal/plan.ts';
 import { FieldValue, GeoPoint, Timestamp, isPlainObject } from '../values.ts';
@@ -620,7 +620,7 @@ export async function addDoc<T>(reference: CollectionReference<T>, data: T): Pro
 }
 
 export class WriteBatch {
-  /** @internal */ readonly _b;
+  /** @internal */ readonly _b: BatchDriver;
   /** @internal */ _done = false;
   constructor(/** @internal */ readonly _db: Firestore) {
     this._b = _db._d.batch();
