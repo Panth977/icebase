@@ -275,9 +275,15 @@ export function storageService(ctx: EmulatorContext): Service {
 
       // ── GCS JSON API (firebase-admin's bucket()) ────────────────────────────
       // firebase-admin's emulator mode drops the /storage/v1 prefix; the real API keeps it.
-      m = /^\/(upload\/|download\/)?(?:storage\/v1\/)?b\/([^/]+)(?:\/o(?:\/(.+))?)?$/.exec(path);
+      m = /^\/(upload\/|download\/)?(storage\/v1\/)?b\/([^/]+)(?:\/o(?:\/(.+))?)?$/.exec(path);
+      // With hosting on the same port, a bare /b/… is the app's page unless a Google client library asks.
+      if (m && !m[2] && ctx.hosting && !req.headers.get('x-goog-api-client')) m = null;
       if (m) {
+        // The GCS JSON API is the admin's (firebase-admin's bucket()): on a signed server, only with the admin token.
+        // A resumable upload's later requests carry its session id instead (made by the admin; GCS works the same).
+        if (ctx.signingKey && !caller.admin && !url.searchParams.get('upload_id')) return json({ error: { code: 403, message: 'storage: the GCS API is admin only on this server' } }, 403);
         if (!caller.admin && !rules) caller = { admin: true, auth: null };
+        m = [m[0], m[1], m[3], m[4]] as unknown as RegExpExecArray;
         const bucket = decodeURIComponent(m[2]!);
         const name = m[3] ? decodeURIComponent(m[3]) : (url.searchParams.get('name') ?? '');
         if (m[1] === 'upload/') {
@@ -297,11 +303,16 @@ export function storageService(ctx: EmulatorContext): Service {
             const up = q.upGet.get(id) as { bucket: string; name: string; meta: string; data: Uint8Array } | undefined;
             if (!up) return json({ error: { code: 404, message: 'upload not found' } }, 404);
             const data = Buffer.concat([Buffer.from(up.data), Buffer.from(await req.arrayBuffer())]);
-            const range = req.headers.get('content-range');
-            const total = range ? /\/(\d+|\*)$/.exec(range)?.[1] : String(data.length);
-            if (total === '*' || (total && Number(total) > data.length)) {
+            // 'bytes 0-*/*': one request streams it all (done when it ends); 'bytes 0-262143/*' is one
+            // chunk of more; 'bytes 0-4/5' or 'bytes */5' names the total.
+            const range = /bytes (?:\d+|\*)(?:-(\d+|\*))?\/(\d+|\*)/.exec(req.headers.get('content-range') ?? '');
+            const end = range?.[1];
+            const total = range ? range[2] : String(data.length);
+            const more = total === '*' ? end !== undefined && end !== '*' : Number(total) > data.length;
+            if (more) {
               q.upData.run(data, id);
-              return new Response(null, { status: 308, headers: { range: `bytes=0-${data.length - 1}` } });
+              // Nothing received yet: a 308 without a range (GCS's answer to a status check).
+              return new Response(null, { status: 308, headers: data.length ? { range: `bytes=0-${data.length - 1}` } : {} });
             }
             q.upDel.run(id);
             return json(v1(await store(caller, up.bucket, up.name, data, JSON.parse(up.meta) as Record<string, unknown>)));

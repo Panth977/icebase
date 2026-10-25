@@ -145,7 +145,20 @@ export function getAdminStorage(app: IceBaseApp): NativeAdminStorage {
       const env = (globalThis as { process?: { env: Record<string, string | undefined> } }).process?.env;
       if (env) env.FIREBASE_STORAGE_EMULATOR_HOST = emulatorOrigin(app).replace(/^https?:\/\//, '');
     }
-    return nativeGetStorage(nativeAdminApp(app));
+    const native = nativeGetStorage(nativeAdminApp(app));
+    if (mode === 'emulator') {
+      // The IceBase server's GCS API is the admin's: every request carries the admin token.
+      const token = app.options.emulator?.adminToken ?? (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.ICEBASE_ADMIN_TOKEN ?? 'owner';
+      const client = (native as unknown as { storageClient?: { interceptors?: { request(o: { headers?: Record<string, string> }): unknown }[] } }).storageClient;
+      client?.interceptors?.push({ request: (o) => ({ ...o, headers: { ...o.headers, authorization: `Bearer ${token}` } }) });
+      // Resumable uploads go through the auth client itself.
+      const auth = (client as { authClient?: { request?: (o: { headers?: Record<string, string> }) => unknown } } | undefined)?.authClient;
+      if (auth?.request) {
+        const request = auth.request.bind(auth);
+        auth.request = (o) => request({ ...o, headers: { ...o.headers, authorization: `Bearer ${token}` } });
+      }
+    }
+    return native;
   });
 }
 

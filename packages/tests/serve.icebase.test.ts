@@ -101,4 +101,20 @@ describe('icebase serve', () => {
     // A reset for an address with no account says nothing.
     expect((await post('sendOobCode', { requestType: 'PASSWORD_RESET', email: 'nobody@x.test' })).error).toBeUndefined();
   });
+
+  it('storage: the GCS API is the admin\'s; a bare /b/… page stays the app\'s', async () => {
+    const { initializeAdminApp, getAdminStorage } = await import('@panth977/icebase-server/admin');
+    const cfg = defineConfig({ name: 'serve-admin', schema: fixture.schema, firebase: { projectId: 'demo-icebase', storageBucket: 'demo-icebase.appspot.com' }, environments: { local: { mode: 'emulator' } } });
+    const admin = initializeAdminApp(cfg, 'local', { name: 'serve-admin', emulator: { origin: url } as never });
+    const file = getAdminStorage(admin).bucket().file('docs/a.txt');
+    await file.save('hello', { contentType: 'text/plain' });
+    const big = getAdminStorage(admin).bucket().file('docs/big.bin');
+    await big.save(Buffer.alloc(6 * 1024 * 1024, 7));
+    expect(String((await file.download())[0])).toBe('hello');
+    expect((await big.getMetadata())[0].size).toBe(String(6 * 1024 * 1024));
+    // Without the admin token, the GCS API is refused …
+    expect((await fetch(`${url}/storage/v1/b/demo-icebase.appspot.com/o`)).status).toBe(403);
+    // … and /b/<board> is the web app.
+    expect(await (await fetch(`${url}/b/board-1`)).text()).toContain('<title>app</title>');
+  });
 });

@@ -67,6 +67,8 @@ export interface EmulatorContext {
   hooks: EmulatorHooks;
   /** Set when the server signs its tokens (signTokens): the HMAC key. */
   signingKey: Buffer | null;
+  /** config.hosting is served on the same port (`icebase serve`). */
+  hosting: boolean;
 }
 
 /** A stored object as Cloud Functions' storage events carry it. */
@@ -189,6 +191,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
     adminToken,
     hooks: { storage: [], database: [], auth: [], beforeCreate: null, beforeSignIn: null },
     signingKey: signTokens(opts, dataDir, memory),
+    hosting: !!opts.hosting,
     // Until the auth service is up, only the admin token is understood.
     verify: async (token) => ({ admin: token === adminToken, auth: null }),
   };
