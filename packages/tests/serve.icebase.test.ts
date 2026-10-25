@@ -112,6 +112,21 @@ describe('icebase serve', () => {
     await big.save(Buffer.alloc(6 * 1024 * 1024, 7));
     expect(String((await file.download())[0])).toBe('hello');
     expect((await big.getMetadata())[0].size).toBe(String(6 * 1024 * 1024));
+    // Signed URLs: made by the server, readable with a Range, writable once signed for a type.
+    const [read] = await file.getSignedUrl({ action: 'read', expires: Date.now() + 60_000 });
+    expect(read.startsWith(`${url}/__/icebase/storage/signed/`)).toBe(true);
+    const part = await fetch(read, { headers: { range: 'bytes=1-3' } });
+    expect(part.status).toBe(206);
+    expect(await part.text()).toBe('ell');
+    expect((await fetch(read.replace(/sig=[^&]+/, 'sig=forged'))).status).toBe(403);
+    const [old] = await file.getSignedUrl({ action: 'read', expires: Date.now() - 1 });
+    expect((await fetch(old)).status).toBe(400);
+    const [write] = await getAdminStorage(admin).bucket().file('docs/up.txt').getSignedUrl({ action: 'write', expires: Date.now() + 60_000, contentType: 'text/plain' });
+    expect((await fetch(write, { method: 'PUT', headers: { 'content-type': 'text/html' }, body: 'x' })).status).toBe(403);
+    expect((await fetch(write, { method: 'PUT', headers: { 'content-type': 'text/plain' }, body: 'uploaded' })).status).toBe(200);
+    expect(String((await getAdminStorage(admin).bucket().file('docs/up.txt').download())[0])).toBe('uploaded');
+    const [ranged] = await file.createReadStream({ start: 0, end: 1 }).toArray();
+    expect(String(ranged)).toBe('he');
     // Without the admin token, the GCS API is refused …
     expect((await fetch(`${url}/storage/v1/b/demo-icebase.appspot.com/o`)).status).toBe(403);
     // … and /b/<board> is the web app.

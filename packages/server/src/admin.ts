@@ -157,6 +157,28 @@ export function getAdminStorage(app: IceBaseApp): NativeAdminStorage {
         const request = auth.request.bind(auth);
         auth.request = (o) => request({ ...o, headers: { ...o.headers, authorization: `Bearer ${token}` } });
       }
+      // getSignedUrl needs a service account; the IceBase server signs instead. The URL is on
+      // ICEBASE_PUBLIC_URL (the address people reach, e.g. https://tt.example.com), else the server's.
+      const origin = emulatorOrigin(app);
+      const bucketOf = native.bucket.bind(native);
+      native.bucket = ((name?: string) => {
+        const b = bucketOf(name);
+        const fileOf = b.file.bind(b);
+        b.file = ((fileName: string, o?: unknown) => {
+          const f = fileOf(fileName, o as never);
+          f.getSignedUrl = (async (cfg: { action: string; expires: string | number | Date; contentType?: string }) => {
+            const { emulatorFetch } = await import('@panth977/icebase/app');
+            const expires = new Date(cfg.expires).getTime();
+            const res = await emulatorFetch(`${origin}/__/icebase/storage/sign`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify({ bucket: b.name, name: fileName, action: cfg.action === 'write' ? 'write' : 'read', expires, ...(cfg.contentType ? { contentType: cfg.contentType } : {}) }) });
+            const j = (await res.json()) as { path?: string; error?: { message: string } };
+            if (!res.ok || !j.path) throw new IceBaseError('internal', `getSignedUrl: ${j.error?.message ?? res.status}`, { service: 'storage' });
+            const pub = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.ICEBASE_PUBLIC_URL;
+            return [`${(pub ?? origin).replace(/\/+$/, '')}${j.path}`];
+          }) as never;
+          return f;
+        }) as typeof b.file;
+        return b;
+      }) as typeof native.bucket;
     }
     return native;
   });

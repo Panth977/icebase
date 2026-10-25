@@ -3,7 +3,7 @@
 // (/storage/v1, /upload/storage/v1, /download/storage/v1). Blobs on disk (or in memory),
 // metadata in SQLite, storage.rules for every caller that is not the owner.
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -190,12 +190,62 @@ export function storageService(ctx: EmulatorContext): Service {
     return { items: page, prefixes: [...prefixes], next: items.length > max ? page[page.length - 1]!.name : null };
   };
 
-  const media = (m: Meta) => new Response(new Uint8Array(readBlob(m.bucket, m.name)), { headers: { 'content-type': m.contentType, 'content-length': String(m.size), ...(m.contentDisposition ? { 'content-disposition': m.contentDisposition } : {}) } });
+  /** The object's bytes; a Range request (bytes=a-b, a-, -n) gets its part (206). */
+  const media = (m: Meta, req?: Request) => {
+    const all = readBlob(m.bucket, m.name);
+    const base = { 'content-type': m.contentType, 'accept-ranges': 'bytes', ...(m.contentDisposition ? { 'content-disposition': m.contentDisposition } : {}), ...(m.cacheControl ? { 'cache-control': m.cacheControl } : {}) };
+    const r = /^bytes=(\d*)-(\d*)$/.exec(req?.headers.get('range') ?? '');
+    if (r && (r[1] || r[2])) {
+      const size = all.length;
+      let start = r[1] ? Number(r[1]) : Math.max(0, size - Number(r[2]));
+      let end = r[1] && r[2] ? Math.min(Number(r[2]), size - 1) : size - 1;
+      if (!r[1]) end = size - 1;
+      if (start >= size || start > end) return new Response(null, { status: 416, headers: { 'content-range': `bytes */${size}` } });
+      start = Math.max(0, start);
+      return new Response(new Uint8Array(all.subarray(start, end + 1)), { status: 206, headers: { ...base, 'content-length': String(end - start + 1), 'content-range': `bytes ${start}-${end}/${size}` } });
+    }
+    return new Response(new Uint8Array(all), { headers: { ...base, 'content-length': String(m.size) } });
+  };
+
+  // ── signed URLs (GCS's getSignedUrl, which needs a service account the server does not have) ──
+  const signKey = ctx.signingKey ?? randomBytes(32);
+  const signature = (action: string, bucket: string, name: string, expires: number, contentType: string) =>
+    createHmac('sha256', signKey).update(`icebase-storage\n${action}\n${bucket}\n${name}\n${expires}\n${contentType}`).digest('base64url');
+  const signedPath = (action: 'read' | 'write', bucket: string, name: string, expires: number, contentType = '') =>
+    `/__/icebase/storage/signed/${encodeURIComponent(bucket)}/${name.split('/').map(encodeURIComponent).join('/')}?action=${action}&expires=${expires}${contentType ? `&contentType=${encodeURIComponent(contentType)}` : ''}&sig=${signature(action, bucket, name, expires, contentType)}`;
   const notFound = (name: string) => json({ error: { code: 404, message: `Not Found. Could not get object ${name}`, status: 'NOT_FOUND' } }, 404);
 
   return {
     async handle(req, url, caller) {
       const path = url.pathname;
+      // ── signed URLs ─────────────────────────────────────────────────────────
+      if (path === '/__/icebase/storage/sign' && req.method === 'POST') {
+        if (!caller.admin) return json({ error: { code: 403, message: 'signing URLs is admin only' } }, 403);
+        const b = (await req.json()) as { bucket: string; name: string; action: 'read' | 'write'; expires: number; contentType?: string };
+        return json({ path: signedPath(b.action === 'write' ? 'write' : 'read', b.bucket, b.name, Math.floor(Number(b.expires)), b.contentType ?? '') });
+      }
+      const sm = /^\/__\/icebase\/storage\/signed\/([^/]+)\/(.+)$/.exec(path);
+      if (sm) {
+        const bucket = decodeURIComponent(sm[1]!);
+        const name = sm[2]!.split('/').map(decodeURIComponent).join('/');
+        const action = url.searchParams.get('action') === 'write' ? 'write' : 'read';
+        const expires = Number(url.searchParams.get('expires'));
+        const contentType = url.searchParams.get('contentType') ?? '';
+        const want = Buffer.from(signature(action, bucket, name, expires, contentType));
+        const got = Buffer.from(url.searchParams.get('sig') ?? '');
+        if (got.length !== want.length || !timingSafeEqual(got, want)) return json({ error: { code: 403, message: 'The request signature does not match.' } }, 403);
+        if (!(expires > Date.now())) return json({ error: { code: 400, message: 'The signed URL has expired.' } }, 400);
+        const admin = { admin: true, auth: null };
+        if (action === 'read') {
+          if (req.method !== 'GET' && req.method !== 'HEAD') return json({ error: { code: 405, message: 'a read URL takes GET' } }, 405);
+          const cur = getMeta(bucket, name);
+          return cur ? media(cur, req) : notFound(name);
+        }
+        if (req.method !== 'PUT') return json({ error: { code: 405, message: 'a write URL takes PUT' } }, 405);
+        const ct = req.headers.get('content-type') ?? 'application/octet-stream';
+        if (contentType && ct !== contentType) return json({ error: { code: 403, message: `this URL is signed for ${contentType}` } }, 403);
+        return json(v1(await store(admin, bucket, name, Buffer.from(await req.arrayBuffer()), { contentType: ct })));
+      }
       // ── Firebase Storage REST (v0) ──────────────────────────────────────────
       let m = /^\/v0\/b\/([^/]+)\/o\/?(.*)$/.exec(path);
       if (m) {
@@ -249,7 +299,7 @@ export function storageService(ctx: EmulatorContext): Service {
           await allow(caller, 'get', bucket, name, cur, null);
           if (url.searchParams.get('alt') === 'media') {
             // A download URL's token stands in for rules, as in Firebase.
-            return media(cur);
+            return media(cur, req);
           }
           return json(v0(cur));
         }
@@ -329,7 +379,7 @@ export function storageService(ctx: EmulatorContext): Service {
         const cur = getMeta(bucket, name);
         if (req.method === 'GET') {
           if (!cur) return notFound(name);
-          if (m[1] === 'download/' || url.searchParams.get('alt') === 'media') return media(cur);
+          if (m[1] === 'download/' || url.searchParams.get('alt') === 'media') return media(cur, req);
           return json(v1(cur));
         }
         if (req.method === 'PATCH' || req.method === 'PUT') {
