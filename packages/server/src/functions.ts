@@ -132,7 +132,8 @@ function endpointRequest(e: AnyEndpoint, opts: https.HttpsOptions, handler: (r: 
     const tail = segs.slice(Math.max(0, segs.length - tpl.length));
     const params: Record<string, string> = {};
     if (tail.length !== tpl.length || !tpl.every((t, i) => { const m = /^\{(.+)\}$/.exec(t); if (m) return (params[m[1]!] = decodeURIComponent(tail[i]!)), true; return t === tail[i]; })) return fail('not-found', `No route ${req.method} ${url.pathname}`);
-    const query = Object.fromEntries(url.searchParams);
+    const query: Record<string, string> = {};
+    url.searchParams.forEach((v, k) => (query[k] = v));
     let body: Record<string, unknown> = {};
     if (req.method !== 'GET' && req.method !== 'DELETE' && (req.headers.get('content-type') ?? '').includes('json')) body = ((await req.json().catch(() => ({}))) ?? {}) as Record<string, unknown>;
     // Query values are strings: numbers and booleans the input declares are read as such.

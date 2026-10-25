@@ -83,6 +83,13 @@ Three packages, published to JSR (and built to `dist/` for Node):
   field paths are split on dots, as firebase-admin does. `packages/client/src/zod.ts` holds
   `fromZod`. TaskManager runs on both (ORCH-26, branch `icebase`).
 
+- `packages/client/src/api.ts` declares endpoints (defineApi / endpoint, docOf / pick / fieldOf,
+  toWire / fromWire, JSON Schema, samples). `describe.ts` turns the config into the data that
+  `cli/docs.ts`, `check.ts`, openapi and gen-dart all use.
+- Functions now also cover storage, RTDB, task queue and auth triggers, plus messaging. On the
+  IceBase server, services publish events through `ctx.hooks` and functions-service dispatches
+  them. Tasks are stored in `tasks.sqlite`.
+
 Rules the code keeps: every index a query uses is declared with `index(…)` (single-field ones
 too); fields are key paths (`['address', 'city']`) and strings are never split on dots.
 

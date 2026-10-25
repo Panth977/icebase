@@ -72,6 +72,48 @@ export default defineConfig({
 });
 ```
 
+## The API's schema, declared like the database's
+
+Every endpoint is declared in `icebase/api`: a callable or an HTTP route, with its input, its
+output and the errors it may answer. The field types are the same as the database schema's, and
+most can be taken straight from it: `docOf(collection)`, `pick(collection, ['a', 'b'])`,
+`fieldOf(collection, path)`, `partial(…)`, `listOf(…)`.
+
+```ts
+export const api = defineApi({
+  getProduct: endpoint({
+    http: { method: 'GET', path: '/products/{id}' },
+    input: f.map({ id: f.string() }),
+    output: docOf(products),
+    errors: { 'not-found': 'No product with that id' },
+    auth: 'none',
+  }),
+  cancelOrder: endpoint({ input: f.map({ orderId: f.string() }), output: f.map({ ok: f.literal(true) }) }),
+});
+// server:  export const getProduct = onRequest(api.getProduct, async ({ input }) => …);
+//          export const cancelOrder = onCall(api.cancelOrder, async (req) => …);
+// client:  await request(getFunctions(app), api.getProduct, { id });   await callable(fns, api.cancelOrder)({ orderId });
+// Dart:    await IceBaseFunctions.instance.call(Api.getProduct, ProductByIdInput(id: 'p1'));
+```
+
+- **Runtime validation, both sides:** the input is checked before it leaves and again on the
+  server. The output is checked on the server (a mismatch is an `internal` error) and again on
+  the client.
+- **Types on the wire:** timestamps, references and geopoints travel as JSON and arrive typed.
+  Types are inferred, so nothing is written twice.
+- **`icebase check`:** a dry run. It verifies the declarations agree with each other, every
+  declared endpoint is implemented under its name, and every implemented function is declared
+  (`--strict` turns an undeclared callable into an error).
+- **`icebase docs [--serve]`:** a browsable reference of the database and the API in one
+  self-contained page. It covers:
+  - collections, with their fields, indexes and a sample document
+  - Realtime Database paths and storage paths
+  - endpoints, with input and output tables, errors, examples, and TypeScript / Dart / curl snippets
+
+  Next to the page it writes `project.json` and `openapi.json`.
+- **`icebase openapi`:** OpenAPI 3.1 for any other language's generator.
+- **`icebase gen dart`:** typed `Api.*` endpoints for Dart and Flutter.
+
 ## Moving an existing firebase-admin codebase
 
 `@panth977/icebase-server/compat` is firebase-admin's Firestore API over IceBase:
@@ -120,6 +162,9 @@ VM's backend uses this to keep its data in IceBase (SQLite).
 | `icebase indexes check` | Every query that needs an undeclared composite index, with file:line (exit 1 if any) |
 | `icebase drivers --env X` | The mode of each service and the wiring problems between them |
 | `icebase gen dart [--out FILE]` | The Dart side of the config: model classes, typed fields, enums, dbPath/filePath holders, the schema and environments |
+| `icebase check [--strict]` | Dry run: the schema and API declarations agree, and every endpoint is implemented |
+| `icebase docs [--out DIR] [--serve]` | The database + API reference (one HTML page, project.json, openapi.json) |
+| `icebase openapi [--out FILE]` | The declared endpoints as OpenAPI 3.1 |
 | `icebase login` | Firebase login; deploy and the management APIs use it |
 
 ## Status
