@@ -22,6 +22,7 @@ export const api = defineApi({
   }),
   badOutput: endpoint({ input: f.map({}), output: f.map({ n: f.number() }), auth: 'none' }),
   whoAmI: endpoint({ input: f.map({}), output: f.map({ uid: f.string() }) }),
+  echoTyped: endpoint({ input: f.map({ at: f.timestamp(), product: f.ref(products) }), output: f.map({ at: f.timestamp(), product: f.ref(products), year: f.number() }), auth: 'none' }),
 });
 
 export default defineConfig({

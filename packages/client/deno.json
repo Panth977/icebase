@@ -9,6 +9,7 @@
     "./schema": "./src/schema.ts",
     "./zod": "./src/zod.ts",
     "./api": "./src/api.ts",
+    "./describe": "./src/describe.ts",
     "./firestore": "./src/firestore.ts",
     "./auth": "./src/auth.ts",
     "./database": "./src/database.ts",

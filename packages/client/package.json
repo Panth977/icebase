@@ -41,6 +41,10 @@
       "types": "./src/api.ts",
       "default": "./dist/api.js"
     },
+    "./describe": {
+      "types": "./src/describe.ts",
+      "default": "./dist/describe.js"
+    },
     "./firestore": {
       "types": "./src/firestore.ts",
       "default": "./dist/firestore.js"

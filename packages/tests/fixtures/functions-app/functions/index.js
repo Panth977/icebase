@@ -60,3 +60,4 @@ export const productInfo = onRequest(api.productInfo, async ({ input }) => {
 });
 export const badOutput = onCall(api.badOutput, () => ({ n: 'not a number' }));
 export const whoAmI = onCall(api.whoAmI, (req) => ({ uid: req.auth.uid }));
+export const echoTyped = onCall(api.echoTyped, (req) => ({ at: req.data.at, product: req.data.product, year: req.data.at.toDate().getUTCFullYear() }));

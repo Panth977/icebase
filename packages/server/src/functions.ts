@@ -18,7 +18,7 @@ import { IceBaseError } from '@panth977/icebase/errors';
 import { DocumentSnapshot, QueryDocumentSnapshot, docFromPath, type Firestore } from '@panth977/icebase/firestore';
 import { sendResponse, toRequest } from './internal/node-http.ts';
 import { validateValue, type AnyCollection, type DocOf, type Field } from '@panth977/icebase/schema';
-import { checkInput, checkOutput, type AnyEndpoint, type Endpoint, type InputOf, type OutputOf } from '@panth977/icebase/api';
+import { checkInput, checkOutput, fromWire, toWire, type AnyEndpoint, type Endpoint, type InputOf, type OutputOf } from '@panth977/icebase/api';
 import { Buffer } from 'node:buffer';
 
 export { HttpsError } from 'firebase-functions/v2/https';
@@ -96,13 +96,13 @@ function endpointCall(e: AnyEndpoint, opts: https.CallableOptions, handler: (req
     if (e.auth === 'admin' && !(req.auth?.token as { admin?: unknown } | undefined)?.admin) throw new https.HttpsError('permission-denied', `${e.name} is for admins`);
     let data: unknown;
     try {
-      data = checkInput(e, req.data);
+      data = checkInput(e, fromWire(e.input, req.data));
     } catch (err) {
       throw new https.HttpsError('invalid-argument', (err as Error).message);
     }
     const out = await handler({ ...req, data } as https.CallableRequest<unknown>);
     try {
-      return checkOutput(e, out);
+      return toWire(e.output, checkOutput(e, out));
     } catch (err) {
       throw new https.HttpsError('internal', (err as Error).message);
     }
@@ -141,14 +141,14 @@ function endpointRequest(e: AnyEndpoint, opts: https.HttpsOptions, handler: (r: 
     const raw = { ...Object.fromEntries(Object.entries({ ...query, ...params }).map(([k, v]) => [k, coerce(k, v)])), ...body };
     let input: unknown;
     try {
-      input = checkInput(e, raw);
+      input = checkInput(e, fromWire(e.input, raw));
     } catch (err) {
       return fail('invalid-argument', (err as Error).message);
     }
     try {
       const out = await handler({ input, request: req });
       if (out instanceof Response) return out;
-      return new Response(JSON.stringify(checkOutput(e, out)), { headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify(toWire(e.output, checkOutput(e, out))), { headers: { 'content-type': 'application/json' } });
     } catch (err) {
       const code = (err as { code?: string }).code;
       if (code && HTTP_STATUS[code]) return fail(code, (err as Error).message);

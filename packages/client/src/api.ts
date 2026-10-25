@@ -18,6 +18,7 @@
 //   });
 
 import { IceBaseError } from './errors.ts';
+import { GeoPoint, Timestamp } from './values.ts';
 import { f, fieldAt, pathOf, showPath, validateValue, type AnyCollection, type DocOf, type Field, type FieldDef, type FieldMap, type FieldRef } from './schema.ts';
 
 // ─── declaring ─────────────────────────────────────────────────────────────────
@@ -144,6 +145,69 @@ function withRef<T>(field: Field<T>, collectionPath: string): Field<T> {
 }
 /** The collection a field was taken from (docOf / pick), if any. */
 export const refOf = (field: Field<unknown>): string | undefined => REFS.get(field);
+
+// ─── the wire ──────────────────────────────────────────────────────────────────
+//
+// Endpoint values travel as JSON: a timestamp as an ISO string, a reference as its document path,
+// a geopoint as { latitude, longitude }, bytes as base64. The declaration says which is which, so
+// both ends turn them back into real values (Timestamp, { type: 'document', path }, …).
+
+
+/** A value → its JSON form, guided by its field. */
+export function toWire(field: Field<unknown>, v: unknown): unknown {
+  if (v === null || v === undefined) return v;
+  const d = field.def;
+  switch (d.kind) {
+    case 'timestamp':
+      return v instanceof Timestamp ? v.toDate().toISOString() : v instanceof Date ? v.toISOString() : v;
+    case 'ref':
+      return typeof v === 'object' && typeof (v as { path?: unknown }).path === 'string' ? (v as { path: string }).path : v;
+    case 'geopoint':
+      return v instanceof GeoPoint ? { latitude: v.latitude, longitude: v.longitude } : v;
+    case 'array':
+      return Array.isArray(v) ? v.map((x) => toWire(d.of, x)) : v;
+    case 'record':
+      return isObj(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, toWire(d.of, x)])) : v;
+    case 'map':
+      return isObj(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, d.fields[k] ? toWire(d.fields[k]!, x) : d.rest ? toWire(d.rest, x) : x])) : v;
+    case 'union':
+      return v;
+    default:
+      return v instanceof Uint8Array ? b64(v) : v;
+  }
+}
+
+/** JSON → the value its field declares (the reverse of toWire). Anything unexpected is left for validation to report. */
+export function fromWire(field: Field<unknown>, v: unknown): unknown {
+  if (v === null || v === undefined) return v;
+  const d = field.def;
+  switch (d.kind) {
+    case 'timestamp': {
+      if (typeof v === 'string' && !Number.isNaN(Date.parse(v))) return Timestamp.fromDate(new Date(v));
+      // Firebase's callable encoder sends a Timestamp as { seconds, nanoseconds } (or _seconds).
+      const o = v as { seconds?: number; nanoseconds?: number; _seconds?: number; _nanoseconds?: number };
+      if (isObj(v) && typeof (o.seconds ?? o._seconds) === 'number') return new Timestamp((o.seconds ?? o._seconds)!, (o.nanoseconds ?? o._nanoseconds ?? 0)!);
+      return v;
+    }
+    case 'ref': {
+      const path = typeof v === 'string' ? v : isObj(v) && typeof v.path === 'string' ? v.path : null;
+      return path ? { type: 'document', path, id: path.slice(path.lastIndexOf('/') + 1) } : v;
+    }
+    case 'geopoint':
+      return isObj(v) && typeof v.latitude === 'number' && typeof v.longitude === 'number' ? new GeoPoint(v.latitude, v.longitude as number) : v;
+    case 'array':
+      return Array.isArray(v) ? v.map((x) => fromWire(d.of, x)) : v;
+    case 'record':
+      return isObj(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, fromWire(d.of, x)])) : v;
+    case 'map':
+      return isObj(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, d.fields[k] ? fromWire(d.fields[k]!, x) : d.rest ? fromWire(d.rest, x) : x])) : v;
+    default:
+      return v;
+  }
+}
+
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+const b64 = (u: Uint8Array) => btoa(String.fromCharCode(...u));
 
 // ─── validating ────────────────────────────────────────────────────────────────
 

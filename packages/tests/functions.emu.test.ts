@@ -116,6 +116,13 @@ describe('functions · firebase mode', () => {
   it('declared endpoints: callable and HTTP, input and output checked on both sides', async () => {
     const { callable, request } = await import('@panth977/icebase/functions');
     expect(await callable(fns, api.addOne)({ n: 41 })).toEqual({ n: 42 });
+    // Timestamps and references cross the wire and come back typed.
+    const { Timestamp } = await import('@panth977/icebase/firestore');
+    const typed = await callable(fns, api.echoTyped)({ at: Timestamp.fromDate(new Date('2031-05-06T07:08:09Z')), product: { path: 'products/p1' } } as never);
+    expect(typed.at).toBeInstanceOf(Timestamp);
+    expect(typed.at.toDate().toISOString()).toBe('2031-05-06T07:08:09.000Z');
+    expect(typed.product.path).toBe('products/p1');
+    expect(typed.year).toBe(2031);
     await expect(callable(fns, api.addOne)({ n: 'x' } as never)).rejects.toThrow(/n: expected number/);
     await expect(httpsCallable(fns, 'addOne')({ n: 'x' })).rejects.toMatchObject({ code: 'functions/invalid-argument' });
     await expect(callable(fns, api.badOutput)({})).rejects.toMatchObject({ code: 'functions/internal' });

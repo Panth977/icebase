@@ -1,9 +1,11 @@
 import { defineConfig } from '@panth977/icebase/config';
 import { schema } from './icebase/schema';
+import { api } from './icebase/api';
 
 export default defineConfig({
   name: 'acme-shop',
   schema,
+  api,
 
   // Firebase rules syntax — the same files work in every mode.
   rules: {

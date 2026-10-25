@@ -12,6 +12,7 @@ export declare const api: import('@panth977/icebase/api').Api<{
   productInfo: import('@panth977/icebase/api').Endpoint<{ id: string; upper?: boolean }, { name: string; stock: number }>;
   badOutput: import('@panth977/icebase/api').Endpoint<Record<string, never>, { n: number }>;
   whoAmI: import('@panth977/icebase/api').Endpoint<Record<string, never>, { uid: string }>;
+  echoTyped: import('@panth977/icebase/api').Endpoint<{ at: Timestamp; product: { path: string } }, { at: Timestamp; product: { path: string }; year: number }>;
 }>;
 declare const config: AnyConfig;
 export default config;

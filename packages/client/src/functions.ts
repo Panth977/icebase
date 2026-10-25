@@ -77,7 +77,7 @@ export type FunctionsError = fn.FunctionsError;
 // ─── declared endpoints (icebase/api) ──────────────────────────────────────────
 
 import type { AnyEndpoint, InputOf, OutputOf } from './api.ts';
-import { checkInput, checkOutput } from './api.ts';
+import { checkInput, checkOutput, fromWire, toWire } from './api.ts';
 
 /** A declared callable: callable(functions, api.createOrder)(input) — the input is checked before
  * it is sent and the result after it arrives, both against the endpoint's declaration. */
@@ -85,9 +85,9 @@ export function callable<E extends AnyEndpoint>(functions: Functions, e: E): (in
   if (e.http) throw new IceBaseError('invalid-argument', `callable(api.${e.name}): it is an HTTP endpoint — use request(functions, api.${e.name}, input)`, { reason: 'schema', service: 'functions' });
   const call = fn.httpsCallable(functions._native, e.name);
   return async (input) => {
-    const data = checkInput(e, input);
+    const data = toWire(e.input, checkInput(e, fromWire(e.input, input)));
     const r = await call(data);
-    return checkOutput(e, r.data);
+    return checkOutput(e, fromWire(e.output, r.data));
   };
 }
 
@@ -95,7 +95,7 @@ export function callable<E extends AnyEndpoint>(functions: Functions, e: E): (in
  * DELETE) or JSON body; the signed-in user's ID token is sent; the JSON answer is checked. */
 export async function request<E extends AnyEndpoint>(functions: Functions, e: E, input: InputOf<E>, opts: { baseUrl?: string } = {}): Promise<OutputOf<E>> {
   if (!e.http) throw new IceBaseError('invalid-argument', `request(api.${e.name}): it is a callable — use callable(functions, api.${e.name})`, { reason: 'schema', service: 'functions' });
-  const data = checkInput(e, input) as Record<string, unknown>;
+  const data = toWire(e.input, checkInput(e, fromWire(e.input, input))) as Record<string, unknown>;
   const app = functions.app;
   const project = app.config.firebase?.projectId ?? `demo-${app.config.name}`;
   const base = opts.baseUrl ?? (app.modes.functions === 'emulator' ? `${emulatorOrigin(app)}/${project}/${functions.region}/${e.name}` : `https://${functions.region}-${project}.cloudfunctions.net/${e.name}`);
@@ -113,5 +113,5 @@ export async function request<E extends AnyEndpoint>(functions: Functions, e: E,
   const res = await fetch(url, { method: e.http.method, headers: { ...(bodyless ? {} : { 'content-type': 'application/json' }), ...(token ? { authorization: `Bearer ${token}` } : {}) }, ...(bodyless ? {} : { body: JSON.stringify(rest) }) });
   const j = (await res.json().catch(() => null)) as { error?: { code: string; message: string } } | null;
   if (!res.ok || (j && j.error)) throw new IceBaseError((j?.error?.code ?? 'internal') as IceBaseError['code'], j?.error?.message ?? `${e.name}: HTTP ${res.status}`, { service: 'functions' });
-  return checkOutput(e, j);
+  return checkOutput(e, fromWire(e.output, j));
 }

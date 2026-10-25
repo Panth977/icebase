@@ -120,6 +120,13 @@ describe('functions · emulator mode', () => {
     const { callable, request } = await import('@panth977/icebase/functions');
     const fns = getFunctions(app);
     expect(await callable(fns, api.addOne)({ n: 41 })).toEqual({ n: 42 });
+    // Timestamps and references cross the wire and come back typed.
+    const { Timestamp } = await import('@panth977/icebase/firestore');
+    const typed = await callable(fns, api.echoTyped)({ at: Timestamp.fromDate(new Date('2031-05-06T07:08:09Z')), product: { path: 'products/p1' } } as never);
+    expect(typed.at).toBeInstanceOf(Timestamp);
+    expect(typed.at.toDate().toISOString()).toBe('2031-05-06T07:08:09.000Z');
+    expect(typed.product.path).toBe('products/p1');
+    expect(typed.year).toBe(2031);
     // Refused before it leaves (client-side check)…
     await expect(callable(fns, api.addOne)({ n: 'x' } as never)).rejects.toThrow(/n: expected number/);
     // …and by the server when a caller skips the client.
