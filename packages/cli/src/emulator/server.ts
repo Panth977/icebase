@@ -154,6 +154,11 @@ const CORS = {
   'access-control-expose-headers': 'x-goog-upload-url, x-goog-upload-status, x-goog-upload-chunk-granularity, x-goog-upload-control-url, x-goog-upload-size, location',
 };
 
+/** ICEBASE_LOG_ERRORS=1: every refused or failed request and listener on stderr (debugging rules and indexes). */
+/** ICEBASE_LOG_REQUESTS=1: every service request too. */
+const LOG_REQUESTS = !!(globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.ICEBASE_LOG_REQUESTS;
+const LOG_ERRORS = !!(globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.ICEBASE_LOG_ERRORS;
+
 /** The service APIs' paths (everything else is hosting's when the server also hosts). */
 const SERVICE_PATH = /^\/(v1\/(fs|db|rt)\/|v1\/rt$|v0\/b\/|identitytoolkit\.googleapis\.com\/|securetoken\.googleapis\.com\/|emulator\/|__\/icebase\/)/;
 
@@ -250,6 +255,8 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
       const caller = await ctx.verify(authz ? authz.replace(/^(Bearer|Firebase)\s+/i, '') : null);
       for (const s of services.values()) {
         const r = await s.handle(req, url, caller);
+        if (r && LOG_ERRORS && r.status >= 400) console.error(`[icebase] failed: ${req.method} ${url.pathname} → ${r.status}`);
+        else if (r && LOG_REQUESTS) console.error(`[icebase] ${req.method} ${url.pathname}${url.search.length > 1 ? url.search.slice(0, 120) : ''} → ${r.status}`);
         if (r) {
           const h = new Headers(r.headers);
           for (const [k, v] of Object.entries(CORS)) if (!h.has(k)) h.set(k, v);
@@ -260,6 +267,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
       return json({ error: { code: 'not-found', message: `No route ${req.method} ${url.pathname}` } }, 404, CORS);
     } catch (e) {
       const r = errorResponse(e);
+      if (LOG_ERRORS) console.error(`[icebase] failed: ${req.method} ${url.pathname} → ${r.status}: ${(e as Error).message}`);
       for (const [k, v] of Object.entries(CORS)) r.headers.set(k, v);
       return r;
     }
@@ -318,6 +326,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
           await svc.socket(live, msg);
         } catch (e) {
           const err = e instanceof IceBaseError ? { code: e.code, message: e.message, details: { ...e.details, cause: undefined } } : { code: 'internal', message: (e as Error).message };
+          if (LOG_ERRORS) console.error(`[icebase] failed: socket ${String(msg.s)} ${String(msg.t)} ${JSON.stringify(msg.spec ?? msg.path ?? '').slice(0, 300)} → ${err.code}: ${err.message}`);
           live.send({ t: 'error', s: msg.s, id: msg.id, error: err });
         }
       });

@@ -371,6 +371,19 @@ export function storageService(ctx: EmulatorContext): Service {
           }
           return json(v1(await store(caller, bucket, name, Buffer.from(await req.arrayBuffer()), { contentType: req.headers.get('content-type') ?? undefined })));
         }
+        // Copy: POST …/o/{src}/rewriteTo/b/{bucket}/o/{dst} (or copyTo), as file.copy() sends it.
+        const cp = req.method === 'POST' && m[3] ? /^(.+?)\/(rewriteTo|copyTo)\/b\/([^/]+)\/o\/(.+)$/.exec(m[3]) : null;
+        if (cp) {
+          const srcName = decodeURIComponent(cp[1]!);
+          const dstBucket = decodeURIComponent(cp[3]!);
+          const dstName = decodeURIComponent(cp[4]!);
+          const src = getMeta(bucket, srcName);
+          if (!src) return notFound(srcName);
+          const patch = (await req.json().catch(() => ({}))) as { contentType?: string; metadata?: Record<string, string> };
+          const meta = await store(caller, dstBucket, dstName, readBlob(bucket, srcName), { contentType: patch.contentType ?? src.contentType, metadata: { ...src.metadata, ...(patch.metadata ?? {}) }, ...(src.cacheControl ? { cacheControl: src.cacheControl } : {}), ...(src.contentDisposition ? { contentDisposition: src.contentDisposition } : {}) });
+          if (cp[2] === 'copyTo') return json(v1(meta));
+          return json({ kind: 'storage#rewriteResponse', totalBytesRewritten: String(meta.size), objectSize: String(meta.size), done: true, resource: v1(meta) });
+        }
         if (!m[3] && req.method === 'GET' && path.includes('/o')) {
           const r = list(bucket, url.searchParams.get('prefix') ?? '', url.searchParams.get('delimiter'), Number(url.searchParams.get('maxResults') ?? 1000), url.searchParams.get('pageToken'));
           return json({ kind: 'storage#objects', items: r.items.map(v1), prefixes: r.prefixes, ...(r.next ? { nextPageToken: r.next } : {}) });

@@ -125,7 +125,10 @@ describe('icebase serve', () => {
     expect((await fetch(write, { method: 'PUT', headers: { 'content-type': 'text/html' }, body: 'x' })).status).toBe(403);
     expect((await fetch(write, { method: 'PUT', headers: { 'content-type': 'text/plain' }, body: 'uploaded' })).status).toBe(200);
     expect(String((await getAdminStorage(admin).bucket().file('docs/up.txt').download())[0])).toBe('uploaded');
-    const [ranged] = await file.createReadStream({ start: 0, end: 1 }).toArray();
+    // file.copy(): GCS's rewriteTo.
+    await file.copy(getAdminStorage(admin).bucket().file('docs/copied.txt'));
+    expect(String((await getAdminStorage(admin).bucket().file('docs/copied.txt').download())[0])).toBe('hello');
+        const [ranged] = await file.createReadStream({ start: 0, end: 1 }).toArray();
     expect(String(ranged)).toBe('he');
     // Without the admin token, the GCS API is refused …
     expect((await fetch(`${url}/storage/v1/b/demo-icebase.appspot.com/o`)).status).toBe(403);
