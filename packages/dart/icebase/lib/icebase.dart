@@ -11,3 +11,4 @@ export 'src/auth.dart';
 export 'src/database.dart' hide RawDbSnapshot, DbQuery, DbDisconnect, pushId;
 export 'src/storage.dart';
 export 'src/functions.dart' hide EmulatorFunctionsDriver;
+export 'src/api.dart';

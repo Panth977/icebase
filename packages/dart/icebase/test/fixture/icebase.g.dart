@@ -123,6 +123,57 @@ class Message implements IceModel {
       };
 }
 
+class AddNumbersInput implements IceModel {
+  final num a;
+  final num b;
+
+  const AddNumbersInput({required this.a, required this.b});
+
+  factory AddNumbersInput.fromMap(Map<String, Object?> m) => AddNumbersInput(
+        a: m['a'] as num,
+        b: m['b'] as num,
+      );
+
+  @override
+  Map<String, Object?> toMap() => {
+        'a': a,
+        'b': b,
+      };
+}
+
+class AddNumbersOutput implements IceModel {
+  final num sum;
+  final Timestamp at;
+
+  const AddNumbersOutput({required this.sum, required this.at});
+
+  factory AddNumbersOutput.fromMap(Map<String, Object?> m) => AddNumbersOutput(
+        sum: m['sum'] as num,
+        at: m['at'] as Timestamp,
+      );
+
+  @override
+  Map<String, Object?> toMap() => {
+        'sum': sum,
+        'at': at,
+      };
+}
+
+class ProductByIdInput implements IceModel {
+  final String id;
+
+  const ProductByIdInput({required this.id});
+
+  factory ProductByIdInput.fromMap(Map<String, Object?> m) => ProductByIdInput(
+        id: m['id'] as String,
+      );
+
+  @override
+  Map<String, Object?> toMap() => {
+        'id': id,
+      };
+}
+
 /// collection('products')
 abstract final class Products {
   static const def = CollectionDef(
@@ -214,6 +265,51 @@ abstract final class Messages {
 /// filePath('avatars/{uid}/{file}')
 abstract final class Avatars {
   static const def = FilePathDef('avatars/{uid}/{file}', contentTypes: ['image/*'], maxBytes: 1048576);
+}
+
+/// The declared API (config.api): IceBaseFunctions.instance.call(Api.name, input).
+abstract final class Api {
+  /// Add two numbers (callable)
+  static final addNumbers = ApiEndpoint<AddNumbersInput, AddNumbersOutput>(
+    'addNumbers',
+    input: MapField({'a': NumberField(), 'b': NumberField()}),
+    output: MapField({'sum': NumberField(), 'at': TimestampField()}),
+    auth: 'none',
+    toInput: (v) => v.toMap(),
+    fromOutput: (v) => AddNumbersOutput.fromMap((v as Map).cast<String, Object?>()),
+  );
+
+  /// productById — GET /products/{id}
+  static final productById = ApiEndpoint<ProductByIdInput, Product>(
+    'productById',
+    method: 'GET',
+    path: '/products/{id}',
+    input: MapField({'id': StringField()}),
+    output: MapField({
+      'name': StringField(),
+      'priceCents': NumberField(integer: true, min: 0),
+      'category': EnumField(['shoes', 'shirts', 'bags']),
+      'tags': ArrayField(StringField()),
+      'stock': NumberField(integer: true),
+      'active': BooleanField(),
+      'updatedAt': TimestampField(optional: true),
+      'dims': MapField({'w': NumberField(), 'h': NumberField()}, optional: true),
+      'rating.avg': NumberField(optional: true)
+    }),
+    auth: 'none',
+    toInput: (v) => v.toMap(),
+    fromOutput: (v) => Product.fromMap((v as Map).cast<String, Object?>()),
+  );
+
+  /// tagCount (callable)
+  static final tagCount = ApiEndpoint<List<String>, int>(
+    'tagCount',
+    input: ArrayField(StringField()),
+    output: NumberField(integer: true),
+    auth: 'none',
+    toInput: (v) => v,
+    fromOutput: (v) => (v as num).toInt(),
+  );
 }
 
 /// The IceBase config of dart-test.

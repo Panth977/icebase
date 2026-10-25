@@ -1,5 +1,6 @@
 // The schema the Dart tests run against (generated to icebase.g.dart by `icebase gen dart`).
 import { defineConfig, senders } from '@panth977/icebase/config';
+import { defineApi, docOf, endpoint } from '@panth977/icebase/api';
 import { collection, contains, dbPath, defineSchema, desc, f, filePath, index } from '@panth977/icebase/schema';
 
 const products = collection('products', {
@@ -24,8 +25,15 @@ const orders = collection('users/{uid}/orders', {
 const messages = dbPath('rooms/{roomId}/messages/{msgId}', f.map({ text: f.string(), at: f.number(), by: f.string() }), { indexOn: ['at'] });
 const avatars = filePath('avatars/{uid}/{file}', { contentTypes: ['image/*'], maxMb: 1 });
 
+export const api = defineApi({
+  addNumbers: endpoint({ summary: 'Add two numbers', input: f.map({ a: f.number(), b: f.number() }), output: f.map({ sum: f.number(), at: f.timestamp() }), auth: 'none' }),
+  productById: endpoint({ http: { method: 'GET', path: '/products/{id}' }, input: f.map({ id: f.string() }), output: docOf(products), auth: 'none', errors: { 'not-found': 'No such product' } }),
+  tagCount: endpoint({ input: f.array(f.string()), output: f.number({ int: true }), auth: 'none' }),
+});
+
 export default defineConfig({
   name: 'dart-test',
+  api,
   schema: defineSchema({ products, orders }, { paths: { messages }, files: { avatars } }),
   auth: { providers: ['password', 'emailLink', 'phone'], custom: { email: { sender: senders.console(), signIn: 'code' }, phone: { sender: senders.console() } } },
   functions: { source: 'functions' },

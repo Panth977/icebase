@@ -137,14 +137,14 @@ export function fieldOf<C extends AnyCollection>(c: C, path: FieldRef): Field<an
 /** A list of something (the output of a query). */
 export const listOf = <T>(item: Field<T>): Field<T[]> => f.array(item);
 
-/** Where a field came from in the database schema (the reference links it). */
-const REFS = new WeakMap<object, string>();
+/** Where a field came from in the database schema (the reference links it). Kept on the field
+ * itself (not enumerable), so it survives tools that load the config in their own module instance. */
 function withRef<T>(field: Field<T>, collectionPath: string): Field<T> {
-  REFS.set(field, collectionPath);
+  Object.defineProperty(field, '__icebaseRef', { value: collectionPath, enumerable: false });
   return field;
 }
 /** The collection a field was taken from (docOf / pick), if any. */
-export const refOf = (field: Field<unknown>): string | undefined => REFS.get(field);
+export const refOf = (field: Field<unknown>): string | undefined => (field as { __icebaseRef?: string }).__icebaseRef;
 
 // ─── the wire ──────────────────────────────────────────────────────────────────
 //
