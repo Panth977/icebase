@@ -18,6 +18,7 @@ import { IceBaseError } from '@panth977/icebase/errors';
 import { DocumentSnapshot, QueryDocumentSnapshot, docFromPath, type Firestore } from '@panth977/icebase/firestore';
 import { sendResponse, toRequest } from './internal/node-http.ts';
 import { validateValue, type AnyCollection, type DocOf, type Field } from '@panth977/icebase/schema';
+import { checkInput, checkOutput, type AnyEndpoint, type Endpoint, type InputOf, type OutputOf } from '@panth977/icebase/api';
 import { Buffer } from 'node:buffer';
 
 export { HttpsError } from 'firebase-functions/v2/https';
@@ -26,8 +27,8 @@ export { setGlobalOptions } from 'firebase-functions/v2';
 
 /** How the IceBase emulator finds and runs a function. */
 export type IceBaseFunctionRecord =
-  | { kind: 'call'; handler: (req: https.CallableRequest<unknown>) => unknown; input?: Field<unknown>; output?: Field<unknown>; region?: string }
-  | { kind: 'request'; handler: (req: Request) => Response | Promise<Response>; express?: ExpressHandler; region?: string }
+  | { kind: 'call'; handler: (req: https.CallableRequest<unknown>) => unknown; input?: Field<unknown>; output?: Field<unknown>; region?: string; endpoint?: AnyEndpoint }
+  | { kind: 'request'; handler: (req: Request) => Response | Promise<Response>; express?: ExpressHandler; region?: string; endpoint?: AnyEndpoint }
   | { kind: 'document'; event: 'created' | 'updated' | 'deleted' | 'written'; collection: AnyCollection; handler: (e: unknown) => unknown }
   | { kind: 'schedule'; schedule: string; handler: () => unknown }
   | { kind: 'storage'; event: 'finalized' | 'deleted' | 'metadataUpdated'; bucket?: string; handler: (e: CloudEvent<storageFns.StorageObjectData>) => unknown }
@@ -61,9 +62,12 @@ export interface CallableOptions<Req> extends https.CallableOptions {
 }
 
 /** onCall(handler) or onCall({ input, output, …options }, handler). Typed for httpsCallable<typeof fn>(). */
+export function onCall<E extends AnyEndpoint>(endpoint: E, handler: (req: https.CallableRequest<InputOf<E>>) => OutputOf<E> | Promise<OutputOf<E>>): https.CallableFunction<InputOf<E>, Promise<OutputOf<E>>> & { __callable?: [InputOf<E>, OutputOf<E>] };
+export function onCall<E extends AnyEndpoint>(endpoint: E, opts: https.CallableOptions, handler: (req: https.CallableRequest<InputOf<E>>) => OutputOf<E> | Promise<OutputOf<E>>): https.CallableFunction<InputOf<E>, Promise<OutputOf<E>>> & { __callable?: [InputOf<E>, OutputOf<E>] };
 export function onCall<Req, Res>(handler: (req: https.CallableRequest<Req>) => Res | Promise<Res>): https.CallableFunction<Req, Promise<Res>> & { __callable?: [Req, Res] };
 export function onCall<Req, Res>(opts: CallableOptions<Req>, handler: (req: https.CallableRequest<Req>) => Res | Promise<Res>): https.CallableFunction<Req, Promise<Res>> & { __callable?: [Req, Res] };
-export function onCall(a: unknown, b?: unknown) {
+export function onCall(a: unknown, b?: unknown, c?: unknown) {
+  if (isEndpoint(a)) return endpointCall(a, (typeof b === 'function' ? {} : b) as https.CallableOptions, (typeof b === 'function' ? b : c) as (req: https.CallableRequest<unknown>) => unknown);
   const opts = (typeof a === 'function' ? {} : a) as CallableOptions<unknown>;
   const handler = (typeof a === 'function' ? a : b) as (req: https.CallableRequest<unknown>) => unknown;
   const { input, output, ...native } = opts;
@@ -82,15 +86,93 @@ export function onCall(a: unknown, b?: unknown) {
   return tag(https.onCall(native, run), { kind: 'call', handler: run, ...(input ? { input } : {}), ...(output ? { output } : {}) });
 }
 
+const isEndpoint = (x: unknown): x is AnyEndpoint => !!x && typeof x === 'object' && (x as { kind?: unknown }).kind === 'endpoint';
+
+/** A declared callable: its input is checked before the handler runs, its output after. */
+function endpointCall(e: AnyEndpoint, opts: https.CallableOptions, handler: (req: https.CallableRequest<unknown>) => unknown) {
+  if (e.http) throw new IceBaseError('invalid-argument', `onCall(api.${e.name}): it is declared as HTTP ${e.http.method} ${e.http.path} — use onRequest(api.${e.name}, …)`, { reason: 'schema', service: 'functions' });
+  const run = async (req: https.CallableRequest<unknown>) => {
+    if (e.auth !== 'none' && !req.auth) throw new https.HttpsError('unauthenticated', `${e.name} needs a signed-in caller`);
+    if (e.auth === 'admin' && !(req.auth?.token as { admin?: unknown } | undefined)?.admin) throw new https.HttpsError('permission-denied', `${e.name} is for admins`);
+    let data: unknown;
+    try {
+      data = checkInput(e, req.data);
+    } catch (err) {
+      throw new https.HttpsError('invalid-argument', (err as Error).message);
+    }
+    const out = await handler({ ...req, data } as https.CallableRequest<unknown>);
+    try {
+      return checkOutput(e, out);
+    } catch (err) {
+      throw new https.HttpsError('internal', (err as Error).message);
+    }
+  };
+  return tag(https.onCall(opts, run), { kind: 'call', handler: run, input: e.input, output: e.output, endpoint: e });
+}
+
+const HTTP_STATUS: Record<string, number> = { 'invalid-argument': 400, 'failed-precondition': 400, 'out-of-range': 400, unauthenticated: 401, 'permission-denied': 403, 'not-found': 404, 'already-exists': 409, aborted: 409, 'resource-exhausted': 429, cancelled: 499, unimplemented: 501, unavailable: 503, 'deadline-exceeded': 504 };
+
+/** What an HTTP endpoint's handler gets: the checked input (path params, query, JSON body merged) and the request. */
+export interface EndpointRequest<I> {
+  input: I;
+  request: Request;
+}
+
+/** A declared HTTP endpoint: the route, the input (path + query + JSON body) checked, the output checked and sent as JSON. */
+function endpointRequest(e: AnyEndpoint, opts: https.HttpsOptions, handler: (r: EndpointRequest<unknown>) => unknown) {
+  if (!e.http) throw new IceBaseError('invalid-argument', `onRequest(api.${e.name}): it is declared as a callable — use onCall(api.${e.name}, …)`, { reason: 'schema', service: 'functions' });
+  const http = e.http;
+  const tpl = http.path.split('/').filter(Boolean);
+  const fail = (code: string, message: string) => new Response(JSON.stringify({ error: { code, message } }), { status: HTTP_STATUS[code] ?? 500, headers: { 'content-type': 'application/json' } });
+  const run = async (req: Request): Promise<Response> => {
+    const url = new URL(req.url);
+    if (req.method !== http.method) return fail('invalid-argument', `${e.name} answers ${http.method}`);
+    const segs = url.pathname.split('/').filter(Boolean);
+    // The function may be mounted at a prefix (a hosting rewrite): match the route's tail.
+    const tail = segs.slice(Math.max(0, segs.length - tpl.length));
+    const params: Record<string, string> = {};
+    if (tail.length !== tpl.length || !tpl.every((t, i) => { const m = /^\{(.+)\}$/.exec(t); if (m) return (params[m[1]!] = decodeURIComponent(tail[i]!)), true; return t === tail[i]; })) return fail('not-found', `No route ${req.method} ${url.pathname}`);
+    const query = Object.fromEntries(url.searchParams);
+    let body: Record<string, unknown> = {};
+    if (req.method !== 'GET' && req.method !== 'DELETE' && (req.headers.get('content-type') ?? '').includes('json')) body = ((await req.json().catch(() => ({}))) ?? {}) as Record<string, unknown>;
+    // Query values are strings: numbers and booleans the input declares are read as such.
+    const fields = e.input.def.kind === 'map' ? e.input.def.fields : {};
+    const coerce = (k: string, v: string): unknown => { const d = fields[k]?.def.kind; return d === 'number' ? Number(v) : d === 'boolean' ? v === 'true' : v; };
+    const raw = { ...Object.fromEntries(Object.entries({ ...query, ...params }).map(([k, v]) => [k, coerce(k, v)])), ...body };
+    let input: unknown;
+    try {
+      input = checkInput(e, raw);
+    } catch (err) {
+      return fail('invalid-argument', (err as Error).message);
+    }
+    try {
+      const out = await handler({ input, request: req });
+      if (out instanceof Response) return out;
+      return new Response(JSON.stringify(checkOutput(e, out)), { headers: { 'content-type': 'application/json' } });
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code && HTTP_STATUS[code]) return fail(code, (err as Error).message);
+      return fail('internal', (err as Error).message);
+    }
+  };
+  return tag(https.onRequest(opts, async (req, res) => {
+    const r = await run(await toRequest(req as unknown as import('node:http').IncomingMessage & { rawBody?: Buffer }));
+    await sendResponse(res as unknown as import('node:http').ServerResponse, r);
+  }), { kind: 'request', handler: run, endpoint: e });
+}
+
 type FetchHandler = (req: Request) => Response | Promise<Response>;
 type ExpressHandler = (req: https.Request, res: import('express').Response) => void | Promise<void>;
 
 /** onRequest(async (req: Request) => new Response(…)) — fetch-style. An express-style (req, res) handler works too. */
+export function onRequest<E extends AnyEndpoint>(endpoint: E, handler: (r: EndpointRequest<InputOf<E>>) => OutputOf<E> | Response | Promise<OutputOf<E> | Response>): https.HttpsFunction;
+export function onRequest<E extends AnyEndpoint>(endpoint: E, opts: https.HttpsOptions, handler: (r: EndpointRequest<InputOf<E>>) => OutputOf<E> | Response | Promise<OutputOf<E> | Response>): https.HttpsFunction;
 export function onRequest(handler: FetchHandler): https.HttpsFunction;
 export function onRequest(handler: ExpressHandler): https.HttpsFunction;
 export function onRequest(opts: https.HttpsOptions, handler: FetchHandler): https.HttpsFunction;
 export function onRequest(opts: https.HttpsOptions, handler: ExpressHandler): https.HttpsFunction;
-export function onRequest(a: unknown, b?: unknown): https.HttpsFunction {
+export function onRequest(a: unknown, b?: unknown, c?: unknown): https.HttpsFunction {
+  if (isEndpoint(a)) return endpointRequest(a, (typeof b === 'function' ? {} : b) as https.HttpsOptions, (typeof b === 'function' ? b : c) as (r: EndpointRequest<unknown>) => unknown);
   const opts = (typeof a === 'function' ? {} : a) as https.HttpsOptions;
   const handler = (typeof a === 'function' ? a : b) as FetchHandler | ExpressHandler;
   if (handler.length >= 2) return tag(https.onRequest(opts, handler as ExpressHandler), { kind: 'request', handler: () => new Response('express-style handlers run on Cloud Functions only', { status: 501 }), express: handler as ExpressHandler });

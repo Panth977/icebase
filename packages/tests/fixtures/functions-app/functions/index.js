@@ -2,7 +2,7 @@ import { getAdminFirestore, getAdminMessaging, initializeAdminApp, taskQueue } f
 import { collection, doc, getDoc, increment, updateDoc } from '@panth977/icebase/firestore';
 import { HttpsError, beforeUserCreated, onCall, onDocumentCreated, onDocumentUpdated, onObjectFinalized, onRequest, onTaskDispatched, onUserCreated, onValueCreated } from '@panth977/icebase-server/functions';
 import { f } from '@panth977/icebase/schema';
-import config, { orders, products, rooms, seen } from './config.js';
+import config, { api, orders, products, rooms, seen } from './config.js';
 
 // ICEBASE_ENV picks the environment: `icebase dev` and `icebase deploy` set it.
 const app = initializeAdminApp(config, process.env.ICEBASE_ENV ?? 'test');
@@ -50,3 +50,13 @@ export const onOrderUpdated = onDocumentUpdated(orders, async (e) => {
     await updateDoc(e.data.after.data().product, { stock: increment(e.data.before.data().qty - e.data.after.data().qty) });
   }
 });
+
+// Declared endpoints: input and output checked against config.api.
+export const addOne = onCall(api.addOne, (req) => ({ n: req.data.n + 1 }));
+export const productInfo = onRequest(api.productInfo, async ({ input }) => {
+  const p = (await getDoc(doc(collection(db, products), input.id))).data();
+  if (!p) throw new HttpsError('not-found', `No product ${input.id}`);
+  return { name: input.upper ? p.name.toUpperCase() : p.name, stock: p.stock };
+});
+export const badOutput = onCall(api.badOutput, () => ({ n: 'not a number' }));
+export const whoAmI = onCall(api.whoAmI, (req) => ({ uid: req.auth.uid }));

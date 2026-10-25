@@ -73,3 +73,45 @@ export function httpsCallableFromURL<Req = unknown, Res = unknown>(functions: Fu
 
 export type FunctionsErrorCode = fn.FunctionsErrorCode;
 export type FunctionsError = fn.FunctionsError;
+
+// ─── declared endpoints (icebase/api) ──────────────────────────────────────────
+
+import type { AnyEndpoint, InputOf, OutputOf } from './api.ts';
+import { checkInput, checkOutput } from './api.ts';
+
+/** A declared callable: callable(functions, api.createOrder)(input) — the input is checked before
+ * it is sent and the result after it arrives, both against the endpoint's declaration. */
+export function callable<E extends AnyEndpoint>(functions: Functions, e: E): (input: InputOf<E>) => Promise<OutputOf<E>> {
+  if (e.http) throw new IceBaseError('invalid-argument', `callable(api.${e.name}): it is an HTTP endpoint — use request(functions, api.${e.name}, input)`, { reason: 'schema', service: 'functions' });
+  const call = fn.httpsCallable(functions._native, e.name);
+  return async (input) => {
+    const data = checkInput(e, input);
+    const r = await call(data);
+    return checkOutput(e, r.data);
+  };
+}
+
+/** Call a declared HTTP endpoint: path parameters filled from the input, the rest as query (GET,
+ * DELETE) or JSON body; the signed-in user's ID token is sent; the JSON answer is checked. */
+export async function request<E extends AnyEndpoint>(functions: Functions, e: E, input: InputOf<E>, opts: { baseUrl?: string } = {}): Promise<OutputOf<E>> {
+  if (!e.http) throw new IceBaseError('invalid-argument', `request(api.${e.name}): it is a callable — use callable(functions, api.${e.name})`, { reason: 'schema', service: 'functions' });
+  const data = checkInput(e, input) as Record<string, unknown>;
+  const app = functions.app;
+  const project = app.config.firebase?.projectId ?? `demo-${app.config.name}`;
+  const base = opts.baseUrl ?? (app.modes.functions === 'emulator' ? `${emulatorOrigin(app)}/${project}/${functions.region}/${e.name}` : `https://${functions.region}-${project}.cloudfunctions.net/${e.name}`);
+  const rest = { ...data };
+  const path = e.http.path.replace(/\{([^}]+)\}/g, (_m, k: string) => {
+    const v = rest[k];
+    delete rest[k];
+    return encodeURIComponent(String(v));
+  });
+  const url = new URL(base.replace(/\/$/, '') + path);
+  const bodyless = e.http.method === 'GET' || e.http.method === 'DELETE';
+  if (bodyless) for (const [k, v] of Object.entries(rest)) if (v !== undefined) url.searchParams.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+  const auth = app._services.get('auth') as { currentUser?: { getIdToken(): Promise<string> } | null } | undefined;
+  const token = auth?.currentUser ? await auth.currentUser.getIdToken() : null;
+  const res = await fetch(url, { method: e.http.method, headers: { ...(bodyless ? {} : { 'content-type': 'application/json' }), ...(token ? { authorization: `Bearer ${token}` } : {}) }, ...(bodyless ? {} : { body: JSON.stringify(rest) }) });
+  const j = (await res.json().catch(() => null)) as { error?: { code: string; message: string } } | null;
+  if (!res.ok || (j && j.error)) throw new IceBaseError((j?.error?.code ?? 'internal') as IceBaseError['code'], j?.error?.message ?? `${e.name}: HTTP ${res.status}`, { service: 'functions' });
+  return checkOutput(e, j);
+}

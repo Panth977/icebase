@@ -8,6 +8,7 @@
     "./config": "./src/config.ts",
     "./schema": "./src/schema.ts",
     "./zod": "./src/zod.ts",
+    "./api": "./src/api.ts",
     "./firestore": "./src/firestore.ts",
     "./auth": "./src/auth.ts",
     "./database": "./src/database.ts",

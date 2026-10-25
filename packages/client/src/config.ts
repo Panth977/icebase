@@ -100,6 +100,8 @@ export interface IceBaseConfig<C extends Record<string, AnyCollection>, E extend
     custom?: CustomAuthConfig;
   };
   storage?: { maxUploadMb?: number };
+  /** The API's schema (icebase/api defineApi): every callable and HTTP endpoint, its input and output. */
+  api?: import('./api.ts').Api;
 
   /** Needed when any environment uses mode 'firebase'. Secrets come from env vars, never from this file. */
   firebase?: {

@@ -10,7 +10,7 @@ import { collection as coll, defineSchema, f } from '@panth977/icebase/schema';
 
 const FS = process.env.FIRESTORE_EMULATOR_HOST;
 if (!FS) throw new Error('run under the fixture emulators');
-import fixture, { orders, products, rooms, seen } from './fixtures/functions-app/functions/config.js';
+import fixture, { api, orders, products, rooms, seen } from './fixtures/functions-app/functions/config.js';
 void coll;
 void defineSchema;
 const config = defineConfig({ name: 'fn-client', schema: fixture.schema, firebase: { projectId: 'demo-icebase', storageBucket: 'demo-icebase.appspot.com', databaseURL: 'http://127.0.0.1:9009/?ns=demo-icebase-default-rtdb' }, environments: { test: { mode: 'firebase' } } });
@@ -111,5 +111,20 @@ describe('functions · firebase mode', () => {
     expect(c.user.displayName).toBe('Gated');
     expect((await c.user.getIdTokenResult(true)).claims.tier).toBe('free');
     await until(async () => (await seenDoc(`user-${c.user.uid}`)).exists());
+  });
+
+  it('declared endpoints: callable and HTTP, input and output checked on both sides', async () => {
+    const { callable, request } = await import('@panth977/icebase/functions');
+    expect(await callable(fns, api.addOne)({ n: 41 })).toEqual({ n: 42 });
+    await expect(callable(fns, api.addOne)({ n: 'x' } as never)).rejects.toThrow(/n: expected number/);
+    await expect(httpsCallable(fns, 'addOne')({ n: 'x' })).rejects.toMatchObject({ code: 'functions/invalid-argument' });
+    await expect(callable(fns, api.badOutput)({})).rejects.toMatchObject({ code: 'functions/internal' });
+    const { getAuth, signOut } = await import('@panth977/icebase/auth');
+    await signOut(getAuth(app));
+    await expect(callable(fns, api.whoAmI)({})).rejects.toMatchObject({ code: 'functions/unauthenticated' });
+    await setDoc(doc(collection(db, products), 'px'), { name: 'Hat', stock: 4 });
+    const base = 'http://127.0.0.1:5011/demo-icebase/us-central1/productInfo';
+    expect(await request(fns, api.productInfo, { id: 'px', upper: true }, { baseUrl: base })).toEqual({ name: 'HAT', stock: 4 });
+    await expect(request(fns, api.productInfo, { id: 'nope' }, { baseUrl: base })).rejects.toMatchObject({ code: 'not-found' });
   });
 });

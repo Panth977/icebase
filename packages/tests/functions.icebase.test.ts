@@ -9,7 +9,7 @@ import { addDoc, collection, doc, getDoc, getFirestore, setDoc, updateDoc } from
 import { getFunctions, httpsCallable } from '@panth977/icebase/functions';
 import { collection as coll, defineSchema, f } from '@panth977/icebase/schema';
 
-import fixture, { orders, products, rooms, seen } from './fixtures/functions-app/functions/config.js';
+import fixture, { api, orders, products, rooms, seen } from './fixtures/functions-app/functions/config.js';
 const make = (port?: number) => defineConfig({ name: 'fn-emu', schema: fixture.schema, functions: { source: 'functions' }, firebase: { projectId: 'demo-icebase', storageBucket: 'demo-icebase.appspot.com' }, ...(port ? { emulator: { port } } : {}), environments: { local: { mode: 'emulator' } } });
 void coll;
 void f;
@@ -114,5 +114,30 @@ describe('functions · emulator mode', () => {
     expect(r.data.id).toMatch(/^projects\/demo-icebase\/messages\//);
     const out = (await (await fetch(`${emu.url}/__/icebase/messaging/outbox`, { headers: { authorization: 'Bearer owner' } })).json()) as { messages: { message: { token: string } }[] };
     expect(out.messages.at(-1)?.message.token).toBe('device-1');
+  });
+
+  it('declared endpoints: callable and HTTP, input and output checked on both sides', async () => {
+    const { callable, request } = await import('@panth977/icebase/functions');
+    const fns = getFunctions(app);
+    expect(await callable(fns, api.addOne)({ n: 41 })).toEqual({ n: 42 });
+    // Refused before it leaves (client-side check)…
+    await expect(callable(fns, api.addOne)({ n: 'x' } as never)).rejects.toThrow(/n: expected number/);
+    // …and by the server when a caller skips the client.
+    await expect(httpsCallable(fns, 'addOne')({ n: 'x' })).rejects.toMatchObject({ code: 'functions/invalid-argument' });
+    // A handler returning what its declaration does not allow is a server error.
+    await expect(callable(fns, api.badOutput)({})).rejects.toMatchObject({ code: 'functions/internal' });
+    // auth: 'signed-in' by default.
+    const { getAuth, signOut } = await import('@panth977/icebase/auth');
+    await signOut(getAuth(app));
+    await expect(callable(fns, api.whoAmI)({})).rejects.toMatchObject({ code: 'functions/unauthenticated' });
+    // HTTP: path params + query, JSON out, declared errors.
+    const db = getFirestore(app);
+    await setDoc(doc(collection(db, products), 'px'), { name: 'Hat', stock: 4 });
+    expect(await request(fns, api.productInfo, { id: 'px', upper: true })).toEqual({ name: 'HAT', stock: 4 });
+    await expect(request(fns, api.productInfo, { id: 'nope' })).rejects.toMatchObject({ code: 'not-found' });
+    const raw = await fetch(`${emu.url}/demo-icebase/us-central1/productInfo/products/px?upper=nope-not-bool`);
+    expect(raw.status).toBe(200); // 'upper' is read as a boolean (anything but "true" is false)
+    const bad = await fetch(`${emu.url}/demo-icebase/us-central1/productInfo/products/px`, { method: 'POST' });
+    expect(bad.status).toBe(400);
   });
 });

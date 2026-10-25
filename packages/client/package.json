@@ -37,6 +37,10 @@
       "types": "./src/zod.ts",
       "default": "./dist/zod.js"
     },
+    "./api": {
+      "types": "./src/api.ts",
+      "default": "./dist/api.js"
+    },
     "./firestore": {
       "types": "./src/firestore.ts",
       "default": "./dist/firestore.js"
