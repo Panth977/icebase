@@ -18,8 +18,15 @@ const TYPES: Record<string, string> = {
 
 const COMPRESSIBLE = /^(text\/|application\/(json|javascript|manifest\+json|xml|wasm)|image\/svg)/;
 
-/** Firebase Hosting globs: ** any path, * one segment, {a,b} alternatives. */
-export function globRe(glob: string): RegExp {
+/** Firebase Hosting globs: ** any path, * one segment, {a,b} alternatives, a leading ! negates. */
+export function globRe(glob: string): { test(path: string): boolean } {
+  if (glob.startsWith('!')) {
+    const re = globRe(glob.slice(1));
+    return { test: (p) => !re.test(p) };
+  }
+  return globRegExp(glob);
+}
+function globRegExp(glob: string): RegExp {
   let re = '';
   for (let i = 0; i < glob.length; i++) {
     const c = glob[i]!;
@@ -128,7 +135,8 @@ export function hostingHandler(opts: HostingOptions): (req: Request) => Promise<
       if (!globRe(r.source).test(path)) continue;
       if ('function' in r) {
         // Same as Firebase Hosting: the function sees the original path.
-        const res = await opts.callFunction(req, r.function, r.region ?? region, `${path}${url.search}`);
+        const fn = typeof r.function === 'string' ? { functionId: r.function, region: r.region } : r.function;
+        const res = await opts.callFunction(req, fn.functionId, fn.region ?? r.region ?? region, `${path}${url.search}`);
         const hd = new Headers(res.headers);
         for (const [k, v] of Object.entries(headersFor(path))) hd.set(k, v);
         return new Response(res.body, { status: res.status, headers: hd });

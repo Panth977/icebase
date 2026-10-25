@@ -87,7 +87,8 @@ export interface IceBaseConfig<C extends Record<string, AnyCollection>, E extend
     spa?: boolean;
     cleanUrls?: boolean;
     trailingSlash?: boolean;
-    rewrites?: ({ source: string; function: string; region?: string } | { source: string; destination: string })[];
+    /** `function` as a name, or firebase.json's { functionId, region }. */
+    rewrites?: ({ source: string; function: string | { functionId: string; region?: string }; region?: string } | { source: string; destination: string })[];
     redirects?: { source: string; destination: string; type?: 301 | 302 }[];
     headers?: { source: string; headers: Record<string, string> }[];
   };

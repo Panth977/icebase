@@ -378,8 +378,10 @@ export interface HostingConfigJson {
 export function hostingVersionConfig(h: NonNullable<IceBaseApp['config']['hosting']>, region = 'us-central1'): HostingConfigJson {
   const rewrites: NonNullable<HostingConfigJson['rewrites']> = [];
   for (const r of h.rewrites ?? []) {
-    if ('function' in r) rewrites.push({ glob: r.source, run: { serviceId: r.function.toLowerCase(), region: r.region ?? region } });
-    else rewrites.push({ glob: r.source, path: r.destination });
+    if ('function' in r) {
+      const fn = typeof r.function === 'string' ? { functionId: r.function, region: r.region } : r.function;
+      rewrites.push({ glob: r.source, run: { serviceId: fn.functionId.toLowerCase(), region: fn.region ?? r.region ?? region } });
+    } else rewrites.push({ glob: r.source, path: r.destination });
   }
   if (h.spa) rewrites.push({ glob: '**', path: '/index.html' });
   return {

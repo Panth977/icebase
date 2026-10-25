@@ -78,7 +78,8 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
     const entry = resolve(dir, pkg.main ?? (existsSync(join(dir, 'src/index.ts')) ? 'src/index.ts' : 'index.js'));
     // The functions' own icebase apps reach this server through this variable.
     process.env.ICEBASE_EMULATOR_HOST = ctx.origin.replace(/^http:\/\//, '');
-    process.env.FUNCTIONS_EMULATOR = 'true';
+    // A development server says so, as Firebase's emulator does; a signed one (icebase serve) is production.
+    if (!ctx.signingKey) process.env.FUNCTIONS_EMULATOR = 'true';
     // What Cloud Functions provides: the project, its default bucket and database (storage and database triggers read them).
     const fb = ctx.config.firebase;
     process.env.GCLOUD_PROJECT ??= ctx.projectId;
