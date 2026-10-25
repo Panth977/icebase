@@ -66,3 +66,6 @@ export const echoTyped = onCall(api.echoTyped, (req) => ({ at: req.data.at, prod
 export const onProductWritten = onDocumentWritten('products/{productId}', async (e) =>
   record(`pattern-${e.params.productId}`, 'pattern', { params: e.params, before: e.data.before.exists, after: e.data.after.exists ? e.data.after.data().stock : null, ref: e.data.after.ref.path }),
 );
+
+// Auth emails on a signed server (icebase serve): the link, to mail it yourself.
+export const sendAuthEmail = async (m) => record(`mail-${m.kind}-${m.to.replace(/[^a-z0-9]/g, '_')}`, 'mail', { kind: m.kind, to: m.to, link: m.link });

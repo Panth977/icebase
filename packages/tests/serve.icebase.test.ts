@@ -76,4 +76,29 @@ describe('icebase serve', () => {
     expect((await fetch(`${url}/emulator/v1/projects/demo-icebase/oobCodes`, { headers: { authorization: 'Bearer owner' } })).status).toBe(403);
     expect((await fetch(`${url}/emulator/v1/projects/demo-icebase/oobCodes`, { headers: { authorization: `Bearer ${token}` } })).status).toBe(200);
   });
+
+  it('auth emails: the link is mailed by the sendAuthEmail export and goes straight to the app', async () => {
+    const post = (op: string, body: object) =>
+      fetch(`${url}/identitytoolkit.googleapis.com/v1/accounts:${op}?key=x`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
+    const mailOf = async (id: string) => {
+      for (let i = 0; i < 50; i++) {
+        const d = s.context.firestore.get(`seen/${id}`) as { data?: { detail?: { link?: string } } } | null;
+        if (d?.data?.detail?.link) return d.data.detail.link;
+        await new Promise((ok) => setTimeout(ok, 50));
+      }
+      throw new Error(`no mail ${id}`);
+    };
+    await post('sendOobCode', { requestType: 'EMAIL_SIGNIN', email: 'Link@X.test', continueUrl: 'https://app.test/finish?next=/b' });
+    const link = await mailOf('mail-signIn-link_x_test');
+    expect(link.startsWith('https://app.test/finish?next=/b&mode=signIn&')).toBe(true);
+    const oobCode = new URL(link).searchParams.get('oobCode');
+    const signed = await post('signInWithEmailLink', { email: 'link@x.test', oobCode });
+    expect(signed.idToken).toBeTruthy();
+    // verifyBeforeUpdateEmail: the code goes to the new address; applying it changes the email.
+    await post('sendOobCode', { requestType: 'VERIFY_AND_CHANGE_EMAIL', idToken: signed.idToken, newEmail: 'new@x.test', continueUrl: 'https://app.test/' });
+    const change = new URL(await mailOf('mail-verifyAndChangeEmail-new_x_test')).searchParams.get('oobCode');
+    expect((await post('update', { oobCode: change })).email).toBe('new@x.test');
+    // A reset for an address with no account says nothing.
+    expect((await post('sendOobCode', { requestType: 'PASSWORD_RESET', email: 'nobody@x.test' })).error).toBeUndefined();
+  });
 });

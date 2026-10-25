@@ -172,12 +172,28 @@ export function authService(ctx: EmulatorContext): Service {
     if (u.disabled) throw new AuthFail('USER_DISABLED');
     return u;
   };
+  const MODES: Record<string, string> = { PASSWORD_RESET: 'resetPassword', VERIFY_EMAIL: 'verifyEmail', EMAIL_SIGNIN: 'signIn', VERIFY_AND_CHANGE_EMAIL: 'verifyAndChangeEmail' };
   const oob = (kind: string, email: string | null, uid: string | null, continueUrl?: string) => {
     const code = randomBytes(18).toString('base64url');
-    const mode = { PASSWORD_RESET: 'resetPassword', VERIFY_EMAIL: 'verifyEmail', EMAIL_SIGNIN: 'signIn' }[kind] ?? kind;
-    const link = `${ctx.origin}/emulator/action?mode=${mode}&lang=en&oobCode=${code}&apiKey=fake-api-key${continueUrl ? `&continueUrl=${encodeURIComponent(continueUrl)}` : ''}`;
+    const mode = MODES[kind] ?? kind;
+    const params = `mode=${mode}&lang=en&oobCode=${code}&apiKey=${secure ? 'icebase' : 'fake-api-key'}`;
+    // Signed mode (a real server): the link goes straight to the app's page, which completes it with
+    // the SDK (signInWithEmailLink, applyActionCode, confirmPasswordReset). Else the emulator's page.
+    const link = secure
+      ? `${continueUrl || `${ctx.origin}/`}${(continueUrl ?? '').includes('?') ? '&' : '?'}${params}`
+      : `${ctx.origin}/emulator/action?${params}${continueUrl ? `&continueUrl=${encodeURIComponent(continueUrl)}` : ''}`;
     q.oobPut.run(code, email, kind, uid, link, now());
     return { code, link };
+  };
+  /** Mail the link with the functions' sendAuthEmail export; a signed server without one refuses. */
+  const mail = async (kind: string, to: string | null, link: string, continueUrl?: string) => {
+    const send = ctx.functionExports.sendAuthEmail as ((m: { kind: string; to: string; link: string; continueUrl?: string }) => Promise<void>) | undefined;
+    if (!send) {
+      if (secure) throw new AuthFail('OPERATION_NOT_ALLOWED : this server sends no emails (export sendAuthEmail from the functions source)');
+      return;
+    }
+    if (!to) throw new AuthFail('MISSING_EMAIL');
+    await send({ kind: MODES[kind] ?? kind, to, link, ...(continueUrl ? { continueUrl } : {}) });
   };
   const takeOob = (code: unknown, kind?: string) => {
     const r = q.oobGet.get(String(code ?? '')) as { code: string; email: string; kind: string; uid: string | null; at: number } | undefined;
@@ -294,9 +310,17 @@ export function authService(ctx: EmulatorContext): Service {
     },
     update(b) {
       if (b.oobCode) {
-        const r = takeOob(b.oobCode, 'VERIFY_EMAIL');
+        const r = takeOob(b.oobCode);
+        if (r.kind !== 'VERIFY_EMAIL' && r.kind !== 'VERIFY_AND_CHANGE_EMAIL') throw new AuthFail('INVALID_OOB_CODE');
         q.oobDel.run(r.code);
         const u = live(r.uid ? get(r.uid) : getByEmail(r.email));
+        if (r.kind === 'VERIFY_AND_CHANGE_EMAIL') {
+          if (getByEmail(r.email) && getByEmail(r.email)!.localId !== u.localId) throw new AuthFail('EMAIL_EXISTS');
+          u.email = r.email;
+          u.providerUserInfo = u.providerUserInfo.map((x) => (x.providerId === 'password' ? { ...x, rawId: r.email, email: r.email, federatedId: r.email } : x));
+          // Every session ends: the new address signs in again.
+          u.validSince = String(Math.floor(now() / 1000));
+        }
         u.emailVerified = true;
         save(u);
         return { kind: 'identitytoolkit#SetAccountInfoResponse', email: u.email, emailVerified: true, localId: u.localId };
@@ -323,16 +347,28 @@ export function authService(ctx: EmulatorContext): Service {
       save(u);
       return { kind: 'identitytoolkit#SetAccountInfoResponse', localId: u.localId, email: u.email, displayName: u.displayName, photoUrl: u.photoUrl, emailVerified: !!u.emailVerified, providerUserInfo: u.providerUserInfo, ...(reissue || b.returnSecureToken ? { idToken: idToken(u, 'password'), refreshToken: tokens(u, 'password').refreshToken, expiresIn: '3600' } : {}) };
     },
-    sendOobCode(b) {
+    async sendOobCode(b) {
       const kind = String(b.requestType);
-      if (kind === 'VERIFY_EMAIL') {
+      const cont = b.continueUrl as string | undefined;
+      if (kind === 'VERIFY_EMAIL' || kind === 'VERIFY_AND_CHANGE_EMAIL') {
         const u = live(fromIdToken(b.idToken));
-        const { link } = oob(kind, u.email ?? null, u.localId, b.continueUrl as string | undefined);
-        return { kind: 'identitytoolkit#GetOobConfirmationCodeResponse', email: u.email, ...(b.returnOobLink ? { oobLink: link } : {}) };
+        const to = kind === 'VERIFY_EMAIL' ? (u.email ?? null) : String(b.newEmail ?? '').toLowerCase();
+        if (kind === 'VERIFY_AND_CHANGE_EMAIL') {
+          if (!/^[^@\s]+@[^@\s]+$/.test(to ?? '')) throw new AuthFail('INVALID_NEW_EMAIL');
+          if (getByEmail(to!)) throw new AuthFail('EMAIL_EXISTS');
+        }
+        const { link } = oob(kind, to, u.localId, cont);
+        await mail(kind, to, link, cont);
+        return { kind: 'identitytoolkit#GetOobConfirmationCodeResponse', email: to, ...(b.returnOobLink ? { oobLink: link } : {}) };
       }
       const email = String(b.email ?? '').toLowerCase();
-      if (kind === 'PASSWORD_RESET' && !getByEmail(email)) throw new AuthFail('EMAIL_NOT_FOUND');
-      const { link } = oob(kind, email, getByEmail(email)?.localId ?? null, b.continueUrl as string | undefined);
+      if (kind === 'PASSWORD_RESET' && !getByEmail(email)) {
+        // A server others reach does not tell who has an account.
+        if (secure) return { kind: 'identitytoolkit#GetOobConfirmationCodeResponse', email };
+        throw new AuthFail('EMAIL_NOT_FOUND');
+      }
+      const { link } = oob(kind, email, getByEmail(email)?.localId ?? null, cont);
+      await mail(kind, email, link, cont);
       return { kind: 'identitytoolkit#GetOobConfirmationCodeResponse', email, ...(b.returnOobLink ? { oobLink: link } : {}) };
     },
     resetPassword(b) {
