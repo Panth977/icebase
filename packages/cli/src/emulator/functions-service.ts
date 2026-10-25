@@ -71,6 +71,7 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
   const src = ctx.config.functions?.source;
   const dir = src ? resolve(ctx.root, src) : null;
 
+  let loads = 0;
   const load = async () => {
     fns = new Map();
     if (!dir || !existsSync(dir)) return;
@@ -85,8 +86,15 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
     process.env.GCLOUD_PROJECT ??= ctx.projectId;
     process.env.FIREBASE_CONFIG ??= JSON.stringify({ projectId: ctx.projectId, storageBucket: fb?.storageBucket ?? `${ctx.projectId}.appspot.com`, databaseURL: fb?.databaseURL ?? `https://${ctx.projectId}-default-rtdb.firebaseio.com` });
     if (ctx.env) process.env.ICEBASE_ENV = ctx.env;
-    const { importTs } = await import('../cli/load.ts');
-    const mod = (await importTs(`${pathToFileURL(entry).href}?v=${Date.now()}`)) as Record<string, { __icebase?: Rec }>;
+    // Built JavaScript loads with Node's own import(): one module graph, as Cloud Functions loads it
+    // (code that registers handlers from require()d modules sees the same instances). TypeScript
+    // sources go through tsx, fresh on every reload.
+    let mod: Record<string, { __icebase?: Rec }>;
+    if (/\.(m?js|cjs)$/.test(entry)) mod = (await import(`${pathToFileURL(entry).href}${loads++ ? `?v=${loads}` : ''}`)) as typeof mod;
+    else {
+      const { importTs } = await import('../cli/load.ts');
+      mod = (await importTs(`${pathToFileURL(entry).href}?v=${Date.now()}`)) as typeof mod;
+    }
     ctx.functionExports = mod;
     for (const [name, v] of Object.entries(mod)) if (v && (typeof v === 'object' || typeof v === 'function') && v.__icebase) fns.set(name, v.__icebase);
     log(`functions: ${[...fns.entries()].map(([n, r]) => `${n} (${r.kind === 'document' ? `${r.event} ${r.collection ? r.collection.path : r.pattern}` : 'event' in r ? `${r.kind} ${r.event}` : r.kind})`).join(', ') || 'none'}`);
