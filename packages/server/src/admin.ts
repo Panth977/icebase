@@ -82,6 +82,20 @@ export function getAdminAuth<Cfg extends AnyConfig>(app: IceBaseApp<Cfg>): Admin
     const claims = app.config.auth?.claims as FieldMap | undefined;
     const claimsColl = claims ? schemaCollection('__claims__x', { fields: claims, indexes: [] }) : null;
     const typed = Object.create(native) as AdminAuth<ClaimsOf<Cfg>>;
+    if (mode === 'emulator') {
+      // The IceBase server may sign its tokens; firebase-admin's emulator path only reads unsigned ones.
+      const call = async <R>(path: string, body: unknown): Promise<R> => {
+        const { emulatorFetch } = await import('@panth977/icebase/app');
+        const { callerToken } = await import('@panth977/icebase/internal');
+        const token = await callerToken(app);
+        const res = await emulatorFetch(`${emulatorOrigin(app)}/__/icebase/admin/auth/${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
+        const j = (await res.json()) as R & { error?: { code: string; message: string } };
+        if (!res.ok || j.error) throw Object.assign(new Error(j.error?.message ?? `auth ${res.status}`), { code: j.error?.code ?? 'auth/internal-error' });
+        return j;
+      };
+      typed.verifyIdToken = async (idToken: string, checkRevoked?: boolean) => (await call<{ claims: never }>('verifyIdToken', { idToken, checkRevoked: !!checkRevoked })).claims;
+      typed.createCustomToken = async (uid: string, claims?: object) => (await call<{ token: string }>('createCustomToken', { uid, ...(claims ? { claims } : {}) })).token;
+    }
     typed.setCustomUserClaims = async (uid: string, c: ClaimsOf<Cfg> | null) => {
       if (c !== null && claimsColl) {
         try {

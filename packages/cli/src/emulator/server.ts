@@ -9,7 +9,9 @@
 //   /__/icebase/auth/*          custom auth
 //   /__/icebase/health          health
 
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { Buffer } from 'node:buffer';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
@@ -63,6 +65,8 @@ export interface EmulatorContext {
   adminToken: string;
   /** Events between services: storage / database / auth changes, and auth's blocking functions. */
   hooks: EmulatorHooks;
+  /** Set when the server signs its tokens (signTokens): the HMAC key. */
+  signingKey: Buffer | null;
 }
 
 /** A stored object as Cloud Functions' storage events carry it. */
@@ -105,6 +109,11 @@ export interface EmulatorOptions {
    * 'owner' — fine on a developer machine, never on a server others can reach.
    */
   adminToken?: string;
+  /**
+   * Sign ID tokens (HMAC, key kept in the data directory) and refuse unsigned ones — for a server
+   * others can reach (a VM). Off by default: like Firebase's emulator, tokens are unsigned.
+   */
+  signTokens?: boolean;
   /** Learning mode: a query whose index is not declared is reported here and answered (never in production). */
   learnIndexes?: (missing: { collection: string; suggestion: string }) => void;
 }
@@ -137,6 +146,15 @@ const CORS = {
   'access-control-expose-headers': 'x-goog-upload-url, x-goog-upload-status, x-goog-upload-chunk-granularity, x-goog-upload-control-url, x-goog-upload-size, location',
 };
 
+/** The signing key: random per run in memory, else made once and kept in the data directory. */
+function signTokens(opts: EmulatorOptions, dataDir: string, memory: boolean): Buffer | null {
+  if (!(opts.signTokens ?? opts.config.emulator?.signTokens)) return null;
+  if (memory) return randomBytes(32);
+  const file = join(dataDir, 'auth-signing-key');
+  if (!existsSync(file)) writeFileSync(file, randomBytes(32).toString('base64'), { mode: 0o600 });
+  return Buffer.from(readFileSync(file, 'utf8').trim(), 'base64');
+}
+
 export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmulator> {
   const config = opts.config;
   const root = resolve(opts.root ?? process.cwd());
@@ -161,6 +179,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
     functionExports: {},
     adminToken,
     hooks: { storage: [], database: [], auth: [], beforeCreate: null, beforeSignIn: null },
+    signingKey: signTokens(opts, dataDir, memory),
     // Until the auth service is up, only the admin token is understood.
     verify: async (token) => ({ admin: token === adminToken, auth: null }),
   };

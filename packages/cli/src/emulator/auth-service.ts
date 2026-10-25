@@ -3,7 +3,7 @@
 // (FIREBASE_AUTH_EMULATOR_HOST) work against it unchanged. Users live in SQLite. ID tokens are
 // unsigned JWTs, exactly like Firebase's emulator, which both SDKs accept in emulator mode.
 
-import { randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { json, type EmulatorContext, type Service } from './server.ts';
@@ -63,6 +63,23 @@ export function decodeToken(token: string): Record<string, unknown> | null {
 
 export function authService(ctx: EmulatorContext): Service {
   const p = ctx.projectId;
+  // Tokens: unsigned (alg none, like Firebase's emulator) on a developer machine; HMAC-signed
+  // when the server signs (signTokens: a server others reach) — then unsigned ones are refused.
+  const key = ctx.signingKey;
+  const signJwt = (payload: Record<string, unknown>): string => {
+    if (!key) return `${b64u(JSON.stringify({ alg: 'none', typ: 'JWT' }))}.${b64u(JSON.stringify(payload))}.`;
+    const head = `${b64u(JSON.stringify({ alg: 'HS256', typ: 'JWT', kid: 'icebase' }))}.${b64u(JSON.stringify(payload))}`;
+    return `${head}.${createHmac('sha256', key).update(head).digest('base64url')}`;
+  };
+  const verifyJwt = (token: string): Record<string, unknown> | null => {
+    if (!key) return decodeToken(token);
+    const [h, b, sig] = token.split('.');
+    if (!h || !b || !sig) return null;
+    const want = createHmac('sha256', key).update(`${h}.${b}`).digest();
+    const got = Buffer.from(sig, 'base64url');
+    if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
+    return decodeToken(token);
+  };
   const db = new DatabaseSync(ctx.dataDir === ':memory:' ? ':memory:' : join(ctx.dataDir, 'auth.sqlite'));
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (uid TEXT PRIMARY KEY, email TEXT, phone TEXT, rec TEXT NOT NULL);
@@ -128,7 +145,7 @@ export function authService(ctx: EmulatorContext): Service {
       iss: `https://securetoken.google.com/${p}`,
       sub: u.localId,
     };
-    return `${b64u(JSON.stringify({ alg: 'none', typ: 'JWT' }))}.${b64u(JSON.stringify(payload))}.`;
+    return signJwt(payload);
   };
   const tokens = (u: UserRec, signInProvider: string, extra: Record<string, unknown> = {}) => {
     const refreshToken = randomBytes(24).toString('base64url');
@@ -142,7 +159,7 @@ export function authService(ctx: EmulatorContext): Service {
     return { ...rest, ...(passwordHash ? { passwordHash: 'IceBase-hashed', passwordUpdatedAt: Number(u.validSince) * 1000 } : {}), emailVerified: !!u.emailVerified, disabled: !!u.disabled };
   };
   const fromIdToken = (t: unknown): UserRec => {
-    const c = decodeToken(String(t ?? ''));
+    const c = verifyJwt(String(t ?? ''));
     if (!c || typeof c.user_id !== 'string') throw new AuthFail('INVALID_ID_TOKEN');
     if ((c.exp as number) * 1000 < now()) throw new AuthFail('TOKEN_EXPIRED');
     const u = get(c.user_id);
@@ -168,7 +185,7 @@ export function authService(ctx: EmulatorContext): Service {
     if (r.at < now() - 3600_000) throw new AuthFail('EXPIRED_OOB_CODE');
     return r;
   };
-  const claimsOf = (t: string) => decodeToken(t);
+  const claimsOf = (t: string) => verifyJwt(t);
 
   // Rules (and every other service) learn who is calling from here.
   ctx.verify = async (token) => {
@@ -474,6 +491,28 @@ export function authService(ctx: EmulatorContext): Service {
           const fn = client[rest.replace(/^accounts:/, '')];
           if (fn) return json(await fn(body));
           return null;
+        }
+        // Admin: verify an ID token / mint a custom token with this server's key (firebase-admin's
+        // emulator path only knows unsigned tokens; icebase/admin's getAdminAuth calls these).
+        if (path === '/__/icebase/admin/auth/verifyIdToken' || path === '/__/icebase/admin/auth/createCustomToken') {
+          const caller = await ctx.verify((req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '') || null);
+          if (!caller.admin) return json({ error: { code: 'permission-denied', message: 'admin only' } }, 403);
+          const b = (await req.json().catch(() => ({}))) as { idToken?: string; checkRevoked?: boolean; uid?: string; claims?: Record<string, unknown> };
+          if (path.endsWith('createCustomToken')) {
+            if (!b.uid) return json({ error: { code: 'invalid-argument', message: 'uid' } }, 400);
+            const t = Math.floor(now() / 1000);
+            return json({ token: signJwt({ iss: 'icebase', sub: 'icebase', aud: 'https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit', iat: t, exp: t + 3600, uid: b.uid, ...(b.claims ? { claims: b.claims } : {}) }) });
+          }
+          const c = verifyJwt(String(b.idToken ?? ''));
+          if (!c || typeof c.user_id !== 'string') return json({ error: { code: 'auth/argument-error', message: 'Decoding Firebase ID token failed: not a valid token from this server' } }, 401);
+          if ((c.exp as number) * 1000 < now()) return json({ error: { code: 'auth/id-token-expired', message: 'Firebase ID token has expired' } }, 401);
+          const u = get(c.user_id);
+          if (b.checkRevoked) {
+            if (!u) return json({ error: { code: 'auth/user-not-found', message: 'no user' } }, 401);
+            if (u.disabled) return json({ error: { code: 'auth/user-disabled', message: 'user disabled' } }, 401);
+            if (Number(c.iat) < Number(u.validSince)) return json({ error: { code: 'auth/id-token-revoked', message: 'Firebase ID token has been revoked' } }, 401);
+          }
+          return json({ claims: { ...c, uid: c.user_id } });
         }
         if (path === '/securetoken.googleapis.com/v1/token') {
           const form = new URLSearchParams(await req.text());
