@@ -30,6 +30,7 @@ export type IceBaseFunctionRecord =
   | { kind: 'call'; handler: (req: https.CallableRequest<unknown>) => unknown; input?: Field<unknown>; output?: Field<unknown>; region?: string; endpoint?: AnyEndpoint }
   | { kind: 'request'; handler: (req: Request) => Response | Promise<Response>; express?: ExpressHandler; region?: string; endpoint?: AnyEndpoint }
   | { kind: 'document'; event: 'created' | 'updated' | 'deleted' | 'written'; collection: AnyCollection; handler: (e: unknown) => unknown }
+  | { kind: 'document'; event: 'created' | 'updated' | 'deleted' | 'written'; pattern: string; collection?: undefined; handler: (e: unknown) => unknown }
   | { kind: 'schedule'; schedule: string; handler: () => unknown }
   | { kind: 'storage'; event: 'finalized' | 'deleted' | 'metadataUpdated'; bucket?: string; handler: (e: CloudEvent<storageFns.StorageObjectData>) => unknown }
   | { kind: 'database'; event: 'created' | 'updated' | 'deleted' | 'written'; ref: string; handler: (e: unknown) => unknown }
@@ -215,6 +216,34 @@ const snap = async (s: unknown): Promise<QueryDocumentSnapshot<unknown>> => {
   return new QueryDocumentSnapshot(docFromPath(db, raw.path), raw);
 };
 
+/**
+ * A trigger on a document path pattern ('boards/{boardId}/tickets/{ticketId}'), firebase-functions'
+ * own form: the event and its snapshots are firebase-admin's (in emulator mode, IceBase's
+ * firebase-admin-compatible ones), the params named as in the pattern. For code moving over as is.
+ */
+function patternTrigger(event: 'created' | 'updated' | 'deleted' | 'written', pattern: string, a: DocumentOptions | ((e: any) => unknown), b?: (e: any) => unknown) {
+  const opts = (typeof a === 'function' ? {} : a) as DocumentOptions;
+  const handler = (typeof a === 'function' ? a : b) as (e: unknown) => unknown;
+  const native =
+    event === 'created'
+      ? fs.onDocumentCreated({ ...opts, document: pattern }, handler as never)
+      : event === 'updated'
+        ? fs.onDocumentUpdated({ ...opts, document: pattern }, handler as never)
+        : event === 'deleted'
+          ? fs.onDocumentDeleted({ ...opts, document: pattern }, handler as never)
+          : fs.onDocumentWritten({ ...opts, document: pattern }, handler as never);
+  // The IceBase server hands this one wire documents: turn them into compat snapshots first.
+  const run = async (raw: { params: Record<string, string>; id: string; time: string; data: any }) => {
+    const db = await triggerDb();
+    const { getFirestore, snapshotFromRaw } = await import('./compat.ts');
+    const cdb = getFirestore(db.app);
+    const snap = (w: unknown) => snapshotFromRaw(cdb, db._driver.fromNative!(w));
+    const data = event === 'created' || event === 'deleted' ? snap(raw.data) : { before: snap(raw.data.before), after: snap(raw.data.after) };
+    return handler({ ...raw, document: undefined, data });
+  };
+  return tag(native, { kind: 'document', event, pattern, handler: run as (e: unknown) => unknown });
+}
+
 function trigger<C extends AnyCollection, E>(
   event: 'created' | 'updated' | 'deleted' | 'written',
   c: C,
@@ -242,22 +271,34 @@ const meta = (raw: fs.FirestoreEvent<unknown, Record<string, string>>) => ({ par
 /** Typed trigger: e.params.uid comes from 'users/{uid}/orders', e.data.data() is the order type. */
 export function onDocumentCreated<C extends AnyCollection>(c: C, handler: (e: DocEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentCreated<C extends AnyCollection>(c: C, opts: DocumentOptions, handler: (e: DocEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentCreated(pattern: string, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentCreated(pattern: string, opts: DocumentOptions, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentCreated<C extends AnyCollection>(c: C, a: any, b?: any) {
+  if (typeof c === 'string') return patternTrigger('created', c, a, b);
   return trigger<C, DocEvent<C>>('created', c, a, b, async (raw) => ({ ...meta(raw), data: (await snap(raw.data)) as DocEvent<C>['data'] }) as DocEvent<C>);
 }
 export function onDocumentDeleted<C extends AnyCollection>(c: C, handler: (e: DocEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentDeleted<C extends AnyCollection>(c: C, opts: DocumentOptions, handler: (e: DocEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentDeleted(pattern: string, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentDeleted(pattern: string, opts: DocumentOptions, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentDeleted<C extends AnyCollection>(c: C, a: any, b?: any) {
+  if (typeof c === 'string') return patternTrigger('deleted', c, a, b);
   return trigger<C, DocEvent<C>>('deleted', c, a, b, async (raw) => ({ ...meta(raw), data: (await snap(raw.data)) as DocEvent<C>['data'] }) as DocEvent<C>);
 }
 export function onDocumentUpdated<C extends AnyCollection>(c: C, handler: (e: DocChangeEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentUpdated<C extends AnyCollection>(c: C, opts: DocumentOptions, handler: (e: DocChangeEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentUpdated(pattern: string, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentUpdated(pattern: string, opts: DocumentOptions, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentUpdated<C extends AnyCollection>(c: C, a: any, b?: any) {
+  if (typeof c === 'string') return patternTrigger('updated', c, a, b);
   return trigger<C, DocChangeEvent<C>>('updated', c, a, b, async (raw) => ({ ...meta(raw), data: { before: await snap(raw.data.before), after: await snap(raw.data.after) } }) as DocChangeEvent<C>);
 }
 export function onDocumentWritten<C extends AnyCollection>(c: C, handler: (e: DocWriteEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentWritten<C extends AnyCollection>(c: C, opts: DocumentOptions, handler: (e: DocWriteEvent<C>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentWritten(pattern: string, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
+export function onDocumentWritten(pattern: string, opts: DocumentOptions, handler: (e: fs.FirestoreEvent<any, Record<string, string>>) => unknown): CloudFunction<fs.FirestoreEvent<unknown>>;
 export function onDocumentWritten<C extends AnyCollection>(c: C, a: any, b?: any) {
+  if (typeof c === 'string') return patternTrigger('written', c, a, b);
   return trigger<C, DocWriteEvent<C>>('written', c, a, b, async (raw) => ({ ...meta(raw), data: { before: await snap(raw.data.before), after: await snap(raw.data.after) } }) as DocWriteEvent<C>);
 }
 

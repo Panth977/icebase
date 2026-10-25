@@ -1,6 +1,6 @@
 import { getAdminFirestore, getAdminMessaging, initializeAdminApp, taskQueue } from '@panth977/icebase-server/admin';
 import { collection, doc, getDoc, increment, updateDoc } from '@panth977/icebase/firestore';
-import { HttpsError, beforeUserCreated, onCall, onDocumentCreated, onDocumentUpdated, onObjectFinalized, onRequest, onTaskDispatched, onUserCreated, onValueCreated } from '@panth977/icebase-server/functions';
+import { HttpsError, beforeUserCreated, onCall, onDocumentCreated, onDocumentUpdated, onDocumentWritten, onObjectFinalized, onRequest, onTaskDispatched, onUserCreated, onValueCreated } from '@panth977/icebase-server/functions';
 import { f } from '@panth977/icebase/schema';
 import config, { api, orders, products, rooms, seen } from './config.js';
 
@@ -61,3 +61,8 @@ export const productInfo = onRequest(api.productInfo, async ({ input }) => {
 export const badOutput = onCall(api.badOutput, () => ({ n: 'not a number' }));
 export const whoAmI = onCall(api.whoAmI, (req) => ({ uid: req.auth.uid }));
 export const echoTyped = onCall(api.echoTyped, (req) => ({ at: req.data.at, product: req.data.product, year: req.data.at.toDate().getUTCFullYear() }));
+
+// A string pattern: firebase-functions' own event shape (firebase-admin snapshots) on both platforms.
+export const onProductWritten = onDocumentWritten('products/{productId}', async (e) =>
+  record(`pattern-${e.params.productId}`, 'pattern', { params: e.params, before: e.data.before.exists, after: e.data.after.exists ? e.data.after.data().stock : null, ref: e.data.after.ref.path }),
+);

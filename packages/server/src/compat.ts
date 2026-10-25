@@ -812,3 +812,8 @@ export function getFirestore(app: IceBaseApp, opts: CompatOptions = {}): Firesto
   if (!db) byOpts.set(key, (db = new Firestore(app, opts)));
   return db;
 }
+
+/** @internal a driver document as a firebase-admin-shaped snapshot (trigger events). */
+export function snapshotFromRaw(db: Firestore, raw: RawDoc): DocumentSnapshot {
+  return new QueryDocumentSnapshot(new DocumentReference(db, raw.path), raw.data ? (fromDriver(db, raw.data) as DocumentData) : undefined, raw) as DocumentSnapshot;
+}

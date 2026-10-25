@@ -68,6 +68,12 @@ describe('functions · emulator mode', () => {
   };
   const seenDoc = (id: string) => getDoc(doc(collection(getFirestore(app), seen), id));
 
+  it('a string-pattern trigger gets firebase-functions\' event shape', async () => {
+    await setDoc(doc(collection(getFirestore(app), products), 'pat1'), { name: 'Cap', stock: 7 });
+    await until(async () => (await seenDoc('pattern-pat1')).exists(), 'the pattern trigger');
+    expect((await seenDoc('pattern-pat1')).data()?.detail).toEqual({ params: { productId: 'pat1' }, before: false, after: 7, ref: 'products/pat1' });
+  });
+
   it('storage: onObjectFinalized gets the stored object', async () => {
     const { getStorage, ref, uploadBytes } = await import('@panth977/icebase/storage');
     await uploadBytes(ref(getStorage(app), 'in/a.txt'), new TextEncoder().encode('hello'), { contentType: 'text/plain' });

@@ -50,6 +50,20 @@ export function cronMatcher(schedule: string): (d: Date) => boolean {
   return (d) => M.has(d.getMinutes()) && H.has(d.getHours()) && D.has(d.getDate()) && Mo.has(d.getMonth() + 1) && W.has(d.getDay());
 }
 
+/** 'boards/{boardId}/tickets/{ticketId}' against a document path → its params, or null. */
+function matchPattern(pattern: string, path: string): Record<string, string> | null {
+  const p = pattern.split('/');
+  const s = path.split('/');
+  if (p.length !== s.length) return null;
+  const params: Record<string, string> = {};
+  for (let i = 0; i < p.length; i++) {
+    const m = /^\{([^}=]+)\}$/.exec(p[i]!);
+    if (m) params[m[1]!] = s[i]!;
+    else if (p[i] !== s[i]) return null;
+  }
+  return params;
+}
+
 // ─── the service ───────────────────────────────────────────────────────────────
 
 export async function functionsService(ctx: EmulatorContext, log: (l: string) => void): Promise<Service> {
@@ -74,7 +88,7 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
     const mod = (await importTs(`${pathToFileURL(entry).href}?v=${Date.now()}`)) as Record<string, { __icebase?: Rec }>;
     ctx.functionExports = mod;
     for (const [name, v] of Object.entries(mod)) if (v && (typeof v === 'object' || typeof v === 'function') && v.__icebase) fns.set(name, v.__icebase);
-    log(`functions: ${[...fns.entries()].map(([n, r]) => `${n} (${r.kind === 'document' ? `${r.event} ${r.collection.path}` : 'event' in r ? `${r.kind} ${r.event}` : r.kind})`).join(', ') || 'none'}`);
+    log(`functions: ${[...fns.entries()].map(([n, r]) => `${n} (${r.kind === 'document' ? `${r.event} ${r.collection ? r.collection.path : r.pattern}` : 'event' in r ? `${r.kind} ${r.event}` : r.kind})`).join(', ') || 'none'}`);
   };
   // Loaded once the server listens (functions need its address), and again on `icebase dev` reloads.
   let loading: Promise<void> | null = null;
@@ -86,13 +100,16 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
       await ready();
       for (const c of changes) {
         const m = matchCollectionPath(ctx.config.schema, c.parent);
-        if (!m) continue;
         for (const [name, r] of fns) {
-          if (r.kind !== 'document' || r.collection.path !== m.collection.path) continue;
+          if (r.kind !== 'document') continue;
+          let params: Record<string, string> | null;
+          if (r.collection) params = m && r.collection.path === m.collection.path ? { ...m.params, docId: c.path.slice(c.path.lastIndexOf('/') + 1) } : null;
+          else params = matchPattern(r.pattern, c.path);
+          if (!params) continue;
           const kind = !c.before ? 'created' : !c.after ? 'deleted' : 'updated';
           if (r.event !== 'written' && r.event !== kind) continue;
           const event = {
-            params: { ...m.params, docId: c.path.slice(c.path.lastIndexOf('/') + 1) },
+            params,
             id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
             time: new Date().toISOString(),
             data: r.event === 'created' ? toWire(c.path, c.after) : r.event === 'deleted' ? toWire(c.path, c.before) : { before: toWire(c.path, c.before), after: toWire(c.path, c.after) },
