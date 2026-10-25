@@ -72,6 +72,14 @@
     "./internal": {
       "types": "./src/internal.ts",
       "default": "./dist/internal.js"
+    },
+    "./compat/firestore": {
+      "types": "./src/compat/firestore.ts",
+      "default": "./dist/compat/firestore.js"
+    },
+    "./compat/database": {
+      "types": "./src/compat/database.ts",
+      "default": "./dist/compat/database.js"
     }
   },
   "scripts": {

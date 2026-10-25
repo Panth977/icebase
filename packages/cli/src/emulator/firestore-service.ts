@@ -118,7 +118,7 @@ export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
     kind: 'doc' | 'query';
     path?: string;
     spec?: QuerySpec;
-    last: string;
+    last: string | null;
   }
   const listeners = new Set<Listener>();
   const push = async (l: Listener) => {
@@ -197,7 +197,7 @@ export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
     },
     async socket(live, msg) {
       if (msg.t === 'listen') {
-        const l: Listener = { live, id: String(msg.id), kind: msg.kind as 'doc' | 'query', ...(msg.path ? { path: String(msg.path) } : {}), ...(msg.spec ? { spec: msg.spec as QuerySpec } : {}), last: '' };
+        const l: Listener = { live, id: String(msg.id), kind: msg.kind as 'doc' | 'query', ...(msg.path ? { path: String(msg.path) } : {}), ...(msg.spec ? { spec: msg.spec as QuerySpec } : {}), last: null };
         listeners.add(l);
         live.onClose(() => listeners.delete(l));
         await push(l);

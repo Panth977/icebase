@@ -16,7 +16,9 @@
     "./storage": "./src/storage.ts",
     "./functions": "./src/functions.ts",
     "./errors": "./src/errors.ts",
-    "./internal": "./src/internal.ts"
+    "./internal": "./src/internal.ts",
+    "./compat/firestore": "./src/compat/firestore.ts",
+    "./compat/database": "./src/compat/database.ts"
   },
   "imports": {
     "firebase/": "npm:/firebase@^13.1.0/"

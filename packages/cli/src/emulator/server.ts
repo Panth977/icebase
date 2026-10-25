@@ -294,8 +294,10 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
       send: (m) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(m)),
       onClose: (fn) => void closers.push(fn),
     };
+    // One message at a time, in order: a listen sent right after { t: 'auth' } runs as that caller.
+    let chain: Promise<void> = Promise.resolve();
     ws.on('message', (raw) => {
-      void (async () => {
+      chain = chain.then(async () => {
         let msg: Record<string, unknown>;
         try {
           msg = JSON.parse(String(raw)) as Record<string, unknown>;
@@ -315,7 +317,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
           const err = e instanceof IceBaseError ? { code: e.code, message: e.message, details: { ...e.details, cause: undefined } } : { code: 'internal', message: (e as Error).message };
           live.send({ t: 'error', s: msg.s, id: msg.id, error: err });
         }
-      })();
+      });
     });
     ws.on('close', () => closers.splice(0).forEach((f) => f()));
   });

@@ -112,6 +112,24 @@ export class RealtimeClient {
     });
   }
 
+  /** The caller's token changed: authenticate the open socket again (listeners carry on). */
+  reauth(): void {
+    void (async () => {
+      const t = await this.getToken();
+      if (t === this.token) return;
+      this.token = t;
+      if (this.ws?.readyState === 1) {
+        this.ws.send(JSON.stringify({ t: 'auth', token: t }));
+        // Listeners resubscribe so the server answers them as the new caller.
+        for (const h of this.subs.values()) {
+          if (h.subscribe.t !== 'listen') continue;
+          this.ws.send(JSON.stringify({ s: h.subscribe.s, id: h.subscribe.id, t: 'unlisten' }));
+          this.ws.send(JSON.stringify(h.subscribe));
+        }
+      }
+    })();
+  }
+
   close(): void {
     this.closed = true;
     this.ws?.close();

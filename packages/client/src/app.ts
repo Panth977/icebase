@@ -14,7 +14,7 @@ export interface IceBaseAppOptions {
    * `{ embedded: name }` for one started in this process with startEmulator({ listen: false, name }).
    * `adminToken`: what an admin app sends (default ICEBASE_ADMIN_TOKEN, else 'owner' for a dev server).
    */
-  emulator?: { host?: string; port?: number; embedded?: string; adminToken?: string; /** Admin apps: writes skip the server's schema check (seeding legacy data). */ unchecked?: boolean };
+  emulator?: { /** The server's full origin ('https://host'): instead of host and port. */ origin?: string; host?: string; port?: number; embedded?: string; adminToken?: string; /** Admin apps: writes skip the server's schema check (seeding legacy data). */ unchecked?: boolean };
 }
 
 export interface IceBaseApp<Cfg extends AnyConfig = AnyConfig> {
@@ -114,6 +114,7 @@ export function webConfigOf(app: IceBaseApp): FirebaseWebConfig {
 /** @internal the emulator server address for this app. */
 export function emulatorOrigin(app: IceBaseApp): string {
   if (app.options.emulator?.embedded) return `http://embedded.icebase/${encodeURIComponent(app.options.emulator.embedded)}`;
+  if (app.options.emulator?.origin) return app.options.emulator.origin.replace(/\/+$/, '');
   // Set by the IceBase server for the functions it runs, like FIREBASE_*_EMULATOR_HOST.
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.ICEBASE_EMULATOR_HOST;
   if (env && !app.options.emulator) return `http://${env.replace(/^https?:\/\//, '')}`;
