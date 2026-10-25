@@ -70,4 +70,23 @@ describe('auth · signed tokens', () => {
     expect((await getAdminAuth(admin).getUser(c.user.uid)).email).toBe('door@x.test');
     expect((await fetch(`${emu.url}/emulator/v1/projects/demo-icebase/oobCodes`, { headers: { authorization: 'Bearer secret-admin' } })).status).toBe(200);
   });
+
+  it('importAuthUsers: uids kept; an imported scrypt$N$r$p hash signs in with its password', async () => {
+    const { scryptSync, randomBytes } = await import('node:crypto');
+    const salt = randomBytes(16);
+    const hash = `scrypt$16384$8$1$${salt.toString('base64url')}$${scryptSync('old-secret', salt, 64, { N: 16384, r: 8, p: 1 }).toString('base64url')}`;
+    const { importAuthUsers } = await import('@panth977/icebase-server/admin');
+    const r = await importAuthUsers(admin, [
+      { uid: 'imported-1', email: 'Imp@X.test', passwordHash: hash, emailVerified: true, displayName: 'Imp', customClaims: { role: 'admin' }, providers: ['password'] },
+      { uid: 'imported-2', email: 'link@x.test', providers: ['emailLink'] },
+    ]);
+    expect(r.every((x) => x.ok)).toBe(true);
+    expect((await importAuthUsers(admin, [{ uid: 'imported-2' }]))[0]!.ok).toBe(false);
+    const { signInWithEmailAndPassword } = await import('@panth977/icebase/auth');
+    const c = await signInWithEmailAndPassword(getAuth(app), 'imp@x.test', 'old-secret');
+    expect(c.user.uid).toBe('imported-1');
+    expect((await c.user.getIdTokenResult()).claims.role).toBe('admin');
+    await expect(signInWithEmailAndPassword(getAuth(app), 'imp@x.test', 'wrong')).rejects.toThrow();
+    expect((await getAdminAuth(admin).getUser('imported-2')).email).toBe('link@x.test');
+  });
 });

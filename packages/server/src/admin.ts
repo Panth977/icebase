@@ -118,6 +118,38 @@ export function getAdminAuth<Cfg extends AnyConfig>(app: IceBaseApp<Cfg>): Admin
   });
 }
 
+/** A user brought from another system (emulator mode: the IceBase server). */
+export interface ImportedUser {
+  uid: string;
+  email?: string;
+  emailVerified?: boolean;
+  displayName?: string;
+  photoURL?: string;
+  phoneNumber?: string;
+  /** IceBase's scrypt$salt$key or scrypt$N$r$p$salt$key (base64url): the password keeps working. */
+  passwordHash?: string;
+  disabled?: boolean;
+  customClaims?: Record<string, unknown>;
+  /** Sign-in methods it had ('password', 'emailLink' …). */
+  providers?: string[];
+  createdAt?: string | number;
+  lastSignInAt?: string | number;
+  tokensValidAfter?: string | number;
+}
+
+/** Bring users into the IceBase server's auth with their uids (a migration); no events fire. */
+export async function importAuthUsers(app: IceBaseApp, users: ImportedUser[], opts: { overwrite?: boolean } = {}): Promise<{ uid: string; ok: boolean; error?: string }[]> {
+  if (app.kind !== 'admin') throw new IceBaseError('invalid-argument', 'importAuthUsers(app) needs an app from initializeAdminApp(config, env)', { reason: 'config' });
+  if (app.modes.auth !== 'emulator') throw new IceBaseError('unimplemented', "importAuthUsers is the IceBase server's; on Firebase use firebase-admin's importUsers", { reason: 'mode', service: 'auth' });
+  const { emulatorFetch } = await import('@panth977/icebase/app');
+  const { callerToken } = await import('@panth977/icebase/internal');
+  const token = await callerToken(app);
+  const res = await emulatorFetch(`${emulatorOrigin(app)}/__/icebase/admin/auth/import`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ users, overwrite: !!opts.overwrite }) });
+  const j = (await res.json()) as { results?: { uid: string; ok: boolean; error?: string }[]; error?: { message: string } };
+  if (!res.ok || !j.results) throw new IceBaseError('internal', `importAuthUsers: ${j.error?.message ?? res.status}`, { service: 'auth' });
+  return j.results;
+}
+
 // ─── realtime database ─────────────────────────────────────────────────────────
 
 export function getAdminDatabase(app: IceBaseApp, url?: string): Database {

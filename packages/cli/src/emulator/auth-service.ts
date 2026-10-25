@@ -35,11 +35,23 @@ function hashPw(pw: string): string {
   const salt = randomBytes(16);
   return `scrypt$${salt.toString('base64')}$${scryptSync(pw, salt, 32).toString('base64')}`;
 }
+/** IceBase's own hash (scrypt$salt$key, base64), or an imported scrypt$N$r$p$salt$key (base64url). */
 function checkPw(pw: string, stored: string | undefined): boolean {
   if (!stored) return false;
-  const [, salt, hash] = stored.split('$');
-  const a = scryptSync(pw, Buffer.from(salt!, 'base64'), 32);
-  const b = Buffer.from(hash!, 'base64');
+  const parts = stored.split('$');
+  if (parts[0] !== 'scrypt') return false;
+  let a: Buffer;
+  let b: Buffer;
+  if (parts.length === 6) {
+    const [, n, r, p, salt, key] = parts;
+    b = Buffer.from(key!, 'base64url');
+    const N = Number(n);
+    a = scryptSync(pw, Buffer.from(salt!, 'base64url'), b.length, { N, r: Number(r), p: Number(p), maxmem: 256 * N * Number(r) + 1024 * 1024 });
+  } else {
+    const [, salt, hash] = parts;
+    a = scryptSync(pw, Buffer.from(salt!, 'base64'), 32);
+    b = Buffer.from(hash!, 'base64');
+  }
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
@@ -538,6 +550,46 @@ export function authService(ctx: EmulatorContext): Service {
           const fn = client[rest.replace(/^accounts:/, '')];
           if (fn) return json(await fn(body));
           return null;
+        }
+        // Admin: bring users from another system, uids kept (a migration). A password hash in
+        // IceBase's or the scrypt$N$r$p$salt$key form signs in as before. No events fire.
+        if (path === '/__/icebase/admin/auth/import' && req.method === 'POST') {
+          const caller = await ctx.verify((req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '') || null);
+          if (!caller.admin) return json({ error: { code: 'permission-denied', message: 'admin only' } }, 403);
+          const b = (await req.json().catch(() => ({}))) as { users?: Record<string, unknown>[]; overwrite?: boolean };
+          const results: { uid: string; ok: boolean; error?: string }[] = [];
+          for (const x of b.users ?? []) {
+            const uid = String(x.uid ?? '');
+            try {
+              if (!uid) throw new Error('uid is required');
+              if (get(uid) && !b.overwrite) throw new Error('a user with this uid exists');
+              const email = typeof x.email === 'string' ? x.email.toLowerCase() : undefined;
+              const other = email ? getByEmail(email) : null;
+              if (other && other.localId !== uid) throw new Error('another user has this email');
+              const ms = (v: unknown) => (typeof v === 'number' ? String(v) : typeof v === 'string' && v ? String(Date.parse(v) || Number(v)) : undefined);
+              const providers = Array.isArray(x.providers) ? (x.providers as string[]) : [];
+              const u = fresh({
+                localId: uid,
+                ...(email ? { email } : {}),
+                emailVerified: !!x.emailVerified,
+                ...(typeof x.displayName === 'string' ? { displayName: x.displayName } : {}),
+                ...(typeof x.photoURL === 'string' ? { photoUrl: x.photoURL } : {}),
+                ...(typeof x.phoneNumber === 'string' ? { phoneNumber: x.phoneNumber } : {}),
+                ...(typeof x.passwordHash === 'string' && x.passwordHash ? { passwordHash: x.passwordHash } : {}),
+                disabled: !!x.disabled,
+                ...(x.customClaims && typeof x.customClaims === 'object' && Object.keys(x.customClaims).length ? { customAttributes: JSON.stringify(x.customClaims) } : {}),
+                ...(ms(x.createdAt) ? { createdAt: ms(x.createdAt)! } : {}),
+                ...(ms(x.lastSignInAt) ? { lastLoginAt: ms(x.lastSignInAt)! } : {}),
+                ...(ms(x.tokensValidAfter) ? { validSince: String(Math.floor(Number(ms(x.tokensValidAfter)) / 1000)) } : {}),
+              });
+              if (email && (u.passwordHash || providers.includes('password') || providers.includes('emailLink'))) u.providerUserInfo.push({ providerId: 'password', rawId: email, email, federatedId: email });
+              save(u);
+              results.push({ uid, ok: true });
+            } catch (e) {
+              results.push({ uid, ok: false, error: (e as Error).message });
+            }
+          }
+          return json({ results });
         }
         // Admin: verify an ID token / mint a custom token with this server's key (firebase-admin's
         // emulator path only knows unsigned tokens; icebase/admin's getAdminAuth calls these).
