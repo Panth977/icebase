@@ -1,6 +1,6 @@
 {
   "name": "@panth977/icebase-server",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/admin.ts",

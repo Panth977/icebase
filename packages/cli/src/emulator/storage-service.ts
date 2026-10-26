@@ -71,6 +71,29 @@ function parseMultipart(body: Buffer, contentType: string): { meta: Record<strin
   return { meta: JSON.parse(m.data.toString() || '{}') as Record<string, unknown>, data: Buffer.from(d.data), dataType: /content-type:\s*([^\r\n]+)/i.exec(d.head)?.[1] };
 }
 
+const loopback = (h: string): boolean => /^(127\.\d+\.\d+\.\d+|localhost|\[::1\]|0\.0\.0\.0)$/.test(h);
+
+/**
+ * The origin the caller reached this server on — for the upload URLs handed back, which the caller
+ * fetches next. Behind a proxy that is not the server's own (loopback) address: the request URL
+ * already carries X-Forwarded-Host/Proto or the Host header; a browser's Origin header fills in what
+ * a proxy left out (the scheme behind TLS termination, or a Host rewritten to the upstream).
+ */
+export function callerOrigin(req: Request, fallback: string): string {
+  const u = new URL(req.url);
+  const o = req.headers.get('origin');
+  let page: URL | null = null;
+  try {
+    page = o && o !== 'null' ? new URL(o) : null;
+  } catch {
+    page = null;
+  }
+  if (page && (page.host === u.host || (loopback(u.hostname) && !loopback(page.hostname)))) {
+    return page.host === u.host && req.headers.get('x-forwarded-proto') ? u.origin : page.origin;
+  }
+  return u.host ? u.origin : fallback;
+}
+
 export function storageService(ctx: EmulatorContext): Service {
   const memory = ctx.dataDir === ':memory:';
   const blobs = new Map<string, Buffer>();
@@ -278,7 +301,7 @@ export function storageService(ctx: EmulatorContext): Service {
             const meta = (await req.json().catch(() => ({}))) as Record<string, unknown>;
             const id = randomUUID();
             q.upPut.run(id, bucket, String(meta.name ?? name), JSON.stringify(meta), Buffer.alloc(0));
-            const uploadUrl = `${ctx.origin}/v0/b/${encodeURIComponent(bucket)}/o?name=${encodeURIComponent(String(meta.name ?? name))}&upload_id=${id}&upload_protocol=resumable`;
+            const uploadUrl = `${callerOrigin(req, ctx.origin)}/v0/b/${encodeURIComponent(bucket)}/o?name=${encodeURIComponent(String(meta.name ?? name))}&upload_id=${id}&upload_protocol=resumable`;
             return new Response(null, { status: 200, headers: { 'x-goog-upload-url': uploadUrl, 'x-goog-upload-status': 'active', 'x-goog-upload-chunk-granularity': '262144' } });
           }
           const uploadId = url.searchParams.get('upload_id');
@@ -360,7 +383,7 @@ export function storageService(ctx: EmulatorContext): Service {
               const meta = (await req.json().catch(() => ({}))) as Record<string, unknown>;
               const nid = randomUUID();
               q.upPut.run(nid, bucket, String(meta.name ?? name), JSON.stringify(meta), Buffer.alloc(0));
-              return new Response(null, { status: 200, headers: { location: `${ctx.origin}/upload/storage/v1/b/${encodeURIComponent(bucket)}/o?uploadType=resumable&name=${encodeURIComponent(String(meta.name ?? name))}&upload_id=${nid}` } });
+              return new Response(null, { status: 200, headers: { location: `${callerOrigin(req, ctx.origin)}/upload/storage/v1/b/${encodeURIComponent(bucket)}/o?uploadType=resumable&name=${encodeURIComponent(String(meta.name ?? name))}&upload_id=${nid}` } });
             }
             const up = q.upGet.get(id) as { bucket: string; name: string; meta: string; data: Uint8Array } | undefined;
             if (!up) return json({ error: { code: 404, message: 'upload not found' } }, 404);

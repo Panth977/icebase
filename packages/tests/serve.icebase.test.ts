@@ -147,4 +147,26 @@ describe('icebase serve', () => {
     const db = await fetch(`${url}/v1/db/get`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: 'rooms', query: null }) });
     expect(db.status).toBe(403);
   });
+  it('a resumable upload behind a proxy continues at the address the caller used, not the server\'s own', async () => {
+    const start = (headers: Record<string, string>) =>
+      fetch(`${url}/v0/b/demo-icebase.appspot.com/o?name=up%2Fa.txt`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${process.env.ICEBASE_ADMIN_TOKEN}`, 'content-type': 'application/json', 'x-goog-upload-protocol': 'resumable', 'x-goog-upload-command': 'start', ...headers },
+        body: JSON.stringify({ name: 'up/a.txt', contentType: 'text/plain' }),
+      }).then((r) => r.headers.get('x-goog-upload-url') ?? '');
+    // Straight to the server: its own address.
+    expect(await start({})).toMatch(new RegExp(`^${url}/v0/b/`));
+    // A proxy that forwards Host and the scheme.
+    expect(await start({ 'x-forwarded-host': 'tt.example.com', 'x-forwarded-proto': 'https' })).toMatch(/^https:\/\/tt\.example\.com\/v0\/b\//);
+    // A proxy that rewrote Host to the upstream (loopback) and dropped the scheme: the browser's Origin says where it is.
+    expect(await start({ origin: 'https://tt.example.com' })).toMatch(/^https:\/\/tt\.example\.com\/v0\/b\//);
+    // TLS ended at the proxy, Host kept, no X-Forwarded-Proto: the page's scheme.
+    expect(await start({ 'x-forwarded-host': 'tt.example.com', origin: 'https://tt.example.com' })).toMatch(/^https:\/\/tt\.example\.com\//);
+    // Another site's page calling this server directly does not redirect the upload to itself.
+    expect(await start({ origin: 'http://127.0.0.2:9999' })).toMatch(new RegExp(`^${url}/v0/b/`));
+    // The upload itself completes at that address.
+    const up = await start({});
+    const done = await fetch(up, { method: 'POST', headers: { authorization: `Bearer ${process.env.ICEBASE_ADMIN_TOKEN}`, 'x-goog-upload-command': 'upload, finalize', 'x-goog-upload-offset': '0' }, body: 'hello' });
+    expect(done.status).toBe(200);
+  });
 });
