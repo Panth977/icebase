@@ -5,7 +5,9 @@ import { ServerValue } from 'firebase-admin/database';
 import type { DatabaseDriver, DbQuery } from '@panth977/icebase/internal';
 import { guard, nativeValues, raw, wrap, type AnySnap } from '@panth977/icebase/internal';
 
-export function adminDatabaseDriver(db: AdminDatabase): DatabaseDriver {
+export function adminDatabaseDriver(admin: AdminDatabase): DatabaseDriver {
+  // firebase-admin wants no argument (not '') for the root.
+  const db = { ref: (path?: string) => (path ? admin.ref(path) : admin.ref()) };
   const sv = { ts: () => ServerValue.TIMESTAMP, inc: (n: number) => ServerValue.increment(n) };
   const q = (path: string, spec: DbQuery | null): AdminQuery => {
     let r: AdminQuery = db.ref(path);

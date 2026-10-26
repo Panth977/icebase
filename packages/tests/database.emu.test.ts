@@ -1,5 +1,5 @@
 // Realtime Database conformance, firebase mode: Firebase's database emulator (web SDK + admin).
-import { beforeAll } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { getAdminDatabase, initializeAdminApp } from '@panth977/icebase-server/admin';
 import { initializeApp } from '@panth977/icebase/app';
 import { connectDatabaseEmulator, databaseRulesJson, getDatabase } from '@panth977/icebase/database';
@@ -30,4 +30,14 @@ databaseSuite('firebase mode · web SDK', async (tag) => {
 databaseSuite('firebase mode · firebase-admin', async (tag) => {
   const app = initializeAdminApp(config, 'test', { name: `db-${tag}` });
   return { app, db: getAdminDatabase(app) };
+});
+
+describe('firebase mode · firebase-admin driver', () => {
+  it('a multi-path update at the root (firebase-admin wants ref(), not ref(""))', async () => {
+    const app = initializeAdminApp(config, 'test', { name: 'db-root-update' });
+    const driver = (getAdminDatabase(app) as unknown as { _driver: { update(p: string, v: object): Promise<void>; get(p: string, q: null): Promise<{ value: unknown }> } })._driver;
+    const k = `rootUpdate${Date.now()}`;
+    await driver.update('', { [`${k}/a`]: 1, [`${k}/b/c`]: 2 });
+    expect((await driver.get(k, null)).value).toEqual({ a: 1, b: { c: 2 } });
+  });
 });
