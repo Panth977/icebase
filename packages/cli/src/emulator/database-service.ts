@@ -351,6 +351,78 @@ export function databaseService(ctx: EmulatorContext): Service {
 
   return {
     async handle(req, url, caller) {
+      // Firebase's REST API for reading, GET /__/icebase/rtdb/{path}.json?auth=<ID token>: the value,
+      // or (Accept: text/event-stream) its stream — event: put {"path":"/","data":…} now and on
+      // every change, keep-alive every 30 s, auth_revoked when the token expires.
+      if (url.pathname.startsWith('/__/icebase/rtdb/') || url.pathname === '/__/icebase/rtdb.json') {
+        if (req.method !== 'GET') return json({ error: 'Only GET is served here' }, 405);
+        const raw = url.pathname === '/__/icebase/rtdb.json' ? '' : url.pathname.slice('/__/icebase/rtdb/'.length);
+        if (raw && !raw.endsWith('.json')) return json({ error: 'The path must end in .json' }, 400);
+        const path = clean(decodeURIComponent(raw.replace(/\.json$/, '')));
+        const token = url.searchParams.get('auth');
+        const who: Caller = token ? await ctx.verify(token) : caller;
+        if (token && !who.admin && !who.auth) return json({ error: 'Could not parse auth token.' }, 401);
+        try {
+          canRead(who, path);
+        } catch {
+          return json({ error: 'Permission denied' }, 401);
+        }
+        if (!(req.headers.get('accept') ?? '').includes('text/event-stream')) return json(snapshot(path, null).value);
+        const enc = new TextEncoder();
+        const closers: (() => void)[] = [];
+        let closed = false;
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            const event = (name: string, data: unknown) => {
+              if (!closed) controller.enqueue(enc.encode(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`));
+            };
+            const end = () => {
+              if (closed) return;
+              closed = true;
+              closers.splice(0).forEach((f) => f());
+              try {
+                controller.close();
+              } catch {
+                /* already closed */
+              }
+            };
+            const live: Live = {
+              caller: who,
+              send: (msg) => {
+                const m = msg as { t?: string; snap?: { value: unknown } };
+                if (m.t === 'snap') event('put', { path: '/', data: m.snap?.value ?? null });
+                else if (m.t === 'error') {
+                  event('cancel', 'Permission denied');
+                  end();
+                }
+              },
+              onClose: (fn) => void closers.push(fn),
+            };
+            const sub: Sub = { live, id: `rest-${Math.random()}`, path, query: null, last: '' };
+            subs.add(sub);
+            closers.push(() => subs.delete(sub));
+            const snap = snapshot(path, null);
+            sub.last = JSON.stringify(snap.value);
+            event('put', { path: '/', data: snap.value ?? null });
+            const keep = setInterval(() => event('keep-alive', null), 30_000);
+            closers.push(() => clearInterval(keep));
+            const exp = Number((who.auth?.token as { exp?: number } | undefined)?.exp);
+            if (exp) {
+              const t = setTimeout(() => {
+                event('auth_revoked', 'credential is no longer valid');
+                end();
+              }, Math.max(0, exp * 1000 - Date.now()));
+              closers.push(() => clearTimeout(t));
+            }
+            req.signal.addEventListener('abort', end);
+          },
+          cancel() {
+            closed = true;
+            closers.splice(0).forEach((f) => f());
+          },
+        });
+        return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' } });
+      }
       if (!url.pathname.startsWith('/v1/db/')) return null;
       const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
       const path = clean(b.path);

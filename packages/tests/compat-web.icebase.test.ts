@@ -207,4 +207,26 @@ describe('compat · web modular API on the IceBase server', () => {
     });
     expect(bad).toBe('refused');
   });
+
+  it('the Realtime Database over REST: GET a value, stream it (SSE), refused without a token', async () => {
+    const rdb = rd.getDatabase({ name: 'web' });
+    await rd.set(rd.ref(rdb, 'open/r1'), { hi: 1 });
+    const base = `${emu.url}/__/icebase/rtdb`;
+    expect(await (await fetch(`${base}/open/r1.json?auth=${token}`)).json()).toEqual({ hi: 1 });
+    expect((await fetch(`${base}/presence/b1.json`)).status).toBe(200); // .read: true
+    const ac = new AbortController();
+    const res = await fetch(`${base}/open/r1.json?auth=${token}`, { headers: { accept: 'text/event-stream' }, signal: ac.signal });
+    expect(res.headers.get('content-type')).toContain('text/event-stream');
+    const reader = res.body!.getReader();
+    const dec = new TextDecoder();
+    let text = '';
+    const until = async (want: RegExp) => {
+      while (!want.test(text)) text += dec.decode((await reader.read()).value);
+    };
+    await until(/event: put\ndata: \{"path":"\/","data":\{"hi":1\}\}/);
+    await rd.set(rd.ref(rdb, 'open/r1'), { hi: 2 });
+    await until(/"data":\{"hi":2\}/);
+    ac.abort();
+    await fs.setDoc(fs.doc(db, 'boards/x9'), { name: 'X', n: 1 }); // the server goes on
+  });
 });

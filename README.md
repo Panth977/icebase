@@ -171,6 +171,9 @@ every service, the functions and `config.hosting`. Function rewrites run in the 
   `continueUrl`.
 - **Storage:** `getSignedUrl` works without a service account (the server signs, on
   `ICEBASE_PUBLIC_URL`). Range requests and `file.copy()` work too.
+- **Realtime Database over REST:** `GET /__/icebase/rtdb/{path}.json?auth=<ID token>` answers the value,
+  or streams it with `Accept: text/event-stream` (Firebase's protocol: `put`, `keep-alive`,
+  `auth_revoked`).
 - **Moving users in:** `importAuthUsers(app, users)` keeps uids. Passwords hashed as
   `scrypt$N$r$p$salt$key` keep working.
 
