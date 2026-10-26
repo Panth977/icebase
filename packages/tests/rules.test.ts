@@ -166,3 +166,26 @@ describe('storage.rules', () => {
     expect(() => loadRules(STORAGE, 'firestore')).toThrow(/expected `service cloud.firestore`/);
   });
 });
+
+describe('recursive wildcards', () => {
+  const CG = `rules_version = '2'; service cloud.firestore { match /databases/{db}/documents {
+    match /{path=**}/tickets/{id} { allow read: if request.auth.uid in resource.data.assignees; }
+    match /logs/{rest=**} { allow get: if request.auth.uid == 'ops'; }
+  } }`;
+  const cg = loadRules(CG, 'firestore');
+  const ask = (path: string, uid: string, data: Record<string, unknown> = { assignees: ['u1'] }) =>
+    cg.explain(rq({ method: 'get', path: `${D}/${path}`, auth: as(uid), resource: { data, id: path.split('/').pop()!, path: `${D}/${path}` } })).allowed;
+  it('{path=**} in front still needs what follows it (a collection-group rule matches its collection only)', () => {
+    expect(ask('boards/b1/tickets/t1', 'u1')).toBe(true);
+    expect(ask('tickets/t1', 'u1')).toBe(true); // zero segments
+    expect(ask('a/b/c/d/tickets/t1', 'u1')).toBe(true);
+    // Not a ticket: the same data does not open someone's inbox.
+    expect(ask('users/u2/inbox/n1', 'u1')).toBe(false);
+    expect(ask('boards/b1/tickets/t1/messages/m1', 'u1')).toBe(false);
+  });
+  it('{rest=**} at the end takes everything below', () => {
+    expect(ask('logs/a', 'ops', {})).toBe(true);
+    expect(ask('logs/a/b/c', 'ops', {})).toBe(true);
+    expect(ask('logs/a/b/c', 'u1', {})).toBe(false);
+  });
+});

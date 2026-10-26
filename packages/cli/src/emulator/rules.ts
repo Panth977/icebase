@@ -780,26 +780,41 @@ function ev(e: Expr, scope: Scope, req: RulesRequest, depth = 0): unknown {
 const covers = (methods: string[], m: RulesRequest['method']) =>
   methods.some((x) => x === m || (x === 'read' && (m === 'get' || m === 'list')) || (x === 'write' && (m === 'create' || m === 'update' || m === 'delete')));
 
-function walk(block: Match, segs: string[], vars: Map<string, unknown>, fns: Map<string, Fn>[], out: { allows: Allow[]; scope: Scope }[]): void {
-  let i = 0;
-  const v = new Map(vars);
-  for (let j = 0; j < block.segs.length; j++) {
-    const s = block.segs[j]!;
-    if (s.rest) {
-      v.set(s.name!, { __path: '/' + segs.slice(i).join('/') });
-      i = segs.length;
-      break;
+/**
+ * Every way a match block's segments can take a prefix of the path: how many segments it took and
+ * the variables it bound. `{name=**}` takes zero or more segments — wherever it stands (rules v2),
+ * and what follows it must still match (`/{path=**}/tickets/{id}` needs a `tickets` segment).
+ */
+function matchSegs(pat: Match['segs'], pi: number, segs: string[], si: number, v: Map<string, unknown>, out: { i: number; vars: Map<string, unknown> }[]): void {
+  if (pi === pat.length) return void out.push({ i: si, vars: v });
+  const s = pat[pi]!;
+  if (s.rest) {
+    for (let k = si; k <= segs.length; k++) {
+      const next = new Map(v);
+      next.set(s.name!, { __path: '/' + segs.slice(si, k).join('/') });
+      matchSegs(pat, pi + 1, segs, k, next, out);
     }
-    if (i >= segs.length) return;
-    if (s.lit !== undefined) {
-      if (s.lit !== segs[i]) return;
-    } else v.set(s.name!, segs[i]);
-    i++;
+    return;
   }
+  if (si >= segs.length) return;
+  if (s.lit !== undefined) {
+    if (s.lit === segs[si]) matchSegs(pat, pi + 1, segs, si + 1, v, out);
+    return;
+  }
+  const next = new Map(v);
+  next.set(s.name!, segs[si]);
+  matchSegs(pat, pi + 1, segs, si + 1, next, out);
+}
+
+function walk(block: Match, segs: string[], vars: Map<string, unknown>, fns: Map<string, Fn>[], out: { allows: Allow[]; scope: Scope }[]): void {
+  const ways: { i: number; vars: Map<string, unknown> }[] = [];
+  matchSegs(block.segs, 0, segs, 0, new Map(vars), ways);
   const scopeFns = [...fns, block.fns];
-  const rest = segs.slice(i);
-  if (rest.length === 0) out.push({ allows: block.allows, scope: { vars: v, fns: scopeFns } });
-  for (const c of block.children) walk(c, rest, v, scopeFns, out);
+  for (const w of ways) {
+    const rest = segs.slice(w.i);
+    if (rest.length === 0) out.push({ allows: block.allows, scope: { vars: w.vars, fns: scopeFns } });
+    for (const c of block.children) walk(c, rest, w.vars, scopeFns, out);
+  }
 }
 
 export interface RulesEngine {
