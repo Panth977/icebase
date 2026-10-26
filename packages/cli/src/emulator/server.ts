@@ -295,7 +295,8 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
   const server: Server = createServer(nodeListener(handler));
   const wss = new WebSocketServer({ noServer: true });
   server.on('upgrade', (req, socket, head) => {
-    if (!req.url?.startsWith('/v1/rt')) return socket.destroy();
+    const p = (req.url ?? '').split('?')[0];
+    if (p !== '/v1/rt' && !(config.emulator?.socketPath && p === config.emulator.socketPath)) return socket.destroy();
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
   });
   wss.on('connection', (ws: WebSocket) => {

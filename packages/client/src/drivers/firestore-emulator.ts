@@ -27,7 +27,7 @@ export async function callerToken(app: IceBaseApp): Promise<string | null> {
 
 export function realtimeOf(app: IceBaseApp): RealtimeClient {
   return service(app, 'emulator:rt', () => {
-    const rt = new RealtimeClient(`${emulatorOrigin(app).replace(/^http/, 'ws')}/v1/rt`, () => callerToken(app));
+    const rt = new RealtimeClient(`${emulatorOrigin(app).replace(/^http/, 'ws')}${app.options.emulator?.socketPath ?? '/v1/rt'}`, () => callerToken(app));
     app._onDelete.push(() => rt.close());
     return rt;
   });

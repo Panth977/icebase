@@ -9,6 +9,8 @@ import { defineSchema } from '../schema.ts';
 export interface CompatSettings {
   /** The IceBase server, e.g. 'https://tt.example.com'. Default: the page's origin. */
   origin?: string;
+  /** Where the server takes the realtime socket (default /v1/rt). */
+  socketPath?: string;
   /** The signed-in user's ID token (e.g. () => auth.currentUser?.getIdToken() ?? null). */
   idToken?: () => Promise<string | null> | string | null;
 }
@@ -42,7 +44,7 @@ export function iceApp(app?: { name?: string } | null): IceBaseApp {
     const origin = settings.origin ?? pageOrigin();
     // An empty schema: the server validates; this side only moves data.
     const config = { name: 'icebase-compat', schema: defineSchema({}), environments: { compat: { mode: 'emulator' } } } as unknown as AnyConfig;
-    a = initializeApp(config, 'compat' as never, { name: `icebase-compat:${name}`, emulator: { origin } });
+    a = initializeApp(config, 'compat' as never, { name: `icebase-compat:${name}`, emulator: { origin, ...(settings.socketPath ? { socketPath: settings.socketPath } : {}) } });
     // callerToken() reads the token through the app's auth service.
     a._services.set('auth', {
       get currentUser() {

@@ -44,6 +44,7 @@ describe('compat · web modular API on the IceBase server', () => {
     rules: { firestore: 'firestore.rules', database: 'database.rules.json' },
     auth: { providers: ['password'] },
     firebase: { projectId: 'demo-icebase' },
+    emulator: { socketPath: '/live' },
     environments: { local: { mode: 'emulator' } },
   });
 
@@ -187,5 +188,23 @@ describe('compat · web modular API on the IceBase server', () => {
     expect(mine.docs.map((d) => d.id)).toEqual(['s1']);
     await expect(fs.getDocs(fs.query(fs.collection(db, 'shared'), fs.where('readers', 'array-contains', 'other')))).rejects.toMatchObject({ code: 'permission-denied' });
     await expect(fs.getDocs(fs.collection(db, 'shared'))).rejects.toMatchObject({ code: 'permission-denied' });
+  });
+
+  it('socketPath: the realtime socket on another path (one a proxy already upgrades)', async () => {
+    fs.configureIceBase({ socketPath: '/live' });
+    const live = fs.getFirestore({ name: 'via-live' });
+    const seen: number[] = [];
+    const off = fs.onSnapshot(fs.doc(live, 'boards/b2'), (s) => seen.push(s.data()?.n));
+    for (let i = 0; i < 100 && !seen.length; i++) await new Promise((r) => setTimeout(r, 20));
+    off();
+    fs.configureIceBase({ socketPath: undefined });
+    expect(seen.length).toBe(1);
+    // Any other path is refused.
+    const bad = await new Promise<string>((ok) => {
+      const ws = new WebSocket(`${emu.url.replace('http', 'ws')}/nope`);
+      ws.onopen = () => ok('open');
+      ws.onerror = () => ok('refused');
+    });
+    expect(bad).toBe('refused');
   });
 });

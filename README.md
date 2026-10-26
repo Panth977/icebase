@@ -184,6 +184,9 @@ The web app keeps Firebase's modular API:
 - **Wiring:** `configureIceBase({ idToken })` hands the signed-in user's token to the compat
   modules; `refreshIceBaseAuth()` re-runs open listeners when it changes.
 
+Behind a proxy that upgrades WebSockets on one path only: `emulator: { socketPath: '/live' }` in the
+config, and `configureIceBase({ socketPath: '/live' })` in the web app.
+
 Debugging: `ICEBASE_LOG_ERRORS=1` logs every refused or failed request and listener;
 `ICEBASE_LOG_REQUESTS=1` logs every request.
 

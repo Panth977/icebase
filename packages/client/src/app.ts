@@ -14,7 +14,7 @@ export interface IceBaseAppOptions {
    * `{ embedded: name }` for one started in this process with startEmulator({ listen: false, name }).
    * `adminToken`: what an admin app sends (default ICEBASE_ADMIN_TOKEN, else 'owner' for a dev server).
    */
-  emulator?: { /** The server's full origin ('https://host'): instead of host and port. */ origin?: string; host?: string; port?: number; embedded?: string; adminToken?: string; /** Admin apps: writes skip the server's schema check (seeding legacy data). */ unchecked?: boolean };
+  emulator?: { /** The server's full origin ('https://host'): instead of host and port. */ origin?: string; /** Where the realtime socket is (default /v1/rt; config.emulator.socketPath on the server). */ socketPath?: string; host?: string; port?: number; embedded?: string; adminToken?: string; /** Admin apps: writes skip the server's schema check (seeding legacy data). */ unchecked?: boolean };
 }
 
 export interface IceBaseApp<Cfg extends AnyConfig = AnyConfig> {
