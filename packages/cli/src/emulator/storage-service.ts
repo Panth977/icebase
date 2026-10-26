@@ -193,7 +193,17 @@ export function storageService(ctx: EmulatorContext): Service {
   /** The object's bytes; a Range request (bytes=a-b, a-, -n) gets its part (206). */
   const media = (m: Meta, req?: Request) => {
     const all = readBlob(m.bucket, m.name);
-    const base = { 'content-type': m.contentType, 'accept-ranges': 'bytes', ...(m.contentDisposition ? { 'content-disposition': m.contentDisposition } : {}), ...(m.cacheControl ? { 'cache-control': m.cacheControl } : {}) };
+    // Stored objects are people's uploads, served from this server's (the app's) own origin — not a
+    // storage origin of their own, as on Firebase: never sniffed, and anything but a PDF in a
+    // sandbox (an opaque origin), so an uploaded page cannot act as the app.
+    const base = {
+      'content-type': m.contentType,
+      'accept-ranges': 'bytes',
+      'x-content-type-options': 'nosniff',
+      ...(m.contentType.startsWith('application/pdf') ? {} : { 'content-security-policy': 'sandbox' }),
+      ...(m.contentDisposition ? { 'content-disposition': m.contentDisposition } : {}),
+      ...(m.cacheControl ? { 'cache-control': m.cacheControl } : {}),
+    };
     const r = /^bytes=(\d*)-(\d*)$/.exec(req?.headers.get('range') ?? '');
     if (r && (r[1] || r[2])) {
       const size = all.length;

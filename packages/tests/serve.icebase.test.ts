@@ -115,7 +115,11 @@ describe('icebase serve', () => {
     // Signed URLs: made by the server, readable with a Range, writable once signed for a type.
     const [read] = await file.getSignedUrl({ action: 'read', expires: Date.now() + 60_000 });
     expect(read.startsWith(`${url}/__/icebase/storage/signed/`)).toBe(true);
-    const part = await fetch(read, { headers: { range: 'bytes=1-3' } });
+    const whole = await fetch(read);
+    // People's uploads on the app's own origin: never sniffed, sandboxed (a PDF is not).
+    expect(whole.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(whole.headers.get('content-security-policy')).toBe('sandbox');
+        const part = await fetch(read, { headers: { range: 'bytes=1-3' } });
     expect(part.status).toBe(206);
     expect(await part.text()).toBe('ell');
     expect((await fetch(read.replace(/sig=[^&]+/, 'sig=forged'))).status).toBe(403);
