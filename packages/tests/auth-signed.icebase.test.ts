@@ -89,4 +89,16 @@ describe('auth · signed tokens', () => {
     await expect(signInWithEmailAndPassword(getAuth(app), 'imp@x.test', 'wrong')).rejects.toThrow();
     expect((await getAdminAuth(admin).getUser('imported-2')).email).toBe('link@x.test');
   });
+
+  it('a custom token\'s claims stay with its session (refresh keeps them; the next session has none)', async () => {
+    const withBoard = await getAdminAuth(admin).createCustomToken('sess-1', { board: 'b1' });
+    const a = await signInWithCustomToken(getAuth(app), withBoard);
+    expect((await a.user.getIdTokenResult()).claims.board).toBe('b1');
+    expect((await a.user.getIdTokenResult(true)).claims.board).toBe('b1'); // refreshed
+    const plain = await getAdminAuth(admin).createCustomToken('sess-1');
+    const b = await signInWithCustomToken(getAuth(app), plain);
+    expect((await b.user.getIdTokenResult(true)).claims.board).toBeUndefined();
+    expect((await getAdminAuth(admin).getUser('sess-1')).customClaims?.board).toBeUndefined();
+    await expect(getAdminAuth(admin).deleteUser('no-such-user')).rejects.toMatchObject({ code: 'auth/user-not-found' });
+  });
 });

@@ -101,6 +101,9 @@ export function authService(ctx: EmulatorContext): Service {
     CREATE TABLE IF NOT EXISTS oob (code TEXT PRIMARY KEY, email TEXT, kind TEXT NOT NULL, uid TEXT, link TEXT, at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS phone_codes (session TEXT PRIMARY KEY, phone TEXT NOT NULL, code TEXT NOT NULL, at INTEGER NOT NULL);
   `);
+  // A session's own claims (a custom token's, beforeUserSignedIn's sessionClaims) ride on its
+  // refreshed tokens too, and never on the user's other sessions.
+  if (!(db.prepare(`PRAGMA table_info(refresh)`).all() as { name: string }[]).some((c) => c.name === 'claims')) db.exec(`ALTER TABLE refresh ADD COLUMN claims TEXT`);
   const q = {
     byUid: db.prepare(`SELECT rec FROM users WHERE uid = ?`),
     byEmail: db.prepare(`SELECT rec FROM users WHERE email = ?`),
@@ -108,8 +111,8 @@ export function authService(ctx: EmulatorContext): Service {
     put: db.prepare(`INSERT INTO users (uid, email, phone, rec) VALUES (?, ?, ?, ?) ON CONFLICT(uid) DO UPDATE SET email = excluded.email, phone = excluded.phone, rec = excluded.rec`),
     del: db.prepare(`DELETE FROM users WHERE uid = ?`),
     page: db.prepare(`SELECT rec FROM users WHERE uid > ? ORDER BY uid LIMIT ?`),
-    refreshPut: db.prepare(`INSERT INTO refresh (token, uid, provider) VALUES (?, ?, ?)`),
-    refreshGet: db.prepare(`SELECT uid, provider FROM refresh WHERE token = ?`),
+    refreshPut: db.prepare(`INSERT INTO refresh (token, uid, provider, claims) VALUES (?, ?, ?, ?)`),
+    refreshGet: db.prepare(`SELECT uid, provider, claims FROM refresh WHERE token = ?`),
     oobPut: db.prepare(`INSERT INTO oob (code, email, kind, uid, link, at) VALUES (?, ?, ?, ?, ?, ?)`),
     oobGet: db.prepare(`SELECT * FROM oob WHERE code = ?`),
     oobDel: db.prepare(`DELETE FROM oob WHERE code = ?`),
@@ -159,11 +162,22 @@ export function authService(ctx: EmulatorContext): Service {
     };
     return signJwt(payload);
   };
+  /**
+   * A session's tokens for `u` — which may carry claims of this session only (on top of the
+   * stored ones). Only the stored user's lastLoginAt is saved: a session's claims never are.
+   */
   const tokens = (u: UserRec, signInProvider: string, extra: Record<string, unknown> = {}) => {
     const refreshToken = randomBytes(24).toString('base64url');
-    q.refreshPut.run(refreshToken, u.localId, provider(u, signInProvider));
-    u.lastLoginAt = String(now());
-    save(u);
+    const stored = get(u.localId);
+    const claimsOf = (r: UserRec | null) => (r?.customAttributes ? (JSON.parse(r.customAttributes) as Record<string, unknown>) : {});
+    const mine = claimsOf(u);
+    const base = claimsOf(stored);
+    const session = Object.fromEntries(Object.entries(mine).filter(([k, v]) => JSON.stringify(base[k]) !== JSON.stringify(v)));
+    q.refreshPut.run(refreshToken, u.localId, provider(u, signInProvider), Object.keys(session).length ? JSON.stringify(session) : null);
+    const lastLoginAt = String(now());
+    u.lastLoginAt = lastLoginAt;
+    if (stored) save({ ...stored, lastLoginAt });
+    else save(u);
     return { kind: 'identitytoolkit#VerifyPasswordResponse', localId: u.localId, email: u.email ?? '', displayName: u.displayName ?? '', idToken: idToken(u, signInProvider), refreshToken, expiresIn: '3600', registered: true, ...extra };
   };
   const userInfo = (u: UserRec) => {
@@ -411,6 +425,8 @@ export function authService(ctx: EmulatorContext): Service {
     },
     delete(b) {
       const u = b.localId ? get(String(b.localId)) : fromIdToken(b.idToken);
+      // firebase-admin's deleteUser of an unknown uid is an error (auth/user-not-found).
+      if (!u && b.localId) throw new AuthFail('USER_NOT_FOUND');
       if (u) {
         q.del.run(u.localId);
         emitAuth('deleted', u);
@@ -495,6 +511,7 @@ export function authService(ctx: EmulatorContext): Service {
     },
     'accounts:delete'(b) {
       const u = get(String(b.localId));
+      if (!u) throw new AuthFail('USER_NOT_FOUND');
       q.del.run(String(b.localId));
       if (u) emitAuth('deleted', u);
       return { kind: 'identitytoolkit#DeleteAccountResponse' };
@@ -615,11 +632,12 @@ export function authService(ctx: EmulatorContext): Service {
         }
         if (path === '/securetoken.googleapis.com/v1/token') {
           const form = new URLSearchParams(await req.text());
-          const r = q.refreshGet.get(form.get('refresh_token') ?? '') as { uid: string; provider: string } | undefined;
+          const r = q.refreshGet.get(form.get('refresh_token') ?? '') as { uid: string; provider: string; claims: string | null } | undefined;
           if (!r) return fail('INVALID_REFRESH_TOKEN');
-          const u = get(r.uid);
-          if (!u) return fail('USER_NOT_FOUND');
-          if (u.disabled) return fail('USER_DISABLED');
+          const stored = get(r.uid);
+          if (!stored) return fail('USER_NOT_FOUND');
+          if (stored.disabled) return fail('USER_DISABLED');
+          const u = r.claims ? { ...stored, customAttributes: JSON.stringify({ ...(stored.customAttributes ? JSON.parse(stored.customAttributes) : {}), ...JSON.parse(r.claims) }) } : stored;
           const t = idToken(u, r.provider);
           return json({ id_token: t, access_token: t, refresh_token: form.get('refresh_token'), expires_in: '3600', token_type: 'Bearer', user_id: u.localId, project_id: p });
         }
