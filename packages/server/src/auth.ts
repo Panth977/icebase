@@ -204,10 +204,13 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
 
   // ── audit trail: starts, failures and blocks per identifier (getAuthSecurity(app).listAttempts) ──
 
+  // Keys sort in the order events happened: time-based, and strictly increasing within this instance.
+  let lastKey = 0;
   const audit = async (identifier: string, event: AuditEvent, at: { channel?: 'email' | 'phone'; ip?: string | null; device?: string } = {}) => {
     const t = now();
+    const k = (lastKey = Math.max(t, lastKey + 1));
     const entry: AuditEntry = { at: t, event, ...(at.channel ? { channel: at.channel } : {}), ...(at.ip ? { ip: at.ip } : {}), ...(at.device ? { device: at.device } : {}) };
-    await (await db()).set(`${root}/audit/${short(identifier)}/${t.toString(36).padStart(9, '0')}${randomBytes(3).toString('hex')}`, entry);
+    await (await db()).set(`${root}/audit/${short(identifier)}/${k.toString(36).padStart(9, '0')}${randomBytes(3).toString('hex')}`, entry);
   };
 
   // ── challenges ─────────────────────────────────────────────────────────────
