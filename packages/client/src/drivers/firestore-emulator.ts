@@ -48,7 +48,9 @@ export async function post<T>(app: IceBaseApp, path: string, body: unknown): Pro
 
 export function createEmulatorDriver(db: Firestore, h: DriverHelpers): FirestoreDriver {
   const app = db.app;
-  if (db.databaseId !== '(default)') throw new IceBaseError('unimplemented', 'the IceBase emulator has one Firestore database, (default)', { reason: 'mode' });
+  // A named database (created with manageFirestore(app).createDb(id)) is named in every request.
+  const named = db.databaseId !== '(default)' ? { database: db.databaseId } : {};
+  const fsPost = <T = unknown>(path: string, body: Record<string, unknown>) => post<T>(app, path, { ...body, ...named });
   const toRef = (p: string) => h.toRef(p);
   const raw = (d: WireDoc): RawDoc => {
     const out: RawDoc = { id: d.id, path: d.path, data: d.data ? (decode(d.data, toRef) as Record<string, unknown>) : null, native: d };
@@ -78,7 +80,7 @@ export function createEmulatorDriver(db: Firestore, h: DriverHelpers): Firestore
   const updateOf = (path: string, fields: [string[], unknown][]) => ({ op: 'update', path, fields: fields.map(([p, v]) => ({ path: p, value: encode(v) })) });
   // An admin app made with { emulator: { unchecked: true } } writes without the server's schema check.
   const unchecked = app.kind === 'admin' && !!(app.options.emulator as { unchecked?: boolean } | undefined)?.unchecked;
-  const commit = (writes: unknown[], preconditions: { path: string; version: number }[] = []) => post(app, '/v1/fs/commit', { writes, preconditions, ...(unchecked ? { unchecked } : {}) }).then(() => undefined);
+  const commit = (writes: unknown[], preconditions: { path: string; version: number }[] = []) => fsPost('/v1/fs/commit', { writes, preconditions, ...(unchecked ? { unchecked } : {}) }).then(() => undefined);
 
   const diff = (prev: Map<string, { i: number; v: number }>, docs: WireDoc[]): RawChange[] => {
     const changes: RawChange[] = [];
@@ -94,22 +96,22 @@ export function createEmulatorDriver(db: Firestore, h: DriverHelpers): Firestore
 
   return {
     kind: 'emulator',
-    get: async (path) => raw((await post<{ docs: WireDoc[] }>(app, '/v1/fs/get', { paths: [path] })).docs[0]!),
-    query: async (spec) => ({ docs: (await post<{ docs: WireDoc[] }>(app, '/v1/fs/query', { spec: wireSpec(spec) })).docs.map(raw) }),
-    aggregate: async (spec, aggs) => (await post<{ result: Record<string, number | null> }>(app, '/v1/fs/aggregate', { spec: wireSpec(spec), aggs })).result,
+    get: async (path) => raw((await fsPost<{ docs: WireDoc[] }>('/v1/fs/get', { paths: [path] })).docs[0]!),
+    query: async (spec) => ({ docs: (await fsPost<{ docs: WireDoc[] }>('/v1/fs/query', { spec: wireSpec(spec) })).docs.map(raw) }),
+    aggregate: async (spec, aggs) => (await fsPost<{ result: Record<string, number | null> }>('/v1/fs/aggregate', { spec: wireSpec(spec), aggs })).result,
     set: (path, data, merge) => commit([writeOf('set', path, data, merge)]),
     create: (path, data) => commit([writeOf('create', path, data)]),
     update: (path, fields) => commit([updateOf(path, fields)]),
     delete: (path) => commit([writeOf('delete', path)]),
     listenDoc(path, next, error) {
-      return realtimeOf(app).listen('fs', nextId(), { kind: 'doc', path }, (m) => next(raw((m.docs as WireDoc[])[0]!)), error);
+      return realtimeOf(app).listen('fs', nextId(), { kind: 'doc', path, ...named }, (m) => next(raw((m.docs as WireDoc[])[0]!)), error);
     },
     listenQuery(spec, next, error) {
       let prev = new Map<string, { i: number; v: number }>();
       return realtimeOf(app).listen(
         'fs',
         nextId(),
-        { kind: 'query', spec: wireSpec(spec) },
+        { kind: 'query', spec: wireSpec(spec), ...named },
         (m) => {
           const docs = m.docs as WireDoc[];
           const changes = diff(prev, docs);
@@ -128,7 +130,7 @@ export function createEmulatorDriver(db: Firestore, h: DriverHelpers): Firestore
         const tx: TxDriver = {
           async get(path) {
             if (writes.length) throw new IceBaseError('invalid-argument', 'Firestore transactions require all reads to be executed before all writes.');
-            const d = (await post<{ docs: WireDoc[] }>(app, '/v1/fs/get', { paths: [path] })).docs[0]!;
+            const d = (await fsPost<{ docs: WireDoc[] }>('/v1/fs/get', { paths: [path] })).docs[0]!;
             reads.set(path, d.version);
             return raw(d);
           },
@@ -159,8 +161,8 @@ export function createEmulatorDriver(db: Firestore, h: DriverHelpers): Firestore
     },
     terminate: async () => {},
     fromNative: (d) => raw(d as WireDoc),
-    getAll: async (paths) => (await post<{ docs: WireDoc[] }>(app, '/v1/fs/get', { paths })).docs.map(raw),
-    listCollections: async (docPath) => (await post<{ ids: string[] }>(app, '/v1/fs/listCollections', { path: docPath })).ids,
-    recursiveDelete: async (path) => void (await post(app, '/v1/fs/recursiveDelete', { path })),
+    getAll: async (paths) => (await fsPost<{ docs: WireDoc[] }>('/v1/fs/get', { paths })).docs.map(raw),
+    listCollections: async (docPath) => (await fsPost<{ ids: string[] }>('/v1/fs/listCollections', { path: docPath })).ids,
+    recursiveDelete: async (path) => void (await fsPost('/v1/fs/recursiveDelete', { path })),
   };
 }

@@ -3,7 +3,9 @@
 // (not a Firebase SDK module). Needs an admin app (initializeAdminApp).
 //
 // firebase mode calls Google's management REST APIs with the admin credential. emulator mode
-// is served by the IceBase server (phase 1, emulator milestone).
+// calls the IceBase server's management API (/__/icebase/admin/manage/…, the admin token):
+// named databases and buckets are kept with its data; rules and the schema set this way replace
+// the config's until the server restarts; a hosting release is served by `icebase serve`.
 
 import type { IceBaseApp } from '@panth977/icebase/app';
 import type { Service } from '@panth977/icebase/config';
@@ -23,9 +25,15 @@ function adminOnly(app: IceBaseApp, what: string, svc: Service): 'firebase' | 'e
   return mode;
 }
 
-const notYet = (what: string, svc: Service): never => {
-  throw new IceBaseError('unimplemented', `${what} in emulator mode is not available yet`, { reason: 'mode', service: svc });
-};
+/** emulator mode: the IceBase server's management API, POST /__/icebase/admin/manage/<service>/<op> with the admin token. */
+async function onServer<T>(app: IceBaseApp, svc: string, op: string, body: Record<string, unknown> = {}): Promise<T> {
+  const { emulatorFetch, emulatorOrigin } = await import('@panth977/icebase/app');
+  const token = app.options.emulator?.adminToken ?? (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.ICEBASE_ADMIN_TOKEN ?? 'owner';
+  const res = await emulatorFetch(`${emulatorOrigin(app)}/__/icebase/admin/manage/${svc}/${op}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+  const j = (await res.json().catch(() => ({}))) as { error?: { code: IceBaseError['code']; message: string } } & T;
+  if (!res.ok || j.error) throw new IceBaseError(j.error?.code ?? 'internal', j.error?.message ?? `manage ${svc}.${op}: ${res.status}`, { reason: 'management', service: svc });
+  return j;
+}
 
 // ─── rules (shared by Firestore and Storage) ───────────────────────────────────
 
@@ -79,7 +87,23 @@ export interface FirestoreManager {
 
 export function manageFirestore(app: IceBaseApp): FirestoreManager {
   const mode = adminOnly(app, 'manageFirestore', 'firestore');
-  if (mode === 'emulator') return { createDb: () => notYet('createDb', 'firestore'), listDbs: () => notYet('listDbs', 'firestore'), setSchema: () => notYet('setSchema', 'firestore'), setIndexes: () => notYet('setIndexes', 'firestore'), setRules: () => notYet('setRules', 'firestore') };
+  if (mode === 'emulator') {
+    const schemaBody = async (x?: Schema<Record<string, AnyCollection>, any, any>) => {
+      const { schemaToJson } = await import('@panth977/icebase/schema');
+      return { schema: schemaToJson(x ?? app.config.schema) };
+    };
+    return {
+      createDb: (id = '(default)') => onServer(app, 'firestore', 'createDb', { id }),
+      listDbs: async () => (await onServer<{ databases: FirestoreDatabaseInfo[] }>(app, 'firestore', 'listDbs')).databases,
+      setSchema: async (schema) => onServer(app, 'firestore', 'setSchema', await schemaBody(schema)),
+      setIndexes: async (indexes) => onServer(app, 'firestore', 'setIndexes', !indexes || 'collections' in indexes ? await schemaBody(indexes as Schema<Record<string, AnyCollection>, any, any> | undefined) : { indexes }),
+      async setRules(source, opts = {}) {
+        const src = source ?? (app.config.rules?.firestore ? { file: app.config.rules.firestore } : undefined);
+        if (!src) throw new IceBaseError('invalid-argument', 'setRules(): no rules given and config.rules.firestore is not set');
+        return onServer(app, 'firestore', 'setRules', { source: await loadRules(src), ...(opts.database ? { database: opts.database } : {}) });
+      },
+    };
+  }
   const g = googleClient(app, 'firestore');
   const dbPath = (id = '(default)') => `projects/${g.projectId}/databases/${id}`;
   const info = (d: { name: string; locationId: string; type: string }): FirestoreDatabaseInfo => ({ name: d.name, id: d.name.split('/').pop()!, locationId: d.locationId, type: d.type });
@@ -191,9 +215,6 @@ export interface AuthManager {
 
 export function manageAuth(app: IceBaseApp): AuthManager {
   const mode = adminOnly(app, 'manageAuth', 'auth');
-  if (mode === 'emulator') return { enable: async () => {}, setProviders: async () => {}, setAuthorizedDomains: async () => {}, getConfig: async () => ({ emulator: true }) };
-  const g = googleClient(app, 'auth');
-  const cfgUrl = `${IDTK}/projects/${g.projectId}/config`;
   const fromConfig = (): ProviderSettings => {
     const ps = app.config.auth?.providers ?? [];
     const custom = app.config.auth?.custom;
@@ -206,6 +227,18 @@ export function manageAuth(app: IceBaseApp): AuthManager {
       google: false,
     };
   };
+  if (mode === 'emulator') {
+    return {
+      // Auth is always on on an IceBase server.
+      enable: async () => {},
+      // Google sign-in there is your OAuth client (config.auth.custom.google); the rest is stored and enforced.
+      setProviders: async (p = fromConfig()) => void (await onServer(app, 'auth', 'setProviders', { ...p, google: undefined })),
+      setAuthorizedDomains: async (domains) => void (await onServer(app, 'auth', 'setAuthorizedDomains', { domains })),
+      getConfig: () => onServer(app, 'auth', 'getConfig'),
+    };
+  }
+  const g = googleClient(app, 'auth');
+  const cfgUrl = `${IDTK}/projects/${g.projectId}/config`;
   return {
     async enable() {
       if (await g.call('GET', cfgUrl, undefined, { allow404: true })) return;
@@ -281,7 +314,34 @@ export interface DatabaseManager {
 
 export function manageDatabase(app: IceBaseApp): DatabaseManager {
   const mode = adminOnly(app, 'manageDatabase', 'database');
-  if (mode === 'emulator') return { createDb: () => notYet('createDb', 'database'), listDbs: () => notYet('listDbs', 'database'), setRules: () => notYet('setRules', 'database') };
+  // database.rules.json as deployed: the given (or config) rules, .indexOn from the schema, the custom-auth store's rules.
+  const rulesJson = async (rules?: { rules: Record<string, unknown> }) => {
+    const { databaseRulesJson } = await import('@panth977/icebase/database');
+    const { customAuthDatabaseRules } = await import('@panth977/icebase-server/auth');
+    let base = rules;
+    if (!base) {
+      if (app.config.rules?.database) {
+        const { readFile } = await import('node:fs/promises');
+        base = JSON.parse(await readFile(app.config.rules.database, 'utf8')) as { rules: Record<string, unknown> };
+      } else base = { rules: {} };
+    }
+    let out = databaseRulesJson(app.config.schema.paths ?? {}, base);
+    if (app.config.auth?.custom) out = { rules: deepMerge(out.rules, customAuthDatabaseRules(app.config)) };
+    return out;
+  };
+  if (mode === 'emulator') {
+    return {
+      createDb: (id, _opts) => onServer(app, 'database', 'createDb', id ? { id } : {}),
+      listDbs: async () => (await onServer<{ instances: DatabaseInstanceInfo[] }>(app, 'database', 'listDbs')).instances,
+      async setRules(rules, opts = {}) {
+        const { instanceOfUrl } = await import('@panth977/icebase/internal');
+        const out = await rulesJson(rules);
+        const instance = instanceOfUrl(opts.url ?? app.config.firebase?.databaseURL);
+        await onServer(app, 'database', 'setRules', { rules: out, ...(instance ? { instance } : {}) });
+        return out;
+      },
+    };
+  }
   const g = googleClient(app, 'database');
   const info = (d: { name: string; databaseUrl: string; type: string; state: string }): DatabaseInstanceInfo => ({ ...d, id: d.name.split('/').pop()! });
   return {
@@ -295,17 +355,7 @@ export function manageDatabase(app: IceBaseApp): DatabaseManager {
       return (r.instances ?? []).map(info);
     },
     async setRules(rules, opts = {}) {
-      const { databaseRulesJson } = await import('@panth977/icebase/database');
-      const { customAuthDatabaseRules } = await import('@panth977/icebase-server/auth');
-      let base = rules;
-      if (!base) {
-        if (app.config.rules?.database) {
-          const { readFile } = await import('node:fs/promises');
-          base = JSON.parse(await readFile(app.config.rules.database, 'utf8')) as { rules: Record<string, unknown> };
-        } else base = { rules: {} };
-      }
-      let out = databaseRulesJson(app.config.schema.paths ?? {}, base);
-      if (app.config.auth?.custom) out = { rules: deepMerge(out.rules, customAuthDatabaseRules(app.config)) };
+      const out = await rulesJson(rules);
       const url = (opts.url ?? app.config.firebase?.databaseURL ?? `https://${g.projectId}-default-rtdb.firebaseio.com`).replace(/\/$/, '');
       await g.call('PUT', `${url}/.settings/rules.json`, undefined, { raw: JSON.stringify(out), headers: { 'content-type': 'application/json' } });
       return out;
@@ -336,7 +386,17 @@ export interface StorageManager {
 
 export function manageStorage(app: IceBaseApp): StorageManager {
   const mode = adminOnly(app, 'manageStorage', 'storage');
-  if (mode === 'emulator') return { createBucket: () => notYet('createBucket', 'storage'), listBuckets: () => notYet('listBuckets', 'storage'), setRules: () => notYet('setRules', 'storage') };
+  if (mode === 'emulator') {
+    return {
+      createBucket: (name) => onServer(app, 'storage', 'createBucket', name ? { name } : {}),
+      listBuckets: async () => (await onServer<{ buckets: string[] }>(app, 'storage', 'listBuckets')).buckets,
+      async setRules(source, opts = {}) {
+        const src = source ?? (app.config.rules?.storage ? { file: app.config.rules.storage } : undefined);
+        if (!src) throw new IceBaseError('invalid-argument', 'setRules(): no rules given and config.rules.storage is not set');
+        return onServer(app, 'storage', 'setRules', { source: await loadRules(src), ...(opts.bucket ? { bucket: opts.bucket } : {}) });
+      },
+    };
+  }
   const g = googleClient(app, 'storage');
   const defaultBucket = () => app.config.firebase?.storageBucket ?? `${g.projectId}.firebasestorage.app`;
   return {
@@ -412,7 +472,22 @@ export interface HostingManager {
 
 export function manageHosting(app: IceBaseApp): HostingManager {
   const mode = adminOnly(app, 'manageHosting', 'hosting');
-  if (mode === 'emulator') return { createSite: () => notYet('createSite', 'hosting'), listSites: () => notYet('listSites', 'hosting'), deploy: () => notYet('deploy', 'hosting'), setDNS: () => notYet('setDNS', 'hosting') };
+  if (mode === 'emulator') {
+    return {
+      createSite: (siteId) => onServer(app, 'hosting', 'createSite', { siteId }),
+      listSites: async () => (await onServer<{ sites: { name: string; defaultUrl: string }[] }>(app, 'hosting', 'listSites')).sites,
+      async deploy(opts = {}) {
+        const dir = opts.dir ?? app.config.hosting?.public;
+        if (!dir) throw new IceBaseError('invalid-argument', 'deploy(): no directory given and config.hosting.public is not set');
+        const [{ readdir, readFile }, { join, relative, sep }] = await Promise.all([import('node:fs/promises'), import('node:path')]);
+        const walk = async (d: string): Promise<string[]> => (await Promise.all((await readdir(d, { withFileTypes: true })).map((e) => (e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)])))).flat();
+        const files: Record<string, string> = {};
+        for (const f of await walk(dir)) files[relative(dir, f).split(sep).join('/')] = (await readFile(f)).toString('base64');
+        return onServer(app, 'hosting', 'deploy', { files, ...(opts.site ? { site: opts.site } : {}), ...(opts.message ? { message: opts.message } : {}) });
+      },
+      setDNS: (domain, opts = {}) => onServer(app, 'hosting', 'setDNS', { domain, ...(opts.site ? { site: opts.site } : {}) }),
+    };
+  }
   const g = googleClient(app, 'hosting');
   const siteOf = (s?: string) => s ?? app.config.hosting?.site ?? g.projectId;
   return {

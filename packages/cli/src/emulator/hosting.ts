@@ -54,12 +54,14 @@ export interface HostingOptions {
    * text is sent brotli / gzip compressed, and hashed build assets are cached for a year.
    */
   production?: boolean;
+  /** Serve this directory instead of config.hosting.public (a release deployed with the management API). */
+  publicDir?: string;
 }
 
 /** Hosting as a fetch handler — config.hosting, served as Firebase Hosting serves it. */
 export function hostingHandler(opts: HostingOptions): (req: Request) => Promise<Response> {
   const h = opts.config.hosting!;
-  const pub = resolve(opts.root, h.public);
+  const pub = opts.publicDir ?? resolve(opts.root, h.public);
   const region = opts.config.functions?.region ?? 'us-central1';
   const file = (p: string): string | null => {
     let rel: string;

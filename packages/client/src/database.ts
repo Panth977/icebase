@@ -27,7 +27,7 @@ export function getDatabase(app: IceBaseApp, url?: string): Database {
   if (app.kind === 'admin') throw new IceBaseError('invalid-argument', 'This is an admin app: use getAdminDatabase(app) from icebase/admin', { reason: 'config' });
   return service(app, `database:${url ?? ''}`, () => {
     const mode = app.modes.database;
-    if (mode === 'emulator') return new Database(app, emulatorDatabaseDriver(app));
+    if (mode === 'emulator') return new Database(app, emulatorDatabaseDriver(app, url));
     if (mode !== 'firebase') throw new IceBaseError('unimplemented', `the Realtime Database in ${mode} mode is not available yet`, { reason: 'mode', service: 'database' });
     const native = url ? rd.getDatabase(nativeWebApp(app), url) : rd.getDatabase(nativeWebApp(app));
     return new Database(app, webDatabaseDriver(native), native);

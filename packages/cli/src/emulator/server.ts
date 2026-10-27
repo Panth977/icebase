@@ -34,6 +34,8 @@ export interface Service {
   handle(req: Request, url: URL, caller: Caller): Promise<Response | null> | Response | null;
   /** A WebSocket message for this service ({ s: name, … }). */
   socket?(ws: Live, msg: Record<string, unknown>): void | Promise<void>;
+  /** The management API (icebase/manage in emulator mode): POST /__/icebase/admin/manage/<service>/<op>, admin only. */
+  manage?(op: string, body: Record<string, unknown>, req?: Request): Promise<unknown> | unknown;
   /** Called once the server listens and ctx.origin is known. */
   started?(): void;
   close?(): void | Promise<void>;
@@ -69,6 +71,11 @@ export interface EmulatorContext {
   signingKey: Buffer | null;
   /** config.hosting is served on the same port (`icebase serve`). */
   hosting: boolean;
+  /**
+   * Rules released with the management API ('firestore:<db>', 'storage:<bucket>', 'database'):
+   * they replace the config's rules files until the server restarts.
+   */
+  deployedRules: Map<string, string>;
 }
 
 /** A stored object as Cloud Functions' storage events carry it. */
@@ -197,6 +204,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
     hooks: { storage: [], database: [], auth: [], beforeCreate: null, beforeSignIn: null },
     signingKey: signTokens(opts, dataDir, memory),
     hosting: !!opts.hosting,
+    deployedRules: new Map(),
     // Until the auth service is up, only the admin token is understood.
     verify: async (token) => ({ admin: token === adminToken, auth: null }),
   };
@@ -222,11 +230,26 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
     }
   }
 
+  // Hosting's management API (sites, releases, domains) — served when this server also hosts.
+  const { hostingSites } = await import('./hosting-sites.ts');
+  const hostingManage = hostingSites(ctx);
   let hosting: ((req: Request) => Promise<Response>) | null = null;
   if (opts.hosting) {
     if (!config.hosting) throw new IceBaseError('failed-precondition', 'hosting: icebase.config has no hosting section');
     const { hostingHandler } = await import('./hosting.ts');
-    hosting = hostingHandler({
+    const handlers = new Map<string, (req: Request) => Promise<Response>>();
+    const handlerFor = (publicDir: string | null) => {
+      let hd = handlers.get(publicDir ?? '');
+      if (!hd) handlers.set(publicDir ?? '', (hd = makeHosting(publicDir)));
+      return hd;
+    };
+    hosting = async (req) => {
+      const at = hostingManage.dirFor(new URL(req.url).hostname);
+      if (at === 'none') return new Response('This site has nothing released yet', { status: 404 });
+      return handlerFor(at.dir)(req);
+    };
+    const makeHosting = (publicDir: string | null) => hostingHandler({
+      ...(publicDir ? { publicDir } : {}),
       config,
       root,
       production: opts.hosting === 'production',
@@ -253,6 +276,13 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
       if (url.pathname === '/__/icebase/health') return json({ ok: true, project: projectId, services: [...services.keys()], documents: firestore.count() });
       const authz = req.headers.get('authorization');
       const caller = await ctx.verify(authz ? authz.replace(/^(Bearer|Firebase)\s+/i, '') : null);
+      const mg = /^\/__\/icebase\/admin\/manage\/([a-zA-Z]+)\/([a-zA-Z]+)$/.exec(url.pathname);
+      if (mg && req.method === 'POST') {
+        if (!caller.admin) throw new IceBaseError('permission-denied', 'the management API is the admin\'s');
+        const svc = services.get(mg[1]!) ?? (mg[1] === 'hosting' ? hostingManage : undefined);
+        if (!svc?.manage) throw new IceBaseError('not-found', `no management API for '${mg[1]}' on this server`);
+        return json((await svc.manage(mg[2]!, ((await req.json().catch(() => ({}))) ?? {}) as Record<string, unknown>, req)) ?? {}, 200, CORS);
+      }
       for (const s of services.values()) {
         const r = await s.handle(req, url, caller);
         if (r && LOG_ERRORS && r.status >= 400) console.error(`[icebase] failed: ${req.method} ${url.pathname} → ${r.status}`);

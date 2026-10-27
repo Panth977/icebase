@@ -2,13 +2,14 @@
 // schema validation and composite-index checks on the server too, and firestore.rules for
 // every request that is not the owner's.
 
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { IceBaseError } from '@panth977/icebase/errors';
 import { dnf, isName, type QuerySpec } from '@panth977/icebase/internal';
 import { decode } from '@panth977/icebase/internal';
-import { matchCollectionPath, validateUpdate, validateWrite, type AnyCollection } from '@panth977/icebase/schema';
-import { applyUpdate, applyWrite, matchesFilters, type Json, type Precondition, type StoredDoc, type Write } from './firestore-engine.ts';
+import { matchCollectionPath, schemaFromJson, validateUpdate, validateWrite, type AnyCollection } from '@panth977/icebase/schema';
+import { applyUpdate, applyWrite, FirestoreEngine, matchesFilters, type Json, type Precondition, type StoredDoc, type Write } from './firestore-engine.ts';
+import { firestoreIndexesJson, indexKey, type IndexesFile } from '../internal/firebase-indexes.ts';
 import { loadRules, type RulesEngine } from './rules.ts';
 import { json, type Caller, type EmulatorContext, type Live, type Service } from './server.ts';
 
@@ -26,15 +27,30 @@ export const toWire = (path: string, d: StoredDoc | null): WireDoc =>
 
 const collOf = (ctx: EmulatorContext, docPath: string): AnyCollection | null => matchCollectionPath(ctx.config.schema, docPath.slice(0, docPath.lastIndexOf('/')))?.collection ?? null;
 
-export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
-  const engine = ctx.firestore;
+/** One Firestore database: its engine, rules and listeners. */
+interface FirestoreDb {
+  engine: FirestoreEngine;
+  reloadRules(): void;
+  op(name: string, b: Record<string, unknown>, caller: Caller): Promise<Response | null>;
+  socket(live: Live, msg: Record<string, unknown>): Promise<void>;
+}
+
+/** The rules a database runs: a ruleset set with the management API (until restart), else config.rules.firestore. */
+function firestoreRulesSource(ctx: EmulatorContext, dbId: string): string | null {
+  const deployed = ctx.deployedRules.get(`firestore:${dbId}`);
+  if (deployed !== undefined) return deployed;
+  const file = ctx.config.rules?.firestore;
+  return file ? readFileSync(resolve(ctx.root, file), 'utf8') : null;
+}
+
+function firestoreDatabase(ctx: EmulatorContext, dbId: string, engine: FirestoreEngine): FirestoreDb {
   let rules: RulesEngine | null = null;
   const reloadRules = () => {
-    const file = ctx.config.rules?.firestore;
-    rules = file ? loadRules(readFileSync(resolve(ctx.root, file), 'utf8'), 'firestore') : null;
+    const src = firestoreRulesSource(ctx, dbId);
+    rules = src !== null ? loadRules(src, 'firestore') : null;
   };
   reloadRules();
-  const db = `/databases/(default)/documents`;
+  const db = `/databases/${dbId}/documents`;
 
   /** Rules context for one document path: request.resource / resource as rules see them. */
   const allow = async (caller: Caller, method: 'get' | 'list' | 'create' | 'update' | 'delete', path: string, resource: StoredDoc | null, requestData: Record<string, Json> | null, query?: QuerySpec) => {
@@ -168,11 +184,10 @@ export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
   });
 
   return {
-    async handle(req, url, caller) {
-      if (!url.pathname.startsWith('/v1/fs/')) return null;
-      if (req.method !== 'POST') return json({ error: { code: 'invalid-argument', message: 'POST only' } }, 405);
-      const b = (await req.json()) as Record<string, unknown>;
-      switch (url.pathname.slice(7)) {
+    engine,
+    reloadRules,
+    async op(name, b, caller) {
+      switch (name) {
         case 'get': {
           const paths = b.paths as string[];
           const docs = engine.getAll(paths);
@@ -214,6 +229,106 @@ export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
       } else if (msg.t === 'unlisten') {
         for (const l of listeners) if (l.live === live && l.id === String(msg.id)) listeners.delete(l);
       }
+    },
+  };
+}
+
+/** A named database id as Firestore takes it: 4–63 of a-z 0-9 -, a letter first, not ending in -. */
+const DB_ID = /^[a-z][a-z0-9-]{2,61}[a-z0-9]$/;
+
+export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
+  const memory = ctx.dataDir === ':memory:';
+  const dbs = new Map<string, FirestoreDb>([['(default)', firestoreDatabase(ctx, '(default)', ctx.firestore)]]);
+  // Named databases (manageFirestore(app).createDb(id)) are kept in the data directory, one SQLite file each.
+  const listFile = memory ? null : join(ctx.dataDir, 'firestore-databases.json');
+  const named: string[] = listFile && existsSync(listFile) ? (JSON.parse(readFileSync(listFile, 'utf8')) as string[]) : [];
+  const open = (id: string): FirestoreDb => {
+    const d = firestoreDatabase(ctx, id, new FirestoreEngine({ file: memory ? ':memory:' : join(ctx.dataDir, `firestore-${id}.sqlite`), schema: ctx.config.schema }));
+    dbs.set(id, d);
+    return d;
+  };
+  for (const id of named) open(id);
+  const dbOf = (b: Record<string, unknown>): FirestoreDb => {
+    const id = typeof b.database === 'string' ? b.database : '(default)';
+    const d = dbs.get(id);
+    if (!d) throw new IceBaseError('not-found', `The database ${id} does not exist for project ${ctx.projectId} (create it with manageFirestore(app).createDb('${id}'))`);
+    return d;
+  };
+  const info = (id: string) => ({ name: `projects/${ctx.projectId}/databases/${id}`, id, locationId: 'icebase', type: 'FIRESTORE_NATIVE' });
+  const diffIndexes = (before: IndexesFile, after: IndexesFile) => {
+    const had = new Set(before.indexes.map(indexKey));
+    const has = new Set(after.indexes.map(indexKey));
+    return {
+      created: after.indexes.filter((ix) => !had.has(indexKey(ix))),
+      deleted: before.indexes.filter((ix) => !has.has(indexKey(ix))).map((ix) => `${ix.collectionGroup}: ${ix.fields.map((f) => f.fieldPath).join(', ')}`),
+      unchanged: after.indexes.filter((ix) => had.has(indexKey(ix))).length,
+    };
+  };
+
+  return {
+    async handle(req, url, caller) {
+      if (!url.pathname.startsWith('/v1/fs/')) return null;
+      if (req.method !== 'POST') return json({ error: { code: 'invalid-argument', message: 'POST only' } }, 405);
+      const b = (await req.json()) as Record<string, unknown>;
+      return dbOf(b).op(url.pathname.slice(7), b, caller);
+    },
+    async socket(live, msg) {
+      // An unlisten names only the listener; every database drops it if it holds it.
+      if (msg.t === 'unlisten') {
+        for (const d of dbs.values()) await d.socket(live, msg);
+        return;
+      }
+      await dbOf(msg).socket(live, msg);
+    },
+    async manage(op, b) {
+      switch (op) {
+        case 'listDbs':
+          return { databases: [...dbs.keys()].map(info) };
+        case 'createDb': {
+          const id = typeof b.id === 'string' ? b.id : '(default)';
+          // The default database is always there on an IceBase server.
+          if (id === '(default)') return info(id);
+          if (!DB_ID.test(id)) throw new IceBaseError('invalid-argument', `createDb('${id}'): a database id is 4–63 characters of a-z, 0-9 and -, starting with a letter and not ending with -`);
+          if (dbs.has(id)) throw new IceBaseError('already-exists', `Database '${id}' already exists`);
+          open(id);
+          if (listFile) writeFileSync(listFile, JSON.stringify([...dbs.keys()].filter((k) => k !== '(default)')));
+          return info(id);
+        }
+        case 'setRules': {
+          const id = typeof b.database === 'string' ? b.database : '(default)';
+          const d = dbOf({ database: id });
+          const source = String(b.source ?? '');
+          loadRules(source, 'firestore'); // a syntax error refuses the release, as Firebase does
+          ctx.deployedRules.set(`firestore:${id}`, source);
+          d.reloadRules();
+          return { ruleset: `projects/${ctx.projectId}/rulesets/icebase-${Date.now()}`, release: `projects/${ctx.projectId}/releases/${id === '(default)' ? 'cloud.firestore' : `cloud.firestore/${id}`}` };
+        }
+        case 'setSchema':
+        case 'setIndexes': {
+          const before = firestoreIndexesJson(ctx.config.schema);
+          if (b.schema) {
+            const schema = schemaFromJson(b.schema);
+            const after = firestoreIndexesJson(schema);
+            // The server validates writes and plans queries with the schema it is given.
+            (ctx as { config: EmulatorContext['config'] }).config = { ...ctx.config, schema };
+            for (const d of dbs.values()) d.engine.setSchema(schema);
+            return { ...diffIndexes(before, after), fieldOverrides: op === 'setSchema' ? after.fieldOverrides.length : 0 };
+          }
+          // An index file: the IceBase server plans queries from the schema, so every index in the
+          // file must already be declared there.
+          const file = b.indexes as IndexesFile;
+          const have = new Set(before.indexes.map(indexKey));
+          const missing = file.indexes.filter((ix) => !have.has(indexKey(ix)));
+          if (missing.length) {
+            throw new IceBaseError('failed-precondition', `setIndexes: the IceBase server plans queries from the schema; declare these with index(…) and call setSchema(schema):\n${missing.map((ix) => `  ${ix.collectionGroup}: ${ix.fields.map((f) => `${f.fieldPath} ${f.order ?? f.arrayConfig}`).join(', ')}`).join('\n')}`);
+          }
+          return { created: [], deleted: [], unchanged: file.indexes.length, fieldOverrides: 0 };
+        }
+      }
+      throw new IceBaseError('invalid-argument', `firestore: no management operation '${op}'`);
+    },
+    close() {
+      for (const [id, d] of dbs) if (id !== '(default)') d.engine.close();
     },
   };
 }

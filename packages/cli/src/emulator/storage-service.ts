@@ -4,7 +4,7 @@
 // metadata in SQLite, storage.rules for every caller that is not the owner.
 
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { IceBaseError } from '@panth977/icebase/errors';
@@ -128,11 +128,18 @@ export function storageService(ctx: EmulatorContext): Service {
 
   let rules: RulesEngine | null = null;
   if (ctx.config.rules?.storage) rules = loadRules(readFileSync(resolve(ctx.root, ctx.config.rules.storage), 'utf8'), 'storage');
+  // Rules released for one bucket with the management API (until restart); others use config.rules.storage.
+  const bucketRules = new Map<string, RulesEngine>();
+  const rulesFor = (bucket: string): RulesEngine | null => bucketRules.get(bucket) ?? rules;
+  const defaultBucket = ctx.config.firebase?.storageBucket ?? `${ctx.projectId}.appspot.com`;
+  const bucketsFile = ctx.dataDir === ':memory:' ? null : join(ctx.dataDir, 'storage-buckets.json');
+  const buckets = new Set<string>([defaultBucket, ...(bucketsFile && existsSync(bucketsFile) ? (JSON.parse(readFileSync(bucketsFile, 'utf8')) as string[]) : [])]);
   const files = (ctx.config.schema.files ?? {}) as Record<string, AnyFilePath>;
 
   const ruleRes = (m: Meta | null) => (m ? { name: m.name, bucket: m.bucket, size: m.size, contentType: m.contentType, md5Hash: m.md5Hash, crc32c: m.crc32c, generation: m.generation, metageneration: m.metageneration, timeCreated: { __ib: 'ts', s: Math.floor(Date.parse(m.timeCreated) / 1000), n: 0, k: '' }, updated: m.updated, metadata: m.metadata, contentDisposition: m.contentDisposition ?? null, contentEncoding: m.contentEncoding ?? null, contentLanguage: m.contentLanguage ?? null, cacheControl: m.cacheControl ?? null } : null);
   const allow = async (c: Caller, method: 'get' | 'list' | 'create' | 'update' | 'delete', bucket: string, name: string, cur: Meta | null, next: Meta | null) => {
     if (c.admin) return;
+    const rules = rulesFor(bucket);
     if (!rules && ctx.signingKey) throw new IceBaseError('permission-denied', 'storage: no rules file, so only the admin may read or write on this server');
     if (!rules) return;
     const ok = await rules.allows({
@@ -249,6 +256,29 @@ export function storageService(ctx: EmulatorContext): Service {
   const notFound = (name: string) => json({ error: { code: 404, message: `Not Found. Could not get object ${name}`, status: 'NOT_FOUND' } }, 404);
 
   return {
+    manage(op, b) {
+      switch (op) {
+        case 'listBuckets':
+          return { buckets: [...buckets] };
+        case 'createBucket': {
+          const name = typeof b.name === 'string' && b.name ? b.name : defaultBucket;
+          if (name === defaultBucket) return { name };
+          if (!/^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$/.test(name)) throw new IceBaseError('invalid-argument', `createBucket('${name}'): not a valid bucket name`);
+          if (buckets.has(name)) throw new IceBaseError('already-exists', `bucket '${name}' already exists`);
+          buckets.add(name);
+          if (bucketsFile) writeFileSync(bucketsFile, JSON.stringify([...buckets].filter((x) => x !== defaultBucket)));
+          return { name };
+        }
+        case 'setRules': {
+          const bucket = typeof b.bucket === 'string' ? b.bucket : defaultBucket;
+          const source = String(b.source ?? '');
+          bucketRules.set(bucket, loadRules(source, 'storage'));
+          ctx.deployedRules.set(`storage:${bucket}`, source);
+          return { ruleset: `projects/${ctx.projectId}/rulesets/icebase-${Date.now()}`, release: `projects/${ctx.projectId}/releases/firebase.storage/${bucket}` };
+        }
+      }
+      throw new IceBaseError('invalid-argument', `storage: no management operation '${op}'`);
+    },
     async handle(req, url, caller) {
       const path = url.pathname;
       // ── signed URLs ─────────────────────────────────────────────────────────

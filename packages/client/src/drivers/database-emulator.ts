@@ -8,20 +8,37 @@ import { nextId } from '../internal/rt-client.ts';
 import { encode } from '../internal/wire.ts';
 import { post, realtimeOf } from './firestore-emulator.ts';
 
-export function emulatorDatabaseDriver(app: IceBaseApp): DatabaseDriver {
-  const get = (path: string, query: DbQuery | null) => post<RawDbSnapshot>(app, '/v1/db/get', { path, query });
+/**
+ * The instance a database URL names: ?ns=<id> (the emulator's form), else the host's first label
+ * (https://<id>.firebaseio.com, https://<id>.<region>.firebasedatabase.app). None: the default.
+ */
+export function instanceOfUrl(url?: string): string | undefined {
+  if (!url) return undefined;
+  try {
+    const u = new URL(url);
+    return u.searchParams.get('ns') ?? (/\.(firebaseio\.com|firebasedatabase\.app)$/.test(u.hostname) ? u.hostname.split('.')[0] : undefined);
+  } catch {
+    return undefined;
+  }
+}
+
+export function emulatorDatabaseDriver(app: IceBaseApp, url?: string): DatabaseDriver {
+  const ns = instanceOfUrl(url);
+  const at = ns ? { ns } : {};
+  const dbPost = <T = unknown>(path: string, body: Record<string, unknown>) => post<T>(app, path, { ...body, ...at });
+  const get = (path: string, query: DbQuery | null) => dbPost<RawDbSnapshot>('/v1/db/get', { path, query });
   return {
     get,
-    set: (path, value) => post(app, '/v1/db/set', { path, value: encode(value) }).then(() => undefined),
-    update: (path, values) => post(app, '/v1/db/update', { path, values: encode(values) }).then(() => undefined),
-    remove: (path) => post(app, '/v1/db/set', { path, value: null }).then(() => undefined),
+    set: (path, value) => dbPost('/v1/db/set', { path, value: encode(value) }).then(() => undefined),
+    update: (path, values) => dbPost('/v1/db/update', { path, values: encode(values) }).then(() => undefined),
+    remove: (path) => dbPost('/v1/db/set', { path, value: null }).then(() => undefined),
     newKey: () => pushId(),
     listen(path, query, event, cb, cancel) {
       let prev: { key: string; value: string }[] | null = null;
       return realtimeOf(app).listen(
         'db',
         nextId(),
-        { path, query },
+        { path, query, ...at },
         (m) => {
           const snap = m.snap as RawDbSnapshot;
           if (event === 'value') return cb(snap, null);
@@ -49,13 +66,13 @@ export function emulatorDatabaseDriver(app: IceBaseApp): DatabaseDriver {
         const cur = (await get(path, null)).value;
         const next = fn(cur);
         if (next === undefined) return { committed: false, snapshot: await get(path, null) };
-        const r = await post<{ committed: boolean; snap?: RawDbSnapshot }>(app, '/v1/db/transaction', { path, expect: cur, value: encode(next) });
+        const r = await dbPost<{ committed: boolean; snap?: RawDbSnapshot }>('/v1/db/transaction', { path, expect: cur, value: encode(next) });
         if (r.committed) return { committed: true, snapshot: r.snap! };
       }
       throw new Error('runTransaction: too many retries');
     },
     onDisconnect(path) {
-      const send = (op: string, value?: unknown) => realtimeOf(app).request('db', { t: 'onDisconnect', op, path, ...(value !== undefined ? { value: encode(value) } : {}) });
+      const send = (op: string, value?: unknown) => realtimeOf(app).request('db', { t: 'onDisconnect', op, path, ...at, ...(value !== undefined ? { value: encode(value) } : {}) });
       return { set: (v) => send('set', v), update: (v) => send('update', v), remove: () => send('remove'), cancel: () => send('cancel') };
     },
   };

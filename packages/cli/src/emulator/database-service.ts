@@ -2,7 +2,7 @@
 // with Firebase's ordering, value listeners over the socket, onDisconnect, and
 // database.rules.json (.read / .write / .validate) for every caller that is not the owner.
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { IceBaseError } from '@panth977/icebase/errors';
@@ -273,8 +273,13 @@ function resolveSentinels(v: unknown, cur: Node): Node {
   return normalize(v);
 }
 
-export function databaseService(ctx: EmulatorContext): Service {
-  const file = ctx.dataDir === ':memory:' ? ':memory:' : join(ctx.dataDir, 'database.sqlite');
+/** One Realtime Database instance (the project's default, or one made with createDb). */
+interface DbInstance extends Service {
+  reloadRules(): void;
+}
+
+function databaseInstance(ctx: EmulatorContext, instance: string, isDefault: boolean): DbInstance {
+  const file = ctx.dataDir === ':memory:' ? ':memory:' : join(ctx.dataDir, isDefault ? 'database.sqlite' : `database-${instance}.sqlite`);
   const sql = new DatabaseSync(file);
   sql.exec(`CREATE TABLE IF NOT EXISTS tree (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL)`);
   let root: Node = JSON.parse((sql.prepare(`SELECT json FROM tree WHERE id = 1`).get() as { json: string } | undefined)?.json ?? 'null') as Node;
@@ -288,8 +293,13 @@ export function databaseService(ctx: EmulatorContext): Service {
   };
 
   let rules: ReturnType<typeof loadDatabaseRules> | null = null;
-  const rulesFile = ctx.config.rules?.database;
-  if (rulesFile) rules = loadDatabaseRules(readFileSync(resolve(ctx.root, rulesFile), 'utf8'));
+  // Rules set with the management API (until restart), else config.rules.database.
+  const reloadRules = () => {
+    const deployed = ctx.deployedRules.get(`database:${instance}`);
+    const rulesFile = ctx.config.rules?.database;
+    rules = deployed !== undefined ? loadDatabaseRules(deployed) : rulesFile ? loadDatabaseRules(readFileSync(resolve(ctx.root, rulesFile), 'utf8')) : null;
+  };
+  reloadRules();
 
   const canRead = (c: Caller, path: string) => {
     if (c.admin) return;
@@ -340,7 +350,8 @@ export function databaseService(ctx: EmulatorContext): Service {
     root = next;
     persist();
     notify(ops.map((o) => segs(o.path).join('/')));
-    if (ctx.hooks.database.length) {
+    // Database triggers fire for the default instance.
+    if (isDefault && ctx.hooks.database.length) {
       const e = { paths: ops.map((o) => segs(o.path).join('/')), before: (p: string) => exportVal(getAt(prev, p)), after: (p: string) => exportVal(getAt(next, p)) };
       for (const h of ctx.hooks.database) h(e);
     }
@@ -350,11 +361,12 @@ export function databaseService(ctx: EmulatorContext): Service {
   const clean = (p: unknown) => segs(String(p ?? '')).join('/');
 
   return {
+    reloadRules,
     async handle(req, url, caller) {
       // Firebase's REST API for reading, GET /__/icebase/rtdb/{path}.json?auth=<ID token>: the value,
       // or (Accept: text/event-stream) its stream — event: put {"path":"/","data":…} now and on
       // every change, keep-alive every 30 s, auth_revoked when the token expires.
-      if (url.pathname.startsWith('/__/icebase/rtdb/') || url.pathname === '/__/icebase/rtdb.json') {
+      if (isDefault && (url.pathname.startsWith('/__/icebase/rtdb/') || url.pathname === '/__/icebase/rtdb.json')) {
         if (req.method !== 'GET') return json({ error: 'Only GET is served here' }, 405);
         const raw = url.pathname === '/__/icebase/rtdb.json' ? '' : url.pathname.slice('/__/icebase/rtdb/'.length);
         if (raw && !raw.endsWith('.json')) return json({ error: 'The path must end in .json' }, 400);
@@ -424,7 +436,7 @@ export function databaseService(ctx: EmulatorContext): Service {
         return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' } });
       }
       if (!url.pathname.startsWith('/v1/db/')) return null;
-      const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+      const b = ((req as Request & { _body?: Record<string, unknown> })._body ?? (await req.json().catch(() => ({})))) as Record<string, unknown>;
       const path = clean(b.path);
       switch (url.pathname.slice(7)) {
         case 'get':
@@ -487,6 +499,74 @@ export function databaseService(ctx: EmulatorContext): Service {
         sql.prepare(`INSERT INTO tree (id, json) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET json = excluded.json`).run(JSON.stringify(root));
       }
       sql.close();
+    },
+  };
+}
+
+/** A Realtime Database instance name as Firebase takes it: 6–63 of a-z 0-9 -. */
+const INSTANCE = /^[a-z0-9][a-z0-9-]{4,61}[a-z0-9]$/;
+
+export function databaseService(ctx: EmulatorContext): Service {
+  const defaultId = `${ctx.projectId}-default-rtdb`;
+  const instances = new Map<string, DbInstance>([[defaultId, databaseInstance(ctx, defaultId, true)]]);
+  const listFile = ctx.dataDir === ':memory:' ? null : join(ctx.dataDir, 'database-instances.json');
+  const open = (id: string) => {
+    const d = databaseInstance(ctx, id, false);
+    instances.set(id, d);
+    return d;
+  };
+  if (listFile && existsSync(listFile)) for (const id of JSON.parse(readFileSync(listFile, 'utf8')) as string[]) open(id);
+  // A request names its instance with `ns` (the instance id); none is the default.
+  const instanceOf = (ns: unknown): DbInstance => {
+    const id = typeof ns === 'string' && ns && ns !== defaultId ? ns : defaultId;
+    const d = instances.get(id);
+    if (!d) throw new IceBaseError('not-found', `no Realtime Database instance '${id}' (create it with manageDatabase(app).createDb('${id}'))`);
+    return d;
+  };
+  const info = (id: string, origin: string) => ({ name: `projects/${ctx.projectId}/locations/icebase/instances/${id}`, id, databaseUrl: `${origin}?ns=${id}`, type: id === defaultId ? 'DEFAULT_DATABASE' : 'USER_DATABASE', state: 'ACTIVE' });
+  return {
+    async handle(req, url, caller) {
+      if (url.pathname.startsWith('/v1/db/')) {
+        const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+        return instanceOf(body.ns).handle(Object.assign(req, { _body: body }), url, caller);
+      }
+      return instances.get(defaultId)!.handle(req, url, caller);
+    },
+    async socket(live, msg) {
+      if (msg.t === 'unlisten') {
+        for (const d of instances.values()) await d.socket?.(live, msg);
+        return;
+      }
+      await instanceOf(msg.ns).socket?.(live, msg);
+    },
+    manage(op, b, req) {
+      const origin = req ? new URL(req.url).origin : ctx.origin;
+      switch (op) {
+        case 'listDbs':
+          return { instances: [...instances.keys()].map((id) => info(id, origin)) };
+        case 'createDb': {
+          const id = typeof b.id === 'string' ? b.id : defaultId;
+          if (id === defaultId) return info(id, origin);
+          if (!INSTANCE.test(id)) throw new IceBaseError('invalid-argument', `createDb('${id}'): an instance id is 6–63 characters of a-z, 0-9 and -`);
+          if (instances.has(id)) throw new IceBaseError('already-exists', `Realtime Database instance '${id}' already exists`);
+          open(id);
+          if (listFile) writeFileSync(listFile, JSON.stringify([...instances.keys()].filter((k) => k !== defaultId)));
+          return info(id, origin);
+        }
+        case 'setRules': {
+          const id = typeof b.instance === 'string' ? b.instance : defaultId;
+          const d = instanceOf(id);
+          const source = JSON.stringify(b.rules ?? { rules: {} });
+          loadDatabaseRules(source); // refuse rules it cannot read
+          ctx.deployedRules.set(`database:${id}`, source);
+          d.reloadRules();
+          return { rules: (b.rules as { rules: Record<string, unknown> } | undefined)?.rules ?? {} };
+        }
+      }
+      throw new IceBaseError('invalid-argument', `database: no management operation '${op}'`);
+    },
+    async close() {
+      for (const d of instances.values()) await d.close?.();
     },
   };
 }

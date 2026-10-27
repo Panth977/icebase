@@ -755,3 +755,68 @@ export function validateQueryValue(c: AnyCollection, path: readonly string[], op
   }
   if (ctx.issues.length) fail(c, `where(${showPath(path)}, '${op}', …)`, ctx.issues);
 }
+
+// ─── the schema as JSON (the management API sends it to an IceBase server) ─────
+
+type SchemaLike = Schema<Record<string, AnyCollection>, any, any>;
+
+/**
+ * The schema as plain JSON: everything in it is data except a ref's target collection, which
+ * becomes { $collection: key } (or the collection inline when it is not one of the schema's own).
+ */
+export function schemaToJson(schema: SchemaLike): unknown {
+  const keys = new Map<AnyCollection, string>(Object.entries(schema.collections).map(([k, c]) => [c, k]));
+  const field = (x: Field<unknown>, seen: Set<AnyCollection>): unknown => {
+    const d = x.def;
+    let def: unknown = d;
+    if (d.kind === 'ref') {
+      const key = keys.get(d.to);
+      def = { kind: 'ref', to: key !== undefined ? { $collection: key } : seen.has(d.to) ? { $path: d.to.path } : coll(d.to, new Set([...seen, d.to])) };
+    } else if (d.kind === 'array' || d.kind === 'record') def = { ...d, of: field(d.of, seen) };
+    else if (d.kind === 'union') def = { ...d, of: d.of.map((o) => field(o, seen)) };
+    else if (d.kind === 'map') def = { ...d, fields: fields(d.fields, seen), ...(d.rest ? { rest: field(d.rest, seen) } : {}) };
+    return { ...x, def };
+  };
+  const fields = (m: FieldMap, seen: Set<AnyCollection>) => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, field(v, seen)]));
+  const coll = (c: AnyCollection, seen: Set<AnyCollection>): unknown => ({ ...c, fields: fields(c.fields, seen), ...(c.rest ? { rest: field(c.rest, seen) } : {}) });
+  return {
+    collections: Object.fromEntries(Object.entries(schema.collections).map(([k, c]) => [k, coll(c, new Set([c]))])),
+    paths: Object.fromEntries(Object.entries(schema.paths ?? {}).map(([k, p]) => [k, { ...(p as AnyDbPath), value: field((p as AnyDbPath).value, new Set()) }])),
+    files: schema.files ?? {},
+  };
+}
+
+/** schemaToJson's output → a schema the validators and planners take. */
+export function schemaFromJson(json: unknown): SchemaLike {
+  const j = json as { collections?: Record<string, Record<string, unknown>>; paths?: Record<string, Record<string, unknown>>; files?: Record<string, AnyFilePath> };
+  if (!j || typeof j !== 'object' || !j.collections) throw new IceBaseError('invalid-argument', 'not a schema (schemaToJson output expected)', { reason: 'schema' });
+  const out: Record<string, AnyCollection> = {};
+  const byPath = new Map<string, AnyCollection>();
+  const pending: (() => void)[] = [];
+  const field = (x: Record<string, unknown>): Field<unknown> => {
+    const d = x.def as Record<string, unknown>;
+    const def = { ...d } as Record<string, unknown>;
+    if (d.kind === 'ref') {
+      const to = d.to as Record<string, unknown>;
+      if (typeof to.$collection === 'string') pending.push(() => (def.to = out[to.$collection as string]));
+      else if (typeof to.$path === 'string') pending.push(() => (def.to = byPath.get(to.$path as string)));
+      else def.to = coll(to);
+    } else if (d.kind === 'array' || d.kind === 'record') def.of = field(d.of as Record<string, unknown>);
+    else if (d.kind === 'union') def.of = (d.of as Record<string, unknown>[]).map(field);
+    else if (d.kind === 'map') {
+      def.fields = fields(d.fields as Record<string, Record<string, unknown>>);
+      if (d.rest) def.rest = field(d.rest as Record<string, unknown>);
+    }
+    return { ...x, def } as unknown as Field<unknown>;
+  };
+  const fields = (m: Record<string, Record<string, unknown>>): FieldMap => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, field(v)]));
+  const coll = (c: Record<string, unknown>): AnyCollection => {
+    const made = { ...c, fields: fields(c.fields as Record<string, Record<string, unknown>>), ...(c.rest ? { rest: field(c.rest as Record<string, unknown>) } : {}) } as unknown as AnyCollection;
+    byPath.set(made.path, made);
+    return made;
+  };
+  for (const [k, c] of Object.entries(j.collections)) out[k] = coll(c);
+  for (const p of pending) p();
+  const paths = Object.fromEntries(Object.entries(j.paths ?? {}).map(([k, p]) => [k, { ...p, value: field(p.value as Record<string, unknown>) } as unknown as AnyDbPath]));
+  return defineSchema(out, { paths, files: j.files ?? {} });
+}

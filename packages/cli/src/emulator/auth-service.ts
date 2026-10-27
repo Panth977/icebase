@@ -6,6 +6,8 @@
 import { createHmac, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { IceBaseError } from '@panth977/icebase/errors';
 import { json, type EmulatorContext, type Service } from './server.ts';
 import { Buffer } from 'node:buffer';
 
@@ -298,10 +300,21 @@ export function authService(ctx: EmulatorContext): Service {
     return session ? { ...u, customAttributes: JSON.stringify({ ...(u.customAttributes ? JSON.parse(u.customAttributes) : {}), ...session }) } : u;
   };
 
+  // ── sign-in methods (manageAuth(app).setProviders in emulator mode) ──────────
+  // Until set, every method works (as in Firebase's emulator); a method set to false is refused.
+  type Methods = { password?: boolean; emailLink?: boolean; phone?: boolean; anonymous?: boolean };
+  const cfgFile = ctx.dataDir === ':memory:' ? null : join(ctx.dataDir, 'auth-config.json');
+  const cfg: { providers: Methods | null; authorizedDomains: string[] } = cfgFile && existsSync(cfgFile) ? JSON.parse(readFileSync(cfgFile, 'utf8')) : { providers: null, authorizedDomains: ['localhost'] };
+  const saveCfg = () => cfgFile && writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
+  const method = (m: keyof Methods) => {
+    if (cfg.providers?.[m] === false) throw new AuthFail(m === 'password' ? 'PASSWORD_LOGIN_DISABLED' : 'OPERATION_NOT_ALLOWED');
+  };
+
   // ── the routes ──────────────────────────────────────────────────────────────
 
   const client: Record<string, (b: Record<string, unknown>) => unknown> = {
     async signUp(b) {
+      method(!b.email && !b.password ? 'anonymous' : 'password');
       if (!b.email && !b.password) return tokens(await signIn(await create(fresh({ isAnonymous: true }), 'anonymous'), 'anonymous'), 'anonymous');
       const email = String(b.email ?? '').toLowerCase();
       if (!/^[^@\s]+@[^@\s]+$/.test(email)) throw new AuthFail('INVALID_EMAIL');
@@ -315,6 +328,7 @@ export function authService(ctx: EmulatorContext): Service {
       return tokens(await signIn(anon ? save(u) : await create(u, 'password'), 'password'), 'password');
     },
     async signInWithPassword(b) {
+      method('password');
       const u = getByEmail(String(b.email ?? ''));
       if (!u || !checkPw(String(b.password ?? ''), u.passwordHash)) throw new AuthFail(u ? 'INVALID_PASSWORD' : 'EMAIL_NOT_FOUND');
       return tokens(await signIn(live(u), 'password'), 'password');
@@ -375,6 +389,7 @@ export function authService(ctx: EmulatorContext): Service {
     },
     async sendOobCode(b) {
       const kind = String(b.requestType);
+      if (kind === 'EMAIL_SIGNIN') method('emailLink');
       const cont = b.continueUrl as string | undefined;
       if (kind === 'VERIFY_EMAIL' || kind === 'VERIFY_AND_CHANGE_EMAIL') {
         const u = live(fromIdToken(b.idToken));
@@ -409,6 +424,7 @@ export function authService(ctx: EmulatorContext): Service {
       return { email: r.email, requestType: 'PASSWORD_RESET' };
     },
     async signInWithEmailLink(b) {
+      method('emailLink');
       const r = takeOob(b.oobCode, 'EMAIL_SIGNIN');
       const email = String(b.email ?? '').toLowerCase();
       if (r.email !== email) throw new AuthFail('INVALID_EMAIL');
@@ -434,6 +450,7 @@ export function authService(ctx: EmulatorContext): Service {
       return { kind: 'identitytoolkit#DeleteAccountResponse' };
     },
     sendVerificationCode(b) {
+      method('phone');
       const phone = String(b.phoneNumber ?? '');
       if (!/^\+[1-9]\d{7,14}$/.test(phone)) throw new AuthFail('INVALID_PHONE_NUMBER');
       const sessionInfo = randomBytes(18).toString('base64url');
@@ -441,6 +458,7 @@ export function authService(ctx: EmulatorContext): Service {
       return { sessionInfo };
     },
     async signInWithPhoneNumber(b) {
+      method('phone');
       const r = q.codeGet.get(String(b.sessionInfo ?? '')) as { phone: string; code: string } | undefined;
       if (!r) throw new AuthFail('INVALID_SESSION_INFO');
       if (r.code !== String(b.code)) throw new AuthFail('INVALID_CODE');
@@ -534,6 +552,24 @@ export function authService(ctx: EmulatorContext): Service {
   };
 
   return {
+    manage(op, b) {
+      switch (op) {
+        case 'setProviders': {
+          const next: Methods = { ...(cfg.providers ?? {}) };
+          for (const k of ['password', 'emailLink', 'phone', 'anonymous'] as const) if (typeof b[k] === 'boolean') next[k] = b[k] as boolean;
+          cfg.providers = next;
+          saveCfg();
+          return { ok: true };
+        }
+        case 'setAuthorizedDomains':
+          cfg.authorizedDomains = ((b.domains as string[] | undefined) ?? []).map(String);
+          saveCfg();
+          return { ok: true };
+        case 'getConfig':
+          return { emulator: true, signIn: cfg.providers ?? 'every method', authorizedDomains: cfg.authorizedDomains };
+      }
+      throw new IceBaseError('invalid-argument', `auth: no management operation '${op}'`);
+    },
     async handle(req, url, caller) {
       const path = url.pathname;
       try {

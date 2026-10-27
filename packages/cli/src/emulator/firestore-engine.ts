@@ -215,7 +215,6 @@ export class FirestoreEngine {
       CREATE INDEX IF NOT EXISTS docs_coll ON docs (coll, path);
       CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
     `);
-    this.colls.push(...Object.values(opts.schema.collections));
     this.version = Number((this.db.prepare(`SELECT MAX(version) v FROM docs`).get() as { v: number | null }).v ?? 0);
     this.stmts = {
       get: this.db.prepare(`SELECT * FROM docs WHERE path = ?`),
@@ -224,6 +223,14 @@ export class FirestoreEngine {
       del: this.db.prepare(`DELETE FROM docs WHERE path = ?`),
       count: this.db.prepare(`SELECT COUNT(*) n FROM docs`),
     };
+    this.setSchema(opts.schema);
+  }
+
+  /** The schema the engine plans queries with: its declared indexes are built, earlier ones dropped. */
+  setSchema(schema: Schema<Record<string, AnyCollection>, any, any>): void {
+    this.colls.length = 0;
+    this.colls.push(...Object.values(schema.collections));
+    this.sqlIndexes.length = 0;
     const wanted = new Set<string>();
     for (const c of this.colls) this.ensureIndexes(c, wanted);
     // Indexes from an earlier schema (an index removed or changed) go.
