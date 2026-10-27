@@ -448,8 +448,8 @@ export function authService(ctx: EmulatorContext): Service {
       if (u.isAnonymous) u.isAnonymous = false;
       u = isNewUser ? await create(u, providerId) : save(u);
       return {
-        kind: 'identitytoolkit#VerifyAssertionResponse',
         ...tokens(await signIn(live(u), providerId), providerId),
+        kind: 'identitytoolkit#VerifyAssertionResponse',
         providerId,
         federatedId: sub,
         localId: u.localId,
