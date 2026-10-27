@@ -57,12 +57,14 @@ export async function buildFunctions(config: AnyConfig, env: string, root: strin
     ...(entryFile ? [`export * from ${JSON.stringify(entryFile)};`] : []),
     ...(custom
       ? [
-          `import { icebaseAuth as __icebaseAuth } from '@panth977/icebase-server/functions';`,
+          `import { icebaseAuth as __icebaseAuth, icebaseAuthCleanup as __icebaseAuthCleanup } from '@panth977/icebase-server/functions';`,
           `import __config from ${JSON.stringify(configFile)};`,
           ...(entryFile ? [`import * as __user from ${JSON.stringify(entryFile)};`] : []),
           // sendEmail / sendPhoneCode: the senders for `sender: 'handler'`, when the functions source exports them.
           `const __own = ${entryFile ? '__user as Record<string, any>' : '{} as Record<string, any>'};`,
           `export const icebaseAuth = __icebaseAuth(__config, ${JSON.stringify(env)}, { senders: { email: __own['sendEmail'], phone: __own['sendPhoneCode'] } });`,
+          // Once a day: expired challenges, counters, blocks and old audit entries leave the store.
+          `export const icebaseAuthCleanup = __icebaseAuthCleanup(__config, ${JSON.stringify(env)});`,
         ]
       : []),
   ];
@@ -91,7 +93,7 @@ export async function buildFunctions(config: AnyConfig, env: string, root: strin
     logLevel: 'warning',
   });
   writeFileSync(join(out, 'package.json'), JSON.stringify({ name: `${config.name}-functions`, private: true, type: 'module', main: 'index.js', engines: { node: (fnCfg?.runtime ?? 'nodejs22').replace('nodejs', '') }, dependencies: deps }, null, 2) + '\n');
-  log(`functions bundled → ${relative(root, out)}/index.js${custom ? ' (+ icebaseAuth)' : ''}`);
+  log(`functions bundled → ${relative(root, out)}/index.js${custom ? ' (+ icebaseAuth, icebaseAuthCleanup)' : ''}`);
   return out;
 }
 

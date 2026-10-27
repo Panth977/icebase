@@ -70,6 +70,8 @@ export interface CustomAuthConfig {
     };
     challenge?: { ttlMinutes?: number; maxAttempts?: number };
     blockMinutes?: number;
+    /** Days the audit trail keeps an entry (the scheduled icebaseAuthCleanup removes older ones). Default 30. */
+    auditDays?: number;
     /** e.g. emailDomains: ['acme.com'], phonePrefixes: ['+91', '+1']. Default: everything. */
     allow?: { emailDomains?: string[]; phonePrefixes?: string[] };
   };

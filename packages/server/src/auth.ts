@@ -68,6 +68,16 @@ interface Challenge {
   createdAt: number;
 }
 
+/** What the audit trail records. */
+export type AuditEvent = 'start' | 'limited' | 'wrong-code' | 'burned' | 'refused-blocked' | 'blocked' | 'signed-in';
+export interface AuditEntry {
+  at: number;
+  event: AuditEvent;
+  channel?: 'email' | 'phone';
+  ip?: string;
+  device?: string;
+}
+
 class Fail extends Error {
   constructor(
     readonly code: AuthErrorCode,
@@ -90,6 +100,14 @@ const same = (hash: string | undefined, value: string) => {
 };
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const E164 = /^\+[1-9]\d{7,14}$/;
+
+/** The security store of an admin app: the Realtime Database instance config.auth.custom.security.store names. */
+async function appStore(config: AnyConfig, app: IceBaseApp): Promise<Store> {
+  const sec = config.auth?.custom?.security ?? {};
+  const [{ getDatabase, getDatabaseWithUrl }, { nativeAdminApp }] = await Promise.all([import('firebase-admin/database'), import('./internal/firebase-admin-app.ts')]);
+  const instance = sec.store?.database && sec.store.database !== 'default' ? `https://${sec.store.database}.firebaseio.com` : undefined;
+  return rtdbStore(instance ? getDatabaseWithUrl(instance, nativeAdminApp(app)) : getDatabase(nativeAdminApp(app)));
+}
 
 /** A readable device name from a user agent: "Chrome on macOS". */
 export function describeDevice(ua: string): string {
@@ -134,9 +152,7 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
   const db = async (): Promise<Store> => {
     if (store) return store;
     if (!opts.app) return (store = memoryStore());
-    const [{ getDatabase, getDatabaseWithUrl }, { nativeAdminApp }] = await Promise.all([import('firebase-admin/database'), import('./internal/firebase-admin-app.ts')]);
-    const instance = sec.store?.database && sec.store.database !== 'default' ? `https://${sec.store.database}.firebaseio.com` : undefined;
-    return (store = rtdbStore(instance ? getDatabaseWithUrl(instance, nativeAdminApp(opts.app)) : getDatabase(nativeAdminApp(opts.app))));
+    return (store = await appStore(config, opts.app));
   };
 
   const sendEmail = (): EmailSendFn => {
@@ -170,15 +186,29 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
     if (r.value && r.value.n > limit) throw new Fail('auth/too-many-requests', 'Too many attempts. Try again later.', 429, Math.max(1, Math.ceil((r.value.until - now()) / 1000)));
   };
   const H = 3_600_000;
-  const limitStart = async (channel: 'email' | 'phone', identifier: string, ip: string | null) => {
+  const limitStart = async (channel: 'email' | 'phone', identifier: string, ctx: { ip: string | null; device: string }) => {
     const l = sec.limits ?? {};
-    await hit('id-hour', identifier, l.perIdentifier?.perHour ?? 5, H);
-    await hit('id-day', identifier, l.perIdentifier?.perDay ?? 20, 24 * H);
-    if (ip) await hit('ip-hour', ip, l.perIp?.perHour ?? 30, H);
-    const global = channel === 'phone' ? l.global?.phoneSendsPerDay : l.global?.emailSendsPerDay;
-    await hit(`global-${channel}`, 'all', global, 24 * H);
+    try {
+      await hit('id-hour', identifier, l.perIdentifier?.perHour ?? 5, H);
+      await hit('id-day', identifier, l.perIdentifier?.perDay ?? 20, 24 * H);
+      if (ctx.ip) await hit('ip-hour', ctx.ip, l.perIp?.perHour ?? 30, H);
+      const global = channel === 'phone' ? l.global?.phoneSendsPerDay : l.global?.emailSendsPerDay;
+      await hit(`global-${channel}`, 'all', global, 24 * H);
+    } catch (e) {
+      await audit(identifier, 'limited', { channel, ...ctx });
+      throw e;
+    }
+    await audit(identifier, 'start', { channel, ...ctx });
   };
   const blockKey = (identifier: string, deviceSig: string) => `${root}/blocks/${short(identifier)}_${deviceSig}`;
+
+  // ── audit trail: starts, failures and blocks per identifier (getAuthSecurity(app).listAttempts) ──
+
+  const audit = async (identifier: string, event: AuditEvent, at: { channel?: 'email' | 'phone'; ip?: string | null; device?: string } = {}) => {
+    const t = now();
+    const entry: AuditEntry = { at: t, event, ...(at.channel ? { channel: at.channel } : {}), ...(at.ip ? { ip: at.ip } : {}), ...(at.device ? { device: at.device } : {}) };
+    await (await db()).set(`${root}/audit/${short(identifier)}/${t.toString(36).padStart(9, '0')}${randomBytes(3).toString('hex')}`, entry);
+  };
 
   // ── challenges ─────────────────────────────────────────────────────────────
 
@@ -209,7 +239,9 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
     if (!/^\d{4,10}$/.test(code)) throw new Fail('auth/invalid-verification-code', 'The code is not valid.');
     if (same(c.codeHash, code)) return c;
     const r = await (await db()).transaction<Challenge>(`${root}/challenge/${id}`, (cur) => (cur ? { ...cur, attempts: cur.attempts + 1 } : cur));
+    await audit(c.identifier, 'wrong-code', { channel: c.channel, ip: c.ip, device: c.device });
     if ((r.value?.attempts ?? maxAttempts) >= maxAttempts) {
+      await audit(c.identifier, 'burned', { channel: c.channel, ip: c.ip, device: c.device });
       await burn(id);
       throw new Fail('auth/too-many-requests', 'Too many wrong codes. Ask for a new one.', 429);
     }
@@ -307,9 +339,12 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
       const email = checkEmail(b.email);
       if (await (await db()).get(blockKey(email, ctx.deviceSig))) {
         const until = (await (await db()).get<number>(blockKey(email, ctx.deviceSig)))!;
-        if (until > now()) throw new Fail('auth/too-many-requests', 'This device was turned away for this account a moment ago. Try again later.', 429, Math.ceil((until - now()) / 1000));
+        if (until > now()) {
+          await audit(email, 'refused-blocked', { channel: 'email', ip: ctx.ip, device: ctx.device });
+          throw new Fail('auth/too-many-requests', 'This device was turned away for this account a moment ago. Try again later.', 429, Math.ceil((until - now()) / 1000));
+        }
       }
-      await limitStart('email', email, ctx.ip);
+      await limitStart('email', email, ctx);
       const mode = custom.email?.signIn ?? 'link';
       if (mode === 'approval') {
         const approval = secret();
@@ -336,12 +371,14 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
       const [id, c] = await open(String(b.token ?? ''), 'linkHash');
       if (c.identifier !== email) throw new Fail('auth/invalid-action-code', 'This link was sent to a different email address.');
       await burn(id);
+      await audit(email, 'signed-in', { channel: 'email', ip: c.ip, device: c.device });
       return { token: await token(await userForEmail(email)) };
     },
     async 'POST /email/code'(b) {
       const id = String(b.signinId ?? '');
       const c = await attempt(id, String(b.code ?? ''));
       await burn(id);
+      await audit(c.identifier, 'signed-in', { channel: 'email', ip: c.ip, device: c.device });
       return { token: await token(await userForEmail(c.identifier)) };
     },
     async 'POST /email/collect'(b) {
@@ -362,6 +399,7 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
       try {
         const t = await token(await userForEmail(c.identifier));
         await burn(id);
+        await audit(c.identifier, 'signed-in', { channel: 'email', ip: c.ip, device: c.device });
         return { state: 'approved', token: t };
       } catch (e) {
         await (await db()).update(`${root}/challenge/${id}`, { claimed: null });
@@ -382,6 +420,7 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
       await s.update(`${root}/challenge/${id}`, { state: 'revoked' });
       await s.update(`${root}/signin/${id}`, { state: 'revoked' });
       await s.set(blockKey(c.identifier, c.deviceSig), now() + blockMs);
+      await audit(c.identifier, 'blocked', { channel: c.channel, ip: c.ip, device: c.device });
       return { state: 'revoked' };
     },
     async 'POST /email/cancel'(b) {
@@ -394,7 +433,7 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
     // password reset and email verification (Firebase's action-code shape: mode + oobCode)
     async 'POST /reset/start'(b, ctx) {
       const email = checkEmail(b.email);
-      await limitStart('email', email, ctx.ip);
+      await limitStart('email', email, ctx);
       let uid: string | undefined;
       try {
         uid = (await (await directory()).getUserByEmail(email)).uid;
@@ -433,7 +472,7 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
       }
       const email = decoded.email;
       if (!email) throw new Fail('auth/invalid-email', 'This account has no email address.');
-      await limitStart('email', email, ctx.ip);
+      await limitStart('email', email, ctx);
       const s = secret();
       const id = await issue({ channel: 'email', purpose: 'verifyEmail', mode: 'link', identifier: email, uid: decoded.uid, linkHash: sha(s), device: ctx.device, deviceSig: ctx.deviceSig, ip: ctx.ip, site });
       const params: Record<string, string> = { mode: 'verifyEmail', oobCode: `${id}.${s}` };
@@ -455,7 +494,7 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
     // phone
     async 'POST /phone/start'(b, ctx) {
       const phone = checkPhone(b.phoneNumber);
-      await limitStart('phone', phone, ctx.ip);
+      await limitStart('phone', phone, ctx);
       const c = code(custom.phone?.codeLength ?? 6);
       const id = await issue({ channel: 'phone', purpose: 'signIn', mode: 'code', identifier: phone, codeHash: sha(c), device: ctx.device, deviceSig: ctx.deviceSig, ip: ctx.ip, site });
       await sendPhone()({ to: phone, code: c, site, minutes, rendered: T.phoneCode({ site, code: c, device: ctx.device, minutes }) });
@@ -465,6 +504,7 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
       const id = String(b.verificationId ?? '');
       const c = await attempt(id, String(b.code ?? ''));
       await burn(id);
+      await audit(c.identifier, 'signed-in', { channel: 'phone', ip: c.ip, device: c.device });
       return { token: await token(await userForPhone(c.identifier)) };
     },
   };
@@ -616,4 +656,171 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
       return json({ error: { code: 'auth/internal-error', message: 'Something went wrong. Try again.' } }, 500);
     }
   };
+}
+
+// ─── admin: the security store and identity links ──────────────────────────────
+
+/** What one identifier (an email or phone number) has been doing, and what holds it back. */
+export interface IdentifierActivity {
+  identifier: string;
+  /** Rate-limit counters still running: rule, count, and when the window ends. */
+  limits: { rule: string; count: number; resetsAt: number }[];
+  /** Devices turned away ("this wasn't me" on the approval page), until when. */
+  blocks: { device: string; until: number }[];
+  /** The audit trail, newest first. */
+  attempts: AuditEntry[];
+}
+
+export interface AuthSecurity {
+  /** Lift every block on this identifier (all devices). */
+  unblock(identifier: string): Promise<{ removed: number }>;
+  /** Its counters, blocks and audit trail. */
+  listAttempts(identifier: string): Promise<IdentifierActivity>;
+  /** Clear its per-identifier rate-limit counters (sends can start again at once). */
+  resetLimits(identifier: string): Promise<{ removed: number }>;
+  /** Remove what has expired: challenges, counters, blocks, and audit entries older than security.auditDays (30). */
+  cleanup(): Promise<{ removed: number }>;
+}
+
+export type CustomIdentity = { email: string } | { phone: string } | { google: string };
+
+/** An email lower-cased, a phone number without spaces — as the handler keys them. */
+const normalizeIdentifier = (id: string) => (id.includes('@') ? id.trim().toLowerCase() : id.replace(/[\s()-]/g, ''));
+
+/** The security operations over a store (shared by firebase mode and the IceBase server). */
+export function authSecurityOps(config: AnyConfig, store: Store, directory: () => Promise<AuthDirectory>, now: () => number = Date.now): AuthSecurity & {
+  link(uid: string, id: CustomIdentity): Promise<{ uid: string }>;
+  unlink(uid: string, kind: 'email' | 'phone' | 'google'): Promise<{ uid: string }>;
+} {
+  const sec = config.auth?.custom?.security ?? {};
+  const root = (sec.store?.path ?? STORE_DEFAULT_PATH).replace(/^\/|\/$/g, '');
+  const auditMs = (sec.auditDays ?? 30) * 86_400_000;
+  const map = async <T>(path: string) => (await store.get<Record<string, T>>(path)) ?? {};
+  const googleLinks = async (uid: string) => Object.entries(await map<string>(`${root}/identities/google`)).filter(([, u]) => u === uid).map(([k]) => k);
+  return {
+    async unblock(identifier) {
+      const prefix = `${short(normalizeIdentifier(identifier))}_`;
+      const keys = Object.keys(await map(`${root}/blocks`)).filter((k) => k.startsWith(prefix));
+      for (const k of keys) await store.remove(`${root}/blocks/${k}`);
+      return { removed: keys.length };
+    },
+    async resetLimits(identifier) {
+      const key = short(normalizeIdentifier(identifier));
+      let removed = 0;
+      for (const rule of ['id-hour', 'id-day']) {
+        if (await store.get(`${root}/rl/${rule}/${key}`)) {
+          await store.remove(`${root}/rl/${rule}/${key}`);
+          removed++;
+        }
+      }
+      return { removed };
+    },
+    async listAttempts(identifier) {
+      const id = normalizeIdentifier(identifier);
+      const key = short(id);
+      const t = now();
+      const limits: IdentifierActivity['limits'] = [];
+      for (const rule of ['id-hour', 'id-day']) {
+        const c = await store.get<{ n: number; until: number }>(`${root}/rl/${rule}/${key}`);
+        if (c && c.until > t) limits.push({ rule, count: c.n, resetsAt: c.until });
+      }
+      const blocks = Object.entries(await map<number>(`${root}/blocks`))
+        .filter(([k, until]) => k.startsWith(`${key}_`) && until > t)
+        .map(([k, until]) => ({ device: k.slice(key.length + 1), until }));
+      const attempts = Object.entries(await map<AuditEntry>(`${root}/audit/${key}`))
+        .sort(([a], [b]) => (a < b ? 1 : -1))
+        .map(([, e]) => e);
+      return { identifier: id, limits, blocks, attempts };
+    },
+    async cleanup() {
+      const t = now();
+      let removed = 0;
+      const drop = async (path: string) => {
+        await store.remove(path);
+        removed++;
+      };
+      for (const [id, c] of Object.entries(await map<{ expiresAt?: number }>(`${root}/challenge`))) if ((c.expiresAt ?? 0) <= t) await drop(`${root}/challenge/${id}`);
+      for (const [id, c] of Object.entries(await map<{ expiresAt?: number }>(`${root}/signin`))) if ((c.expiresAt ?? 0) <= t) await drop(`${root}/signin/${id}`);
+      for (const [rule, keys] of Object.entries(await map<Record<string, { until: number }>>(`${root}/rl`))) for (const [k, c] of Object.entries(keys ?? {})) if (c.until <= t) await drop(`${root}/rl/${rule}/${k}`);
+      for (const [k, until] of Object.entries(await map<number>(`${root}/blocks`))) if (until <= t) await drop(`${root}/blocks/${k}`);
+      for (const [who, entries] of Object.entries(await map<Record<string, AuditEntry>>(`${root}/audit`))) for (const [k, e] of Object.entries(entries ?? {})) if (e.at <= t - auditMs) await drop(`${root}/audit/${who}/${k}`);
+      for (const [id, st] of Object.entries(await map<{ expiresAt?: number }>(`${root}/oauth`))) if ((st.expiresAt ?? 0) <= t) await drop(`${root}/oauth/${id}`);
+      return { removed };
+    },
+    async link(uid, id) {
+      const d = await directory();
+      await d.getUser(uid);
+      if ('email' in id) {
+        const email = normalizeIdentifier(id.email);
+        if (!EMAIL.test(email)) throw new Fail('auth/invalid-email', 'That email address is not valid.');
+        await d.updateUser(uid, { email, emailVerified: true });
+      } else if ('phone' in id) {
+        const phone = normalizeIdentifier(id.phone);
+        if (!E164.test(phone)) throw new Fail('auth/invalid-phone-number', 'Use the full number with country code, e.g. +919812345678.');
+        await d.updateUser(uid, { phoneNumber: phone });
+      } else {
+        const path = `${root}/identities/google/${short(String(id.google))}`;
+        const cur = await store.get<string>(path);
+        if (cur && cur !== uid) throw new Fail('auth/credential-already-in-use', 'This Google account is already linked to another user.', 409);
+        await store.set(path, uid);
+      }
+      return { uid };
+    },
+    async unlink(uid, kind) {
+      const d = await directory();
+      const u = await d.getUser(uid);
+      const google = await googleLinks(uid);
+      const has = { email: !!u.email, phone: !!u.phoneNumber, google: google.length > 0 };
+      if (!has[kind]) throw new Fail('auth/no-such-provider', `This account has no ${kind} to remove.`);
+      // Never the last one: an account nothing can prove is an account nobody can open again.
+      if (Object.entries(has).filter(([k, v]) => v && k !== kind).length === 0) {
+        throw new Fail('auth/operation-not-allowed', 'That is the only way into this account. Link another identity first.', 409);
+      }
+      if (kind === 'email') throw new Fail('auth/operation-not-allowed', "Firebase Auth cannot remove an account's email; change it with linkCustomIdentity(uid, { email }).");
+      if (kind === 'phone') await d.updateUser(uid, { phoneNumber: null as never });
+      else for (const k of google) await store.remove(`${root}/identities/google/${k}`);
+      return { uid };
+    },
+  };
+}
+
+/** On the IceBase server (emulator mode): the custom-auth service's management API. */
+async function onServer<T>(app: IceBaseApp, op: string, body: Record<string, unknown>): Promise<T> {
+  const { emulatorFetch, emulatorOrigin } = await import('@panth977/icebase/app');
+  const token = app.options.emulator?.adminToken ?? (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.ICEBASE_ADMIN_TOKEN ?? 'owner';
+  const res = await emulatorFetch(`${emulatorOrigin(app)}/__/icebase/admin/manage/customAuth/${op}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+  const j = (await res.json().catch(() => ({}))) as { error?: { code: string; message: string; details?: { authCode?: string } } } & T;
+  if (!res.ok || j.error) throw Object.assign(new Error(j.error?.message ?? `customAuth.${op}: ${res.status}`), { code: j.error?.details?.authCode ?? j.error?.code ?? 'internal' });
+  return j;
+}
+
+async function securityOf(app: IceBaseApp) {
+  if (app.kind !== 'admin') throw new Fail('auth/argument-error', 'getAuthSecurity needs an admin app (initializeAdminApp)');
+  const { getAdminAuth } = await import('./admin.ts');
+  return authSecurityOps(app.config as AnyConfig, await appStore(app.config as AnyConfig, app), async () => getAdminAuth(app) as unknown as AuthDirectory);
+}
+
+/** Custom auth's security store, for an admin (docs/prd/custom-auth.html): unblock, listAttempts, resetLimits, cleanup. */
+export function getAuthSecurity(app: IceBaseApp): AuthSecurity {
+  const emu = app.modes.auth === 'emulator';
+  const call = <T>(op: keyof AuthSecurity, identifier?: string): Promise<T> =>
+    emu ? onServer<T>(app, op, identifier !== undefined ? { identifier } : {}) : securityOf(app).then((s) => (identifier !== undefined ? (s[op] as (x: string) => Promise<T>)(identifier) : (s[op] as () => Promise<T>)()));
+  return {
+    unblock: (identifier) => call('unblock', identifier),
+    listAttempts: (identifier) => call('listAttempts', identifier),
+    resetLimits: (identifier) => call('resetLimits', identifier),
+    cleanup: () => call('cleanup'),
+  };
+}
+
+/** Attach a verified identity to an existing account: { email }, { phone } or { google: <Google subject id> }. */
+export async function linkCustomIdentity(app: IceBaseApp, uid: string, identity: CustomIdentity): Promise<{ uid: string }> {
+  if (app.modes.auth === 'emulator') return onServer(app, 'link', { uid, identity });
+  return (await securityOf(app)).link(uid, identity);
+}
+
+/** Take an identity off an account — never its last one. Firebase Auth cannot remove an email (change it instead). */
+export async function unlinkCustomIdentity(app: IceBaseApp, uid: string, kind: 'email' | 'phone' | 'google'): Promise<{ uid: string }> {
+  if (app.modes.auth === 'emulator') return onServer(app, 'unlink', { uid, kind });
+  return (await securityOf(app)).unlink(uid, kind);
 }

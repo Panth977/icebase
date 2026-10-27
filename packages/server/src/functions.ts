@@ -506,3 +506,13 @@ export function icebaseAuth<Cfg extends IceBaseConfig<any, any>>(
   };
   return onRequest({ cors: false, ...opts.https }, lazy);
 }
+
+/** The `icebaseAuthCleanup` function: once a day, custom auth's store loses what has expired — challenges, counters, blocks, and audit entries older than security.auditDays. `icebase deploy` adds it with icebaseAuth. */
+export function icebaseAuthCleanup<Cfg extends IceBaseConfig<any, any>>(config: Cfg, env: EnvOf<Cfg>, opts: { schedule?: string } = {}): scheduler.ScheduleFunction {
+  return onSchedule(opts.schedule ?? 'every 24 hours', async () => {
+    const [{ getAuthSecurity }, { initializeAdminApp }] = await Promise.all([import('./auth.ts'), import('./admin.ts')]);
+    const app = initializeAdminApp(config as AnyConfig, env, { name: 'icebase-auth-cleanup' });
+    const { removed } = await getAuthSecurity(app).cleanup();
+    console.log(`icebaseAuthCleanup: ${removed} expired entries removed`);
+  });
+}

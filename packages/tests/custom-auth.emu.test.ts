@@ -22,7 +22,7 @@ import {
   waitForEmailApproval,
   type Auth,
 } from '@panth977/icebase/auth';
-import { createAuthHandler, customAuthDatabaseRules, type EmailMessage, type PhoneMessage } from '@panth977/icebase-server/auth';
+import { createAuthHandler, customAuthDatabaseRules, getAuthSecurity, linkCustomIdentity, unlinkCustomIdentity, type EmailMessage, type PhoneMessage } from '@panth977/icebase-server/auth';
 import { defineConfig, type CustomAuthConfig } from '@panth977/icebase/config';
 import { serve } from '@panth977/icebase-server/internal';
 import { defineSchema } from '@panth977/icebase/schema';
@@ -210,6 +210,34 @@ describe('custom auth · firebase mode', () => {
     await link.adminAuth.updateUser(u.uid, { disabled: true });
     await sendSignInLinkToEmail(link.auth, email, { url: 'http://localhost/x', handleCodeInApp: true });
     await expect(signInWithEmailLink(link.auth, email, lastMail(email).link!)).rejects.toMatchObject({ code: 'auth/user-disabled' });
+  });
+
+  it('admin: getAuthSecurity reads the audit trail and counters from the Realtime Database; resetLimits, unblock, cleanup', async () => {
+    const email = `sec-${Date.now()}@example.com`;
+    const flow = customEmailAuth(code.auth);
+    await flow.start(email);
+    await expect(flow.verifyCode('000000')).rejects.toBeTruthy();
+    await flow.verifyCode(lastMail(email).code!);
+    await signOut(code.auth);
+    const sec = getAuthSecurity(code.admin);
+    const a = await sec.listAttempts(email.toUpperCase());
+    expect(a.attempts.map((e) => e.event)).toEqual(['signed-in', 'wrong-code', 'start']);
+    expect(a.limits.map((l) => l.rule).sort()).toEqual(['id-day', 'id-hour']);
+    expect((await sec.resetLimits(email)).removed).toBe(2);
+    expect((await sec.listAttempts(email)).limits).toEqual([]);
+    expect((await sec.unblock(email)).removed).toBe(0);
+    expect((await sec.cleanup()).removed).toBeGreaterThanOrEqual(0);
+  });
+
+  it('admin: link a phone and a Google account to a user; unlink, never the last one', async () => {
+    const u = await code.adminAuth.createUser({ email: `lk-${Date.now()}@example.com`, emailVerified: true });
+    await linkCustomIdentity(code.admin, u.uid, { phone: '+919800000001' });
+    expect((await code.adminAuth.getUser(u.uid)).phoneNumber).toBe('+919800000001');
+    await linkCustomIdentity(code.admin, u.uid, { google: `sub-${u.uid}` });
+    await unlinkCustomIdentity(code.admin, u.uid, 'phone');
+    expect((await code.adminAuth.getUser(u.uid)).phoneNumber).toBeUndefined();
+    await unlinkCustomIdentity(code.admin, u.uid, 'google');
+    await expect(unlinkCustomIdentity(code.admin, u.uid, 'email')).rejects.toMatchObject({ code: 'auth/operation-not-allowed' });
   });
 
   it('generates database rules that hide the store', () => {

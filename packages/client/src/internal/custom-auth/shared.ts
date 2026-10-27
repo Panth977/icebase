@@ -28,6 +28,8 @@ export type AuthErrorCode =
   | 'auth/operation-not-allowed'
   | 'auth/unauthorized-domain'
   | 'auth/weak-password'
+  | 'auth/credential-already-in-use'
+  | 'auth/no-such-provider'
   | 'auth/invalid-id-token'
   | 'auth/argument-error'
   | 'auth/internal-error'
