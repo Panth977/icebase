@@ -18,6 +18,16 @@ import {
   signOut,
   updateProfile,
   confirmPasswordReset,
+  EmailAuthProvider,
+  GoogleAuthProvider,
+  inMemoryPersistence,
+  linkWithCredential,
+  onIdTokenChanged,
+  reauthenticateWithCredential,
+  setPersistence,
+  signInWithCredential,
+  updateEmail,
+  updatePassword,
   type Auth,
 } from '@panth977/icebase/auth';
 import { defineConfig, type Mode } from '@panth977/icebase/config';
@@ -132,6 +142,72 @@ describe(`auth · ${name}`, () => {
     expect(c.user.uid).toBe('custom-uid-1');
     const a = await signInAnonymously(auth);
     expect(a.user.isAnonymous).toBe(true);
+  });
+
+  it('admin: users by email and phone number, and the whole list', async () => {
+    const adminAuth = getAdminAuth(admin);
+    const email = `look-${Date.now()}@example.com`;
+    const u = await adminAuth.createUser({ email, phoneNumber: `+1555${String(Date.now()).slice(-7)}`, displayName: 'Look' });
+    expect((await adminAuth.getUserByEmail(email)).uid).toBe(u.uid);
+    expect((await adminAuth.getUserByPhoneNumber(u.phoneNumber!)).uid).toBe(u.uid);
+    await expect(adminAuth.getUserByEmail(`none-${Date.now()}@example.com`)).rejects.toMatchObject({ code: 'auth/user-not-found' });
+    const page = await adminAuth.listUsers(1000);
+    expect(page.users.some((x) => x.uid === u.uid)).toBe(true);
+  });
+
+  it('admin: action links — sign-in, password reset and verification — work in the client', async () => {
+    const adminAuth = getAdminAuth(admin);
+    const email = `links-${Date.now()}@example.com`;
+    await adminAuth.createUser({ email, password: 'secret12' });
+    const signIn = await adminAuth.generateSignInWithEmailLink(email, { url: 'http://localhost/finish', handleCodeInApp: true });
+    expect(isSignInWithEmailLink(auth, signIn)).toBe(true);
+    expect((await signInWithEmailLink(auth, email, signIn)).user.email).toBe(email);
+    await signOut(auth);
+    const reset = await adminAuth.generatePasswordResetLink(email);
+    await confirmPasswordReset(auth, new URL(reset).searchParams.get('oobCode')!, 'newpass12');
+    expect((await signInWithEmailAndPassword(auth, email, 'newpass12')).user.email).toBe(email);
+    const verify = await adminAuth.generateEmailVerificationLink(email);
+    expect(new URL(verify).searchParams.get('mode')).toBe('verifyEmail');
+    await signOut(auth);
+  });
+
+  it('client: persistence, onIdTokenChanged, update and re-authenticate the password, change the email', async () => {
+    await setPersistence(auth, inMemoryPersistence);
+    const email = `client-${Date.now()}@example.com`;
+    const seen: (string | null)[] = [];
+    const off = onIdTokenChanged(auth, (u) => void seen.push(u?.email ?? null));
+    const { user } = await createUserWithEmailAndPassword(auth, email, 'first123');
+    await updatePassword(user, 'second123');
+    await reauthenticateWithCredential(user, EmailAuthProvider.credential(email, 'second123'));
+    await expect(reauthenticateWithCredential(user, EmailAuthProvider.credential(email, 'first123'))).rejects.toBeTruthy();
+    const next = `client2-${Date.now()}@example.com`;
+    await updateEmail(user, next);
+    expect(auth.currentUser?.email).toBe(next);
+    off();
+    expect(seen).toContain(email);
+    await signOut(auth);
+  });
+
+  it('anonymous upgrade: linkWithCredential keeps the uid', async () => {
+    const anon = await signInAnonymously(auth);
+    const email = `upgrade-${Date.now()}@example.com`;
+    const linked = await linkWithCredential(anon.user, EmailAuthProvider.credential(email, 'upgrade1'));
+    expect(linked.user.uid).toBe(anon.user.uid);
+    expect(linked.user.isAnonymous).toBe(false);
+    await signOut(auth);
+    expect((await signInWithEmailAndPassword(auth, email, 'upgrade1')).user.uid).toBe(anon.user.uid);
+    await signOut(auth);
+  });
+
+  it('Google: signInWithCredential with an ID token (the emulators take an unsigned one), same uid next time', async () => {
+    const sub = `g-${Date.now()}`;
+    const idToken = JSON.stringify({ sub, email: `${sub}@gmail.com`, email_verified: true, name: 'G User' });
+    const first = await signInWithCredential(auth, GoogleAuthProvider.credential(idToken));
+    expect(first.user.email).toBe(`${sub}@gmail.com`);
+    expect(first.user.providerData.map((p) => p.providerId)).toContain('google.com');
+    await signOut(auth);
+    expect((await signInWithCredential(auth, GoogleAuthProvider.credential(idToken))).user.uid).toBe(first.user.uid);
+    await signOut(auth);
   });
 });
 }

@@ -3,7 +3,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { deleteApp, initializeApp } from '@panth977/icebase/app';
 import { defineConfig } from '@panth977/icebase/config';
-import { addDoc, collection, connectFirestoreEmulator, doc, getDoc, getFirestore, setDoc, updateDoc } from '@panth977/icebase/firestore';
+import { addDoc, collection, connectFirestoreEmulator, deleteDoc, doc, getDoc, getFirestore, setDoc, updateDoc } from '@panth977/icebase/firestore';
 import { connectFunctionsEmulator, getFunctions, httpsCallable } from '@panth977/icebase/functions';
 import type { onCall } from '@panth977/icebase-server/functions';
 import { collection as coll, defineSchema, f } from '@panth977/icebase/schema';
@@ -77,6 +77,22 @@ describe('functions · firebase mode', () => {
     await setDoc(doc(collection(db, products), 'pat1'), { name: 'Cap', stock: 7 });
     await until(async () => (await seenDoc('pattern-pat1')).exists(), 'the pattern trigger');
     expect((await seenDoc('pattern-pat1')).data()?.detail).toEqual({ params: { productId: 'pat1' }, before: false, after: 7, ref: 'products/pat1' });
+  });
+
+  it('onDocumentDeleted gets the deleted snapshot', async () => {
+    const ref = doc(collection(db, products), 'del1');
+    await setDoc(ref, { name: 'Gone', stock: 1 });
+    await deleteDoc(ref);
+    await until(async () => (await seenDoc('deleted-del1')).exists(), 'the delete trigger');
+    expect((await seenDoc('deleted-del1')).data()?.detail).toEqual({ id: 'del1', name: 'Gone' });
+  });
+
+  it('an HttpsError reaches the caller: code, message, details; the callable protocol answers with its status', async () => {
+    const refuse = httpsCallable(getFunctions(app), 'refuse');
+    await expect(refuse({})).rejects.toMatchObject({ code: 'functions/failed-precondition', message: expect.stringContaining('not today'), details: { why: 'closed' } });
+    const res = await fetch(`http://127.0.0.1:5011/demo-icebase/us-central1/refuse`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data: {} }) });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: { status: 'FAILED_PRECONDITION', message: 'not today', details: { why: 'closed' } } });
   });
 
   it('storage: onObjectFinalized gets the stored object', async () => {

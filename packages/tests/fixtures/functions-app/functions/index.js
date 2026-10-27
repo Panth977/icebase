@@ -1,6 +1,6 @@
 import { getAdminFirestore, getAdminMessaging, initializeAdminApp, taskQueue } from '@panth977/icebase-server/admin';
 import { collection, doc, getDoc, increment, updateDoc } from '@panth977/icebase/firestore';
-import { HttpsError, beforeUserCreated, onCall, onDocumentCreated, onDocumentUpdated, onDocumentWritten, onObjectFinalized, onRequest, onTaskDispatched, onUserCreated, onValueCreated } from '@panth977/icebase-server/functions';
+import { HttpsError, beforeUserCreated, onCall, onDocumentCreated, onDocumentDeleted, onDocumentUpdated, onDocumentWritten, onSchedule, onObjectFinalized, onRequest, onTaskDispatched, onUserCreated, onValueCreated } from '@panth977/icebase-server/functions';
 import { f } from '@panth977/icebase/schema';
 import config, { api, orders, products, rooms, seen } from './config.js';
 
@@ -69,3 +69,14 @@ export const onProductWritten = onDocumentWritten('products/{productId}', async 
 
 // Auth emails on a signed server (icebase serve): the link, to mail it yourself.
 export const sendAuthEmail = async (m) => record(`mail-${m.kind}-${m.to.replace(/[^a-z0-9]/g, '_')}`, 'mail', { kind: m.kind, to: m.to, link: m.link });
+
+// A deleted document: the snapshot as it was.
+export const onProductDeleted = onDocumentDeleted('products/{productId}', async (e) => record(`deleted-${e.params.productId}`, 'deleted', { id: e.params.productId, name: e.data?.data()?.name ?? null }));
+
+// A scheduled function (the IceBase server runs it on its schedule, or now: /__/icebase/functions/run).
+export const nightly = onSchedule('every 24 hours', async () => record('schedule-nightly', 'schedule', { ran: true }));
+
+// An HttpsError reaches the caller with its code, message and details.
+export const refuse = onCall(() => {
+  throw new HttpsError('failed-precondition', 'not today', { why: 'closed' });
+});

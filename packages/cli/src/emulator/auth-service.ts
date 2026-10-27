@@ -392,7 +392,8 @@ export function authService(ctx: EmulatorContext): Service {
       if (kind === 'EMAIL_SIGNIN') method('emailLink');
       const cont = b.continueUrl as string | undefined;
       if (kind === 'VERIFY_EMAIL' || kind === 'VERIFY_AND_CHANGE_EMAIL') {
-        const u = live(fromIdToken(b.idToken));
+        // The client names the user by its ID token; the admin (generateEmailVerificationLink) by email.
+        const u = live(b.idToken ? fromIdToken(b.idToken) : getByEmail(String(b.email ?? '')));
         const to = kind === 'VERIFY_EMAIL' ? (u.email ?? null) : String(b.newEmail ?? '').toLowerCase();
         if (kind === 'VERIFY_AND_CHANGE_EMAIL') {
           if (!/^[^@\s]+@[^@\s]+$/.test(to ?? '')) throw new AuthFail('INVALID_NEW_EMAIL');
@@ -411,6 +412,54 @@ export function authService(ctx: EmulatorContext): Service {
       const { link } = oob(kind, email, getByEmail(email)?.localId ?? null, cont);
       await mail(kind, email, link, cont);
       return { kind: 'identitytoolkit#GetOobConfirmationCodeResponse', email, ...(b.returnOobLink ? { oobLink: link } : {}) };
+    },
+    // signInWithCredential / linkWithCredential / signInWithPopup's last step: an identity provider's
+    // ID token. As in Firebase's emulator the token is not checked against Google, so a server
+    // others reach refuses it (Google sign-in there is config.auth.custom.google, your OAuth client).
+    async signInWithIdp(b) {
+      if (secure) throw new AuthFail('OPERATION_NOT_ALLOWED : provider sign-in on this server goes through config.auth.custom.google');
+      const params = new URLSearchParams(String(b.postBody ?? ''));
+      const providerId = params.get('providerId') ?? 'google.com';
+      const raw = params.get('id_token') ?? '';
+      let claims: Record<string, unknown>;
+      try {
+        claims = JSON.parse(raw.trim().startsWith('{') ? raw : Buffer.from(raw.split('.')[1] ?? '', 'base64url').toString()) as Record<string, unknown>;
+      } catch {
+        throw new AuthFail('INVALID_IDP_RESPONSE : the id_token is neither JSON nor a JWT');
+      }
+      const sub = typeof claims.sub === 'string' ? claims.sub : '';
+      if (!sub) throw new AuthFail('INVALID_IDP_RESPONSE : the id_token has no sub');
+      const email = typeof claims.email === 'string' ? claims.email.toLowerCase() : undefined;
+      const verified = claims.email_verified === true || claims.email_verified === 'true';
+      const name = typeof claims.name === 'string' ? claims.name : undefined;
+      const photo = typeof claims.picture === 'string' ? claims.picture : undefined;
+      const info = { providerId, rawId: sub, federatedId: sub, ...(email ? { email } : {}), ...(name ? { displayName: name } : {}), ...(photo ? { photoUrl: photo } : {}) };
+      const owner = (db.prepare(`SELECT rec FROM users WHERE rec LIKE ?`).all(`%"rawId":${JSON.stringify(sub).replace(/[%_]/g, '\\$&')}%`) as { rec: string }[])
+        .map(read)
+        .find((x) => x?.providerUserInfo.some((p) => p.providerId === providerId && p.rawId === sub)) ?? null;
+      const linking = b.idToken ? live(fromIdToken(b.idToken)) : null;
+      if (linking && owner && owner.localId !== linking.localId) throw new AuthFail('FEDERATED_USER_ID_ALREADY_LINKED');
+      // A verified email of an existing account: the provider is added to it (one account per email).
+      let u = linking ?? owner ?? (email && verified ? getByEmail(email) : null);
+      const isNewUser = !u;
+      u ??= fresh({ ...(email ? { email, emailVerified: verified } : {}), ...(name ? { displayName: name } : {}), ...(photo ? { photoUrl: photo } : {}) });
+      u.providerUserInfo = [...u.providerUserInfo.filter((p) => p.providerId !== providerId), info];
+      if (email && !u.email) Object.assign(u, { email, emailVerified: verified });
+      if (u.isAnonymous) u.isAnonymous = false;
+      u = isNewUser ? await create(u, providerId) : save(u);
+      return {
+        kind: 'identitytoolkit#VerifyAssertionResponse',
+        ...tokens(await signIn(live(u), providerId), providerId),
+        providerId,
+        federatedId: sub,
+        localId: u.localId,
+        ...(email ? { email } : {}),
+        emailVerified: verified,
+        ...(name ? { displayName: name } : {}),
+        ...(photo ? { photoUrl: photo } : {}),
+        isNewUser,
+        rawUserInfo: JSON.stringify(claims),
+      };
     },
     resetPassword(b) {
       const r = takeOob(b.oobCode, 'PASSWORD_RESET');

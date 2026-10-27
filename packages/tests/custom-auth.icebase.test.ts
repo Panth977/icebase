@@ -1,6 +1,6 @@
 // Custom auth in emulator mode: the handler mounted on the IceBase server, users in its auth
 // service, messages through the console sender (read back from the outbox).
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { deleteApp, initializeApp, type IceBaseApp } from '@panth977/icebase/app';
 import { customEmailAuth, getAuth, isSignInWithEmailLink, sendPasswordResetEmail, sendSignInLinkToEmail, signInWithEmailAndPassword, signInWithEmailLink, signInWithPhoneNumber, waitForEmailApproval, createUserWithEmailAndPassword, signOut, confirmPasswordReset } from '@panth977/icebase/auth';
 import { defineConfig, senders } from '@panth977/icebase/config';
@@ -74,3 +74,62 @@ for (const mode of ['link', 'approval'] as const) {
     }
   });
 }
+
+describe('custom auth · Google with your own OAuth client · emulator mode', () => {
+  let emu: RunningEmulator;
+  let app: IceBaseApp;
+  const cfg = (port?: number) =>
+    defineConfig({
+      name: 'custom-google',
+      schema: defineSchema({}),
+      auth: { providers: [], custom: { site: 'Acme', google: { clientIdEnv: 'ICE_TEST_GOOGLE_ID', clientSecretEnv: 'ICE_TEST_GOOGLE_SECRET' } } },
+      firebase: { projectId: 'demo-icebase' },
+      ...(port ? { emulator: { port } } : {}),
+      environments: { local: { mode: 'emulator' } },
+    });
+  beforeAll(async () => {
+    process.env.ICE_TEST_GOOGLE_ID = 'cid.apps.googleusercontent.com';
+    process.env.ICE_TEST_GOOGLE_SECRET = 'shh';
+    emu = await startEmulator({ config: cfg(), env: 'local', port: 0, dataDir: ':memory:', without: ['functions'], log: () => {} });
+    app = initializeApp(cfg(emu.port), 'local', { name: 'cg', firebase: { apiKey: 'demo', projectId: 'demo-icebase' } });
+  });
+  afterAll(async () => {
+    vi.unstubAllGlobals();
+    await deleteApp(app);
+    await emu.close();
+  });
+
+  it('redirects to Google, exchanges the code, creates the user (same uid next time) and hands back a token', async () => {
+    const base = `${emu.url}/__/icebase/auth`;
+    const signInOnce = async (sub: string) => {
+      const start = await fetch(`${base}/google/start?mode=redirect&return=${encodeURIComponent('http://localhost:5173/app')}`, { redirect: 'manual' });
+      expect(start.status).toBe(302);
+      const to = new URL(start.headers.get('location')!);
+      expect(to.origin).toBe('https://accounts.google.com');
+      expect(to.searchParams.get('redirect_uri')).toBe(`${base}/google/callback`);
+      const claims = { iss: 'https://accounts.google.com', aud: 'cid.apps.googleusercontent.com', exp: Date.now() / 1000 + 600, nonce: to.searchParams.get('nonce'), sub, email: `${sub}@gmail.com`, email_verified: true, name: 'Gee' };
+      const idToken = ['x', Buffer.from(JSON.stringify(claims)).toString('base64url'), 'sig'].join('.');
+      // Only Google's token endpoint is faked (the handler runs in this process).
+      const realFetch = globalThis.fetch;
+      vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => (String(input).startsWith('https://oauth2.googleapis.com/token') ? Promise.resolve(new Response(JSON.stringify({ id_token: idToken }))) : realFetch(input, init)));
+      const cb = await realFetch(`${base}/google/callback?code=abc&state=${to.searchParams.get('state')}`, { redirect: 'manual' });
+      vi.unstubAllGlobals();
+      expect(cb.status).toBe(302);
+      const token = new URLSearchParams(new URL(cb.headers.get('location')!).hash.slice(1)).get('icebase_token')!;
+      const { signInWithCustomToken } = await import('@panth977/icebase/auth');
+      const cred = await signInWithCustomToken(getAuth(app), token);
+      await signOut(getAuth(app));
+      return cred.user;
+    };
+    const sub = `g-${Date.now()}`;
+    const first = await signInOnce(sub);
+    expect(first.email).toBe(`${sub}@gmail.com`);
+    expect(first.displayName).toBe('Gee');
+    expect((await signInOnce(sub)).uid).toBe(first.uid);
+  });
+
+  it('refuses a return URL outside the authorized domains', async () => {
+    const res = await fetch(`${emu.url}/__/icebase/auth/google/start?mode=popup&return=${encodeURIComponent('https://evil.example')}`, { redirect: 'manual' });
+    expect(res.status).toBe(403);
+  });
+});

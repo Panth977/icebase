@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { deleteApp, initializeApp, type IceBaseApp } from '@panth977/icebase/app';
 import { defineConfig } from '@panth977/icebase/config';
 import { startEmulator, type RunningEmulator } from '@panth977/icebase-cli/emulator';
-import { addDoc, collection, doc, getDoc, getFirestore, setDoc, updateDoc } from '@panth977/icebase/firestore';
+import { addDoc, collection, deleteDoc, doc, getDoc, getFirestore, setDoc, updateDoc } from '@panth977/icebase/firestore';
 import { getFunctions, httpsCallable } from '@panth977/icebase/functions';
 import { collection as coll, defineSchema, f } from '@panth977/icebase/schema';
 
@@ -72,6 +72,29 @@ describe('functions · emulator mode', () => {
     await setDoc(doc(collection(getFirestore(app), products), 'pat1'), { name: 'Cap', stock: 7 });
     await until(async () => (await seenDoc('pattern-pat1')).exists(), 'the pattern trigger');
     expect((await seenDoc('pattern-pat1')).data()?.detail).toEqual({ params: { productId: 'pat1' }, before: false, after: 7, ref: 'products/pat1' });
+  });
+
+  it('onDocumentDeleted gets the deleted snapshot', async () => {
+    const ref = doc(collection(getFirestore(app), products), 'del1');
+    await setDoc(ref, { name: 'Gone', stock: 1 });
+    await deleteDoc(ref);
+    await until(async () => (await seenDoc('deleted-del1')).exists(), 'the delete trigger');
+    expect((await seenDoc('deleted-del1')).data()?.detail).toEqual({ id: 'del1', name: 'Gone' });
+  });
+
+  it('an HttpsError reaches the caller: code, message, details; the callable protocol answers with its status', async () => {
+    const refuse = httpsCallable(getFunctions(app), 'refuse');
+    await expect(refuse({})).rejects.toMatchObject({ code: 'functions/failed-precondition', message: expect.stringContaining('not today'), details: { why: 'closed' } });
+    const res = await fetch(`${emu.url}/demo-icebase/us-central1/refuse`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data: {} }) });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: { status: 'FAILED_PRECONDITION', message: 'not today', details: { why: 'closed' } } });
+  });
+
+  it('onSchedule: the server runs a scheduled function (now, on the admin request)', async () => {
+    expect((await fetch(`${emu.url}/__/icebase/functions/run?name=nightly`, { method: 'POST' })).status).toBe(404); // not the admin: no route
+    const r = await fetch(`${emu.url}/__/icebase/functions/run?name=nightly`, { method: 'POST', headers: { authorization: `Bearer ${emu.context.adminToken}` } });
+    expect(r.status).toBe(200);
+    expect((await seenDoc('schedule-nightly')).data()?.detail).toEqual({ ran: true });
   });
 
   it('storage: onObjectFinalized gets the stored object', async () => {
