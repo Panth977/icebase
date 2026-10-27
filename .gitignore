@@ -11,3 +11,4 @@ icebase/.generated/
 packages/dart/*/pubspec.lock
 packages/dart/*/build/
 .flutter-plugins*
+packages/tests/.tmp-cli/

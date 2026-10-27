@@ -435,8 +435,10 @@ export interface HostingConfigJson {
 }
 
 /** config.hosting (firebase.json shape) → the Hosting API's version config. */
-export function hostingVersionConfig(h: NonNullable<IceBaseApp['config']['hosting']>, region = 'us-central1'): HostingConfigJson {
+export function hostingVersionConfig(h: NonNullable<IceBaseApp['config']['hosting']>, region = 'us-central1', customAuth = false): HostingConfigJson {
   const rewrites: NonNullable<HostingConfigJson['rewrites']> = [];
+  // Custom auth's endpoint on the site's own origin too (custom-auth.html §4), as on the IceBase server.
+  if (customAuth) rewrites.push({ glob: '/__/icebase/auth/**', run: { serviceId: 'icebaseauth', region } });
   for (const r of h.rewrites ?? []) {
     if ('function' in r) {
       const fn = typeof r.function === 'string' ? { functionId: r.function, region: r.region } : r.function;
@@ -514,7 +516,7 @@ export function manageHosting(app: IceBaseApp): HostingManager {
         gz.set(hash, z);
         manifest[`/${relative(dir, f).split(sep).join('/')}`] = hash;
       }
-      const version = await g.call<{ name: string }>('POST', `${HOSTING}/sites/${site}/versions`, { config: h ? hostingVersionConfig(h, app.config.functions?.region) : {} });
+      const version = await g.call<{ name: string }>('POST', `${HOSTING}/sites/${site}/versions`, { config: h ? hostingVersionConfig(h, app.config.functions?.region, !!app.config.auth?.custom && !app.config.auth.custom.endpoint) : {} });
       const pop = await g.call<{ uploadRequiredHashes?: string[]; uploadUrl: string }>('POST', `${HOSTING}/${version.name}:populateFiles`, { files: manifest });
       const need = pop.uploadRequiredHashes ?? [];
       for (let i = 0; i < need.length; i += 8) {

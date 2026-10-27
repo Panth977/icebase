@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { initializeAdminApp } from '@panth977/icebase-server/admin';
-import { resolveModes, SERVICES, type AnyConfig, type Mode, type Service } from '@panth977/icebase/config';
+import { readEnv, resolveModes, SERVICES, type AnyConfig, type Mode, type Service } from '@panth977/icebase/config';
 import { manageAuth, manageDatabase, manageFirestore, manageHosting, manageStorage } from '../manage.ts';
 
 export type Target = Service | 'rules' | 'indexes';
@@ -21,9 +21,32 @@ export function wiring(config: AnyConfig, env: string): { modes: Record<Service,
   if (fnRewrite && modes.hosting === 'firebase' && modes.functions !== 'firebase') problems.push('hosting rewrites to a function, but Firebase Hosting can only rewrite to Cloud Functions (functions are not in firebase mode)');
   if (modes.storage === 'firebase' && modes.firestore !== 'firebase' && config.rules?.storage && /firestore\.(get|exists)\(/.test(safeRead(config.rules.storage))) problems.push('storage.rules read Firestore, but Firestore is not on Firebase: Firebase Storage rules cannot read documents elsewhere');
   if (config.auth?.custom && modes.functions !== modes.auth && !config.auth.custom.endpoint) warnings.push(`custom auth runs as the icebaseAuth function (functions: ${modes.functions}) for auth in ${modes.auth} mode; set auth.custom.endpoint if you host it elsewhere`);
+  // The icebaseAuth function reads its senders' and Google client's secrets from env vars: refuse a
+  // deploy that would ship a custom method without them (docs/prd/custom-auth.html §2).
+  if (config.auth?.custom && modes.functions === 'firebase' && !config.auth.custom.endpoint) {
+    for (const name of customAuthEnv(config)) if (!readEnv(name)) problems.push(`custom auth: env var ${name} is not set (config.auth.custom needs it at run time)`);
+  }
   if (config.auth?.custom && modes.database !== 'firebase' && modes.auth === 'firebase') warnings.push('custom auth keeps its security store in the Realtime Database, which is not in firebase mode here');
   if (modes.firestore !== modes.auth) warnings.push(`auth is in ${modes.auth} mode and Firestore in ${modes.firestore} mode: rules see the tokens of the auth side only`);
   return { modes, problems, warnings };
+}
+
+/** The env vars config.auth.custom names: its senders' secrets and the Google OAuth client. */
+export function customAuthEnv(config: AnyConfig): string[] {
+  const c = config.auth?.custom;
+  if (!c) return [];
+  const names = new Set<string>();
+  const fromSender = (x: unknown) => {
+    if (!x || typeof x !== 'object') return;
+    for (const [k, v] of Object.entries(x)) if (k.endsWith('Env') && typeof v === 'string') names.add(v);
+  };
+  fromSender(c.email?.sender);
+  fromSender(c.phone?.sender);
+  if (c.google) {
+    names.add(c.google.clientIdEnv);
+    names.add(c.google.clientSecretEnv);
+  }
+  return [...names];
 }
 
 function safeRead(p: string): string {
@@ -70,6 +93,9 @@ export async function buildFunctions(config: AnyConfig, env: string, root: strin
   ];
   const entry = join(out, '_entry.ts');
   writeFileSync(entry, lines.join('\n') + '\n');
+  // The custom-auth secrets go with the functions (firebase-tools loads .env at deploy).
+  const secrets = custom ? customAuthEnv(config).filter((n) => readEnv(n) !== undefined) : [];
+  if (secrets.length) writeFileSync(join(out, '.env'), secrets.map((n) => `${n}=${JSON.stringify(readEnv(n))}`).join('\n') + '\n', { mode: 0o600 });
   const ownPkg = JSON.parse(readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url).href), 'utf8')) as { version: string; peerDependencies: Record<string, string> };
   const deps: Record<string, string> = {
     ...srcPkg.dependencies,
