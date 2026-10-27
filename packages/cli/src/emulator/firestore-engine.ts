@@ -346,11 +346,11 @@ export class FirestoreEngine {
   }
 
   /** Run a query. `cursorStart`/`cursorEnd` values are aligned with fullOrder(spec). */
-  query(spec: QuerySpec): StoredDoc[] {
+  query(spec: QuerySpec, aggregated: string[][] = []): StoredDoc[] {
     const coll = this.collectionFor(spec);
     // The SDK checks before sending; the server checks again so no client can skip it.
     for (const c of spec.path === null ? this.colls.filter((x) => x.id === spec.collectionId && x.group) : coll ? [coll] : []) {
-      const plan = planQuery(c, spec);
+      const plan = planQuery(c, spec, aggregated);
       if (!plan.ok && this.learn) {
         this.learn({ collection: c.path, suggestion: plan.missing.suggestion });
         continue;
@@ -457,7 +457,8 @@ export class FirestoreEngine {
   }
 
   aggregate(spec: QuerySpec, aggs: Record<string, { op: 'count' } | { op: 'sum' | 'avg'; field: string | string[] }>): Record<string, number | null> {
-    const docs = this.query(spec);
+    // sum() / average() fields are part of the index the query needs (as in Firestore).
+    const docs = this.query(spec, Object.values(aggs).flatMap((a) => (a.op === 'count' ? [] : [typeof a.field === 'string' ? [a.field] : a.field])));
     const out: Record<string, number | null> = {};
     for (const [k, a] of Object.entries(aggs)) {
       if (a.op === 'count') out[k] = docs.length;

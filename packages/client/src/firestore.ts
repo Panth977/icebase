@@ -578,7 +578,9 @@ export interface AggregateQuerySnapshot<S extends Record<string, AggregateField<
 }
 
 export async function getAggregateFromServer<T, IX, S extends Record<string, AggregateField<unknown>>>(q: Query<T, IX>, spec: S): Promise<AggregateQuerySnapshot<S>> {
-  checkQuery(q);
+  if (q.firestore._terminated) throw new IceBaseError('failed-precondition', 'The Firestore instance has been terminated');
+  // sum() / average() fields are part of the index the query needs.
+  if (q._coll) assertIndexed(q._coll, q._spec, Object.values(spec).flatMap((a) => (a._a.op === 'count' ? [] : [[a._a.field]])));
   for (const [alias, a] of Object.entries(spec)) {
     if (a._a.op !== 'count' && q._coll) {
       const def = q._coll.fields[a._a.field];

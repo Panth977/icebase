@@ -78,8 +78,8 @@ export interface FirestoreManager {
   createDb(id?: string, opts?: { location?: string }): Promise<FirestoreDatabaseInfo>;
   listDbs(): Promise<FirestoreDatabaseInfo[]>;
   /** Deploy everything the schema implies: composite indexes, noIndex exemptions, TTL, collection-group scopes. */
-  setSchema(schema?: Schema<Record<string, AnyCollection>, any, any>, opts?: { database?: string; prune?: boolean }): Promise<IndexSync>;
-  /** Deploy composite indexes only (from the schema, or the given file). `prune` deletes indexes that are not declared. */
+  setSchema(schema?: Schema<Record<string, AnyCollection>, any, any>, opts?: { database?: string; prune?: boolean; wait?: boolean }): Promise<IndexSync>;
+  /** Deploy composite indexes only (from the schema, or the given file). `prune` deletes indexes that are not declared. `wait`: until every declared index is READY (including ones an earlier call started). */
   setIndexes(indexes?: IndexesFile | Schema<Record<string, AnyCollection>, any, any>, opts?: { database?: string; prune?: boolean; wait?: boolean }): Promise<IndexSync>;
   /** Deploy firestore.rules (source text, or { file }). Default: config.rules.firestore. */
   setRules(source?: string | { file: string }, opts?: { database?: string }): Promise<{ ruleset: string; release: string }>;
@@ -110,14 +110,19 @@ export function manageFirestore(app: IceBaseApp): FirestoreManager {
 
   const syncIndexes = async (file: IndexesFile, database: string | undefined, prune: boolean, wait: boolean, withOverrides: boolean): Promise<IndexSync> => {
     const base = `${FIRESTORE}/${dbPath(database)}/collectionGroups`;
-    const listed: { name: string; queryScope: string; fields: { fieldPath: string; order?: string; arrayConfig?: string }[] }[] = [];
-    let pageToken: string | undefined;
-    do {
-      const page = await g.call<{ indexes?: typeof listed; nextPageToken?: string }>('GET', `${base}/-/indexes${pageToken ? `?pageToken=${pageToken}` : ''}`);
-      listed.push(...(page.indexes ?? []));
-      pageToken = page.nextPageToken;
-    } while (pageToken);
-    const existing = new Map(listed.map((ix) => [indexKey({ collectionGroup: ix.name.split('/')[ix.name.split('/').indexOf('collectionGroups') + 1]!, queryScope: ix.queryScope, fields: ix.fields as IndexJson['fields'] }), ix.name]));
+    type Listed = { name: string; queryScope: string; state?: string; fields: { fieldPath: string; order?: string; arrayConfig?: string }[] };
+    const list = async () => {
+      const listed: Listed[] = [];
+      let pageToken: string | undefined;
+      do {
+        const page = await g.call<{ indexes?: Listed[]; nextPageToken?: string }>('GET', `${base}/-/indexes${pageToken ? `?pageToken=${pageToken}` : ''}`);
+        listed.push(...(page.indexes ?? []));
+        pageToken = page.nextPageToken;
+      } while (pageToken);
+      return listed.map((ix) => ({ ...ix, key: indexKey({ collectionGroup: ix.name.split('/')[ix.name.split('/').indexOf('collectionGroups') + 1]!, queryScope: ix.queryScope, fields: ix.fields as IndexJson['fields'] }) }));
+    };
+    const listed = await list();
+    const existing = new Map(listed.map((ix) => [ix.key, ix.name]));
     const wanted = new Set(file.indexes.map(indexKey));
     const created: IndexJson[] = [];
     const ops: Promise<unknown>[] = [];
@@ -148,6 +153,23 @@ export function manageFirestore(app: IceBaseApp): FirestoreManager {
       }
     }
     await Promise.all(ops);
+    // Until every declared index serves queries: the new ones and any still building from before.
+    if (wait) {
+      const until = Date.now() + 1_800_000;
+      for (;;) {
+        const state = new Map((await list()).map((ix) => [ix.key, ix.state]));
+        let pending = file.indexes.filter((ix) => state.get(indexKey(ix)) !== 'READY').length;
+        if (withOverrides) {
+          for (const o of file.fieldOverrides) {
+            const fld = await g.call<{ indexConfig?: { indexes?: { state?: string }[] } }>('GET', `${base}/${o.collectionGroup}/fields/${encodeURIComponent(o.fieldPath)}`);
+            if ((fld.indexConfig?.indexes ?? []).some((i) => i.state && i.state !== 'READY')) pending++;
+          }
+        }
+        if (!pending) break;
+        if (Date.now() > until) throw new IceBaseError('deadline-exceeded', `${pending} index(es) are still building after 30 minutes`, { reason: 'management', service: 'firestore' });
+        await new Promise((r) => setTimeout(r, 10_000));
+      }
+    }
     return { created, deleted, unchanged: file.indexes.length - created.length, fieldOverrides: withOverrides ? file.fieldOverrides.length : 0 };
   };
 
@@ -170,7 +192,7 @@ export function manageFirestore(app: IceBaseApp): FirestoreManager {
       const r = await g.call<{ databases?: { name: string; locationId: string; type: string }[] }>('GET', `${FIRESTORE}/projects/${g.projectId}/databases`);
       return (r.databases ?? []).map(info);
     },
-    setSchema: (schema, opts = {}) => syncIndexes(toFile(schema), opts.database, opts.prune ?? false, false, true),
+    setSchema: (schema, opts = {}) => syncIndexes(toFile(schema), opts.database, opts.prune ?? false, opts.wait ?? false, true),
     setIndexes: (indexes, opts = {}) => {
       const file = toFile(indexes);
       return syncIndexes(file, opts.database, opts.prune ?? false, opts.wait ?? false, false);

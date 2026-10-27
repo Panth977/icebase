@@ -43,7 +43,7 @@ import {
   writeBatch,
   type Firestore,
 } from '@panth977/icebase/firestore';
-import { collection as coll, contains, defineSchema, f, index, type DocOf } from '@panth977/icebase/schema';
+import { collection as coll, contains, defineSchema, desc, f, index, type DocOf } from '@panth977/icebase/schema';
 
 const products = coll('products', {
   fields: {
@@ -68,6 +68,10 @@ const products = coll('products', {
     index('rating.avg'),
     index('category', 'priceCents'),
     index(contains('tags'), 'priceCents'),
+    // Firestore reads a composite in its declared directions only: orderBy desc and limitToLast need this one.
+    index(contains('tags'), desc('priceCents')),
+    // sum('priceCents') / average('stock') where tags contains … and active == …: the aggregated fields are in the index.
+    index(contains('tags'), 'active', 'priceCents', 'stock'),
   ],
 });
 const orders = coll('users/{uid}/orders', {

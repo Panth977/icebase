@@ -52,13 +52,33 @@ describe('index rule: every index is declared', () => {
     expect(ok(spec([w('a.b', '==')]))).toBe(true);
     expect(ok(spec([w(['a', 'b'], '==')]))).toBe(false);
   });
-  it('accepts declared composites, in either full direction', () => {
+  it('accepts a declared composite in its declared directions only (Firestore never reads one backwards)', () => {
     expect(ok(spec([w('category', '==')], [['priceCents', 'asc']]))).toBe(true);
-    expect(ok(spec([w('category', '==')], [['priceCents', 'desc']]))).toBe(true);
+    expect(ok(spec([w('category', '==')], [['priceCents', 'desc']]))).toBe(false);
     expect(ok(spec([w('tags', 'array-contains')], [['priceCents', 'asc']]))).toBe(true);
+    expect(ok(spec([w('tags', 'array-contains')], [['priceCents', 'desc']]))).toBe(false);
     expect(ok(spec([w('active', '==')], [['stock', 'desc']]))).toBe(true);
+    expect(ok(spec([w('active', '==')], [['stock', 'asc']]))).toBe(false);
     expect(ok(spec([w('category', 'in', ['a']), w('active', '==')], [['stock', 'asc'], ['priceCents', 'desc']]))).toBe(true);
-    expect(ok(spec([w('category', 'in', ['a']), w('active', '==')], [['stock', 'desc'], ['priceCents', 'asc']]))).toBe(true);
+    expect(ok(spec([w('category', 'in', ['a']), w('active', '==')], [['stock', 'desc'], ['priceCents', 'asc']]))).toBe(false);
+    // The suggestion names the direction.
+    const r = planQuery(products, spec([w('category', '==')], [['priceCents', 'desc']]));
+    expect(!r.ok && r.missing.suggestion).toBe("index('category', desc('priceCents'))");
+  });
+  it('limitToLast runs the query reversed: it needs the reversed index', () => {
+    const last = (s: QuerySpec): QuerySpec => ({ ...s, limit: { n: 2, last: true } });
+    expect(ok(last(spec([w('active', '==')], [['stock', 'asc']])))).toBe(true);
+    expect(ok(last(spec([w('active', '==')], [['stock', 'desc']])))).toBe(false);
+    expect(ok(last(spec([w('category', '==')], [['priceCents', 'asc']])))).toBe(false);
+  });
+  it('sum() / average() fields are part of the index', () => {
+    // tags contains + active == with sum(priceCents): tags CONTAINS, active, priceCents — not declared.
+    expect(planQuery(products, spec([w('tags', 'array-contains'), w('active', '==')]), [['priceCents']]).ok).toBe(false);
+    // category == with sum(priceCents): the declared (category, priceCents).
+    expect(planQuery(products, spec([w('category', '==')]), [['priceCents']]).ok).toBe(true);
+    // No filter: the field's own single-field index.
+    expect(planQuery(products, spec([]), [['priceCents']]).ok).toBe(true);
+    expect(planQuery(products, spec([]), [['stock']]).ok).toBe(false);
   });
   it('refuses undeclared composites', () => {
     expect(ok(spec([w('category', '==')], [['stock', 'asc']]))).toBe(false);

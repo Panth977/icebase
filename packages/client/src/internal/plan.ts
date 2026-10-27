@@ -66,7 +66,7 @@ export interface IndexNeed {
   suggestion: string;
 }
 
-function needFor(conj: FieldFilter[], orders: OrderSpec[]): Need | null {
+function needFor(conj: FieldFilter[], orders: OrderSpec[], reverse = false, aggregated: string[][] = []): Need | null {
   const eq = new Map<string, string[]>();
   let contains: string[] | null = null;
   const inequality = new Map<string, string[]>();
@@ -76,9 +76,14 @@ function needFor(conj: FieldFilter[], orders: OrderSpec[]): Need | null {
     else if (CONTAINS.has(f.op)) contains = f.field;
     else inequality.set(pathKey(f.field), f.field);
   }
-  const ordered: OrderSpec[] = orders.filter((o) => !isName(o.field));
+  const ordered: OrderSpec[] = orders.filter((o) => !isName(o.field)).map((o) => ({ ...o }));
   // Firestore orders by every inequality field (implicitly, ascending) after the explicit orders.
   for (const [k, p] of [...inequality].sort(([a], [b]) => (a < b ? -1 : 1))) if (!ordered.some((o) => pathKey(o.field) === k)) ordered.push({ field: p, dir: 'asc' });
+  // limitToLast runs the query in the opposite order: it needs the index in that order (Firestore
+  // never scans a composite index backwards).
+  if (reverse) for (const o of ordered) o.dir = o.dir === 'asc' ? 'desc' : 'asc';
+  // sum() / average() read their fields from the index too, after the query's own fields.
+  for (const p of aggregated) if (!ordered.some((o) => pathKey(o.field) === pathKey(p)) && !eq.has(pathKey(p))) ordered.push({ field: p, dir: 'asc' });
   const sorted = ordered.filter((o) => !eq.has(pathKey(o.field)));
   const all = new Map<string, string[]>([...eq, ...(contains ? [[pathKey(contains), contains] as [string, string[]]] : []), ...sorted.map((o) => [pathKey(o.field), o.field] as [string, string[]])]);
   if (all.size === 0) return null;
@@ -92,7 +97,11 @@ const autoSingle = (c: AnyCollection, p: string[]): ParsedIndex => ({ kind: 'ind
 const findSingle = (c: AnyCollection, p: string[]) => c.indexes.find((ix) => single(ix) && samePath(ix.fields[0]!.path, p)) ?? (c.autoIndex ? autoSingle(c, p) : undefined);
 const declaresSingle = (c: AnyCollection, p: string[]) => !!findSingle(c, p);
 
-/** A composite that serves the conjunction: the same fields, the ordered ones as its tail in order (or all reversed). */
+/**
+ * A composite that serves the conjunction: the same fields, the ordered ones as its tail in order
+ * and in the same directions. Firestore does not read a composite index backwards (checked on a
+ * live project): orderBy('x', 'desc') needs desc('x') in the index.
+ */
 function serves(ix: ParsedIndex, n: Need): boolean {
   const fields = ix.fields;
   if (fields.length !== n.fields.length) return false;
@@ -103,9 +112,7 @@ function serves(ix: ParsedIndex, n: Need): boolean {
   const tail: IndexField[] = fields.slice(fields.length - n.ordered.length);
   if (tail.some((t) => t.mode === 'contains')) return false;
   if (!tail.every((t, i) => samePath(t.path, n.ordered[i]!.field))) return false;
-  const same = tail.every((t, i) => t.mode === n.ordered[i]!.dir);
-  const reversed = tail.every((t, i) => t.mode !== n.ordered[i]!.dir);
-  return same || reversed;
+  return tail.every((t, i) => t.mode === n.ordered[i]!.dir);
 }
 
 const code = (p: string[]) => (p.length === 1 ? `'${p[0]}'` : `[${p.map((s) => `'${s}'`).join(', ')}]`);
@@ -149,10 +156,10 @@ function choose(c: AnyCollection, n: Need): { ok: true; uses: ParsedIndex[] } | 
 }
 
 /** The declared indexes serving each disjunction, or the first missing one. */
-export function planQuery(c: AnyCollection, spec: QuerySpec): { ok: true; indexes: ParsedIndex[][] } | { ok: false; missing: IndexNeed } {
+export function planQuery(c: AnyCollection, spec: QuerySpec, aggregated: string[][] = []): { ok: true; indexes: ParsedIndex[][] } | { ok: false; missing: IndexNeed } {
   const used: ParsedIndex[][] = [];
   for (const conj of dnf(spec.filters)) {
-    const n = needFor(conj, spec.orders);
+    const n = needFor(conj, spec.orders, !!spec.limit?.last, aggregated);
     if (!n) {
       used.push([]);
       continue;
@@ -165,13 +172,13 @@ export function planQuery(c: AnyCollection, spec: QuerySpec): { ok: true; indexe
 }
 
 /** Throw the IDX-2 error when a query needs an index that is not declared. */
-export function assertIndexed(c: AnyCollection, spec: QuerySpec): void {
+export function assertIndexed(c: AnyCollection, spec: QuerySpec, aggregated: string[][] = []): void {
   // An unfiltered, unordered collection-group scan needs no index (Firestore runs it on any id).
   const scan = spec.filters.length === 0 && spec.orders.length === 0;
   if (spec.path === null && !c.group && !scan) {
     throw new IceBaseError('failed-precondition', `collectionGroup('${c.id}') needs \`group: true\` on collection('${c.path}') in the schema, so its indexes are declared with collection-group scope.`, { reason: 'missing-index', collection: c.path });
   }
-  const r = planQuery(c, spec);
+  const r = planQuery(c, spec, aggregated);
   if (r.ok) return;
   throw new IceBaseError(
     'failed-precondition',
