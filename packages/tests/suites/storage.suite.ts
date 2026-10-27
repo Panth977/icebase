@@ -4,7 +4,7 @@ import { deleteApp, type IceBaseApp } from '@panth977/icebase/app';
 import { getAdminStorage } from '@panth977/icebase-server/admin';
 import { defineConfig, type Mode } from '@panth977/icebase/config';
 import { defineSchema, filePath } from '@panth977/icebase/schema';
-import { deleteObject, getBytes, getDownloadURL, getMetadata, listAll, ref, updateMetadata, uploadBytes, uploadString, type FirebaseStorage } from '@panth977/icebase/storage';
+import { deleteObject, getBytes, getDownloadURL, getMetadata, listAll, ref, updateMetadata, uploadBytes, uploadBytesResumable, uploadString, type FirebaseStorage } from '@panth977/icebase/storage';
 
 const PROJECT = 'demo-icebase';
 export const BUCKET = `${PROJECT}.appspot.com`;
@@ -76,6 +76,25 @@ describe(`storage · ${name}`, () => {
   it('admin storage sees the same bucket', async () => {
     const [exists] = await getAdminStorage(admin).bucket(BUCKET).file(`avatars/${run}/me.png`).exists();
     expect(exists).toBe(true);
+  });
+
+  it('a resumable upload in several chunks, with progress', async () => {
+    const data = new Uint8Array(700_000).map((_, i) => i % 251);
+    const task = uploadBytesResumable(ref(s, docs, `${run}-big.txt`), data, { contentType: 'text/plain' });
+    const progress: number[] = [];
+    task.on('state_changed', (snap) => void progress.push(snap.bytesTransferred));
+    const done = await task;
+    expect(done.totalBytes).toBe(700_000);
+    expect(progress.at(-1)).toBe(700_000);
+    const back = new Uint8Array(await getBytes(ref(s, docs, `${run}-big.txt`)));
+    expect(back.length).toBe(700_000);
+    expect(back[699_999]).toBe(699_999 % 251);
+  });
+
+  it('admin getFiles lists by prefix', async () => {
+    const [files] = await getAdminStorage(admin).bucket(BUCKET).getFiles({ prefix: `docs/${run}-` });
+    expect(files.map((f) => f.name)).toEqual(expect.arrayContaining([`docs/${run}-b.txt`, `docs/${run}-big.txt`]));
+    expect(files.map((f) => f.name)).not.toContain(`avatars/${run}/me.png`);
   });
 });
 }
