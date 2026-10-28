@@ -1,10 +1,11 @@
 {
   "name": "@panth977/icebase-cli",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/manage.ts",
     "./manage": "./src/manage.ts",
+    "./console": "./src/console/export.ts",
     "./emulator": "./src/emulator/server.ts",
     "./internal": "./src/internal.ts",
     "./cli": "./src/cli/index.ts"
