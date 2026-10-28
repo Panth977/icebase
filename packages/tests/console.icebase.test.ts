@@ -100,6 +100,18 @@ describe('console · IceBase server', () => {
     expect(evil.headers.get('access-control-allow-origin')).toBeNull();
   });
 
+  it('ICEBASE_CONSOLE_TOKEN opens the console (not the services); a wrong one does not', async () => {
+    process.env.ICEBASE_CONSOLE_TOKEN = 'console-only-token';
+    try {
+      expect((await api('overview', {}, 'console-only-token')).status).toBe(200);
+      expect((await api('overview', {}, 'console-only-tokem')).status).toBe(403);
+      const fs = await fetch(`${s.url}/v1/fs/listCollections`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer console-only-token' }, body: '{}' });
+      expect(fs.status).toBe(403);
+    } finally {
+      delete process.env.ICEBASE_CONSOLE_TOKEN;
+    }
+  });
+
   it('Functions, Hosting and Rules', async () => {
     const fns = (await ok('fn.list')).functions as { name: string; kind: string; trigger: string }[];
     expect(fns.find((f) => f.name === 'nightly')).toMatchObject({ kind: 'schedule', trigger: 'every 24 hours' });

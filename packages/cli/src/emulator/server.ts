@@ -10,7 +10,7 @@
 //   /__/icebase/health          health
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -295,9 +295,14 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
         },
       };
     },
+    // The admin token, or ICEBASE_CONSOLE_TOKEN: a token for the console only, set by whoever runs
+    // the server (the same name the console's Cloud Function uses).
     async (req) => {
       const a = req.headers.get('authorization');
-      return (await ctx.verify(a ? a.replace(/^(Bearer|Firebase)\s+/i, '') : null)).admin;
+      const token = a ? a.replace(/^(Bearer|Firebase)\s+/i, '') : null;
+      const consoleToken = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.ICEBASE_CONSOLE_TOKEN;
+      if (token && consoleToken && token.length === consoleToken.length && timingSafeEqual(Buffer.from(token), Buffer.from(consoleToken))) return true;
+      return (await ctx.verify(token)).admin;
     },
   );
 

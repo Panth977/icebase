@@ -217,7 +217,8 @@ Firestore browser and editor (writes go through the schema), a query runner that
 declared indexes allow, schema and indexes (build state on Firebase, SQL indexes on the IceBase
 server), the Realtime Database tree, users and sign-in methods with custom auth's security view
 (attempts, blocks, limits), a Storage browser, functions (run a schedule now, the task queue),
-Hosting sites and domains, and the rules in force.
+Hosting sites and domains, and the rules in force. It opens with `ICEBASE_CONSOLE_TOKEN` (set it in the
+server's environment; the console-only token reaches no data service) or the admin token.
 
 ## Indexes, as Firestore really checks them
 

@@ -36,7 +36,7 @@ if (fromHash) { sessionStorage.setItem(tokenKey(), fromHash); history.replaceSta
 async function api(op, body = {}) {
   const r = await fetch((base ? base.replace(/\\/?$/, '/') : '') + 'api/' + op, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (sessionStorage.getItem(tokenKey()) || 'owner') }, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
-  if (r.status === 401 || r.status === 403) { const t = prompt('Admin token for ' + (base || location.host) + ' (ICEBASE_ADMIN_TOKEN, or the admin-token file in the data directory):'); if (t) { sessionStorage.setItem(tokenKey(), t); return api(op, body); } }
+  if (r.status === 401 || r.status === 403) { const t = prompt('Console token for ' + (base || location.host) + ' (ICEBASE_CONSOLE_TOKEN, or the admin token):'); if (t) { sessionStorage.setItem(tokenKey(), t); return api(op, body); } }
   if (!r.ok || j.error) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
   return j;
 }
