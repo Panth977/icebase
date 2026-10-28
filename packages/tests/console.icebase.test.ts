@@ -28,7 +28,7 @@ describe('console · IceBase server', () => {
   it('serves the page and its script with a strict CSP; the API is the admin\'s', async () => {
     const page = await fetch(`${s.url}/__/icebase/console/`);
     expect(page.status).toBe(200);
-    expect(await page.text()).toContain('<script src="app.js">');
+    expect(await page.text()).toContain('src="app.js"');
     expect(page.headers.get('content-security-policy')).toContain("script-src 'self'");
     expect((await fetch(`${s.url}/__/icebase/console/app.js`)).headers.get('content-type')).toContain('javascript');
     expect((await api('overview', {}, 'not-the-admin')).status).toBe(403);

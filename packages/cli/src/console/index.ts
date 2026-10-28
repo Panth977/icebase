@@ -41,7 +41,8 @@ const csp = (targets: readonly { url: string }[]) => `default-src 'self'; img-sr
 const SECURITY = {
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
-  'cache-control': 'no-store',
+  // no-transform: a CDN in front (Cloudflare) must not rewrite or inject scripts into the console.
+  'cache-control': 'no-store, no-transform',
 };
 
 export function consoleHandler(base: string, makeOptions: () => ConsoleOptions, isAdmin: (req: Request) => Promise<boolean>): (req: Request) => Promise<Response | null> {

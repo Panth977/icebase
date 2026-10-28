@@ -22,7 +22,7 @@ button{font:inherit;border:1px solid var(--line);background:var(--panel);color:v
 </style></head><body>
 <nav><h1>IceBase<small id="proj">…</small></h1><div id="nav"></div></nav>
 <main id="main"></main>
-<script src="app.js"></script>
+<script data-cfasync="false" src="app.js"></script>
 </body></html>`;
 
 export const CONSOLE_JS = `'use strict';
