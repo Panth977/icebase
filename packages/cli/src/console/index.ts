@@ -6,7 +6,7 @@ import type { AnyConfig } from '@panth977/icebase/config';
 import { IceBaseError } from '@panth977/icebase/errors';
 import { googleClient } from '../internal/google-rest.ts';
 import { consoleApi, type ConsoleOptions } from './api.ts';
-import { CONSOLE_HTML, CONSOLE_JS, REFERENCE_HTML, REFERENCE_JS } from './page.ts';
+import { CONSOLE_CSS, CONSOLE_HTML, CONSOLE_JS, REFERENCE_HTML, REFERENCE_JS } from './page.ts';
 
 export type { ConsoleOptions } from './api.ts';
 export { consoleApi } from './api.ts';
@@ -37,7 +37,7 @@ export function firebaseConsoleExtras(app: IceBaseApp, config: AnyConfig): NonNu
 }
 
 /** The page may call this server's API and the other deployments' (config.console.targets) — nothing else. */
-const csp = (targets: readonly { url: string }[]) => `default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ${targets.map((t) => new URL(t.url).origin).join(' ')}; frame-ancestors 'none'`.replace(/ ;/, ';');
+const csp = (targets: readonly { url: string }[]) => `default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ${targets.map((t) => new URL(t.url).origin).join(' ')}; frame-ancestors 'none'`.replace(/ ;/, ';');
 const SECURITY = {
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
@@ -70,6 +70,7 @@ export function consoleHandler(base: string, makeOptions: () => ConsoleOptions, 
     }
     if (path === `${b}/api-reference.js` && req.method === 'GET') return new Response(REFERENCE_JS, { headers: { 'content-type': 'text/javascript; charset=utf-8', ...SECURITY } });
     if (path === `${b}/app.js` && req.method === 'GET') return new Response(CONSOLE_JS, { headers: { 'content-type': 'text/javascript; charset=utf-8', ...SECURITY } });
+    if (path === `${b}/app.css` && req.method === 'GET') return new Response(CONSOLE_CSS, { headers: { 'content-type': 'text/css; charset=utf-8', ...SECURITY } });
     // The deployments the page can switch to (config.console.targets): public, no data in it.
     if (path === `${b}/targets.json` && req.method === 'GET') return new Response(JSON.stringify({ targets: options().config.console?.targets ?? [] }), { headers: { 'content-type': 'application/json', ...SECURITY } });
     // Another deployment's console page calls this API across origins: only the listed ones.

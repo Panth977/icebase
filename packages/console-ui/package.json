@@ -1,0 +1,17 @@
+{
+  "name": "@icebase/console-ui",
+  "private": true,
+  "type": "module",
+  "description": "The IceBase console's web app (Svelte). `npm run build` writes ../cli/src/console/ui.gen.ts, which the CLI serves.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node embed.mjs",
+    "check": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.2.4",
+    "svelte": "^5.57.3",
+    "svelte-check": "^4.7.7",
+    "vite": "^7.3.7"
+  }
+}

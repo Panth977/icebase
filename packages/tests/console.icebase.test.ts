@@ -32,6 +32,9 @@ describe('console · IceBase server', () => {
     expect(page.headers.get('content-security-policy')).toContain("script-src 'self'");
     const js = await fetch(`${s.url}/__/icebase/console/app.js`);
     expect(js.headers.get('content-type')).toContain('javascript');
+    const css = await fetch(`${s.url}/__/icebase/console/app.css`);
+    expect(css.headers.get('content-type')).toContain('text/css');
+    expect(await css.text()).toContain('.tmark');
     // The shipped script parses (it is a string in page.ts: an escaping slip would only show in a browser).
     const { SourceTextModule } = await import('node:vm').then((m) => m as unknown as { SourceTextModule?: new (s: string) => unknown });
     const src = await js.text();

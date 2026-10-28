@@ -1,0 +1,141 @@
+/* IceBase console — tokens and base. One accent (signal teal); data types carry their own marks. */
+:root {
+  --ink: #16212e;
+  --ink-2: #4a5868;
+  --ink-3: #7b8896;
+  --mist: #f5f7f9;
+  --paper: #ffffff;
+  --line: #e2e7ec;
+  --line-2: #eef1f4;
+  --hover: #f0f4f7;
+  --accent: #0f8b8d;
+  --accent-ink: #0a6a6c;
+  --accent-wash: #e3f3f3;
+  --danger: #c2362b;
+  --danger-wash: #fbeceb;
+  --ok: #26845a;
+  --warn: #a6670b;
+  --side: #16212e;
+  --side-ink: #c9d3dc;
+  --side-mute: #7f8d9b;
+  --side-on: #233142;
+  /* data types */
+  --t-string: #26845a;
+  --t-number: #b46a06;
+  --t-boolean: #7a4fc4;
+  --t-null: #8a96a3;
+  --t-timestamp: #2f6fc4;
+  --t-reference: #0f8b8d;
+  --t-geopoint: #b3417a;
+  --t-bytes: #6b7280;
+  --t-map: #4a5868;
+  --t-array: #4a5868;
+  --radius: 6px;
+  --radius-lg: 10px;
+  --shadow-pop: 0 10px 30px -12px rgba(22, 33, 46, 0.35), 0 2px 6px -2px rgba(22, 33, 46, 0.12);
+  --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e6ecf1;
+    --ink-2: #aab6c2;
+    --ink-3: #7d8a97;
+    --mist: #0f161e;
+    --paper: #151e28;
+    --line: #26323f;
+    --line-2: #1d2833;
+    --hover: #1b2631;
+    --accent: #3cb7b8;
+    --accent-ink: #6fd0d1;
+    --accent-wash: #12313a;
+    --danger: #f07167;
+    --danger-wash: #3a1d1c;
+    --ok: #4fbf8a;
+    --warn: #e0a54a;
+    --side: #0b1118;
+    --side-on: #18222d;
+    --t-string: #5fcf98;
+    --t-number: #f0ad4e;
+    --t-boolean: #b496f0;
+    --t-null: #7d8a97;
+    --t-timestamp: #6ea8f2;
+    --t-reference: #3cb7b8;
+    --t-geopoint: #e07ab0;
+    --t-map: #aab6c2;
+    --t-array: #aab6c2;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { font: 14px/1.45 var(--sans); color: var(--ink); background: var(--mist); -webkit-font-smoothing: antialiased; }
+button, input, select, textarea { font: inherit; color: inherit; }
+a { color: var(--accent-ink); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mono { font-family: var(--mono); font-size: 12.5px; }
+.muted { color: var(--ink-3); }
+.err { color: var(--danger); }
+.ok { color: var(--ok); }
+
+/* controls */
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border: 1px solid var(--line); background: var(--paper); border-radius: var(--radius); cursor: pointer; white-space: nowrap; font-size: 13px; }
+.btn:hover { background: var(--hover); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { background: var(--accent-ink); }
+.btn.danger { color: var(--danger); }
+.btn.danger:hover { background: var(--danger-wash); }
+.btn.ghost { border-color: transparent; background: transparent; }
+.btn.ghost:hover { background: var(--hover); }
+.btn.icon { width: 30px; padding: 0; justify-content: center; }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.input, .select { height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); min-width: 0; }
+.input:focus, .select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
+textarea.code { width: 100%; font: 12.5px/1.6 var(--mono); padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); resize: vertical; }
+
+/* the type mark: a small coloured square + the kind, shared by every data view */
+.tmark { display: inline-flex; align-items: center; gap: 5px; font: 11px/1 var(--mono); color: var(--ink-3); white-space: nowrap; }
+.tmark::before { content: ''; width: 7px; height: 7px; border-radius: 2px; background: var(--c, var(--ink-3)); }
+.k-string { --c: var(--t-string); }
+.k-number { --c: var(--t-number); }
+.k-boolean { --c: var(--t-boolean); }
+.k-null { --c: var(--t-null); }
+.k-timestamp { --c: var(--t-timestamp); }
+.k-reference { --c: var(--t-reference); }
+.k-geopoint { --c: var(--t-geopoint); }
+.k-bytes { --c: var(--t-bytes); }
+.k-map { --c: var(--t-map); }
+.k-array { --c: var(--t-array); }
+.v-string { color: var(--t-string); }
+.v-number { color: var(--t-number); }
+.v-boolean { color: var(--t-boolean); }
+.v-null { color: var(--t-null); font-style: italic; }
+.v-timestamp { color: var(--t-timestamp); }
+.v-reference { color: var(--t-reference); }
+.v-geopoint { color: var(--t-geopoint); }
+.v-bytes, .v-map, .v-array { color: var(--ink-3); }
+
+/* code */
+.code-view { margin: 0; font: 12.5px/1.65 var(--mono); white-space: pre; overflow: auto; }
+.tk-com { color: var(--ink-3); font-style: italic; }
+.tk-str { color: var(--t-string); }
+.tk-kw { color: var(--t-boolean); }
+.tk-type { color: var(--t-timestamp); }
+.tk-num { color: var(--t-number); }
+.tk-key { color: var(--ink); }
+
+/* tables */
+table.grid { width: 100%; border-collapse: collapse; }
+table.grid th { text-align: left; font-weight: 500; font-size: 12px; color: var(--ink-3); padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--paper); position: sticky; top: 0; z-index: 1; }
+table.grid td { padding: 9px 12px; border-bottom: 1px solid var(--line-2); vertical-align: middle; }
+table.grid tr.click { cursor: pointer; }
+table.grid tr.click:hover td { background: var(--hover); }
+table.grid tr.sel td { background: var(--accent-wash); }
+
+.surface { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.pill { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 8px; border-radius: 10px; font-size: 11.5px; background: var(--line-2); color: var(--ink-2); white-space: nowrap; }
+.pill.accent { background: var(--accent-wash); color: var(--accent-ink); }
+.pill.danger { background: var(--danger-wash); color: var(--danger); }
+.pill.ok { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
