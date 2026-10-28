@@ -23,7 +23,7 @@ export function customAuthService(ctx: EmulatorContext): Service {
   const ops = () => authSecurityOps(config, store, async () => getAdminAuth(app()) as unknown as AuthDirectory);
   // Expired challenges, counters, blocks and old audit entries go every hour (icebaseAuthCleanup on Firebase).
   const sweep = setInterval(() => void ops().cleanup().catch(() => {}), 3_600_000);
-  sweep.unref?.();
+  (sweep as { unref?: () => void }).unref?.();
   const make = () => {
     const env = envOf();
     const senders = {

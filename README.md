@@ -207,13 +207,43 @@ Debugging: `ICEBASE_LOG_ERRORS=1` logs every refused or failed request and liste
 | `icebase check [--strict]` | Dry run: the schema and API declarations agree, and every endpoint is implemented |
 | `icebase docs [--out DIR] [--serve]` | The database + API reference (one HTML page, project.json, openapi.json) |
 | `icebase openapi [--out FILE]` | The declared endpoints as OpenAPI 3.1 |
+| `icebase console --env X [--port N]` | The console on this machine for environment X (on the IceBase server it is also at `/__/icebase/console`, admin only) |
 | `icebase login` | Firebase login; deploy and the management APIs use it |
+
+## Console
+
+One web app for every mode: project overview (mode per service, health, secrets by env-var name),
+Firestore browser and editor (writes go through the schema), a query runner that only runs what the
+declared indexes allow, schema and indexes (build state on Firebase, SQL indexes on the IceBase
+server), the Realtime Database tree, users and sign-in methods with custom auth's security view
+(attempts, blocks, limits), a Storage browser, functions (run a schedule now, the task queue),
+Hosting sites and domains, and the rules in force.
+
+## Indexes, as Firestore really checks them
+
+Checked on a live project: a composite index serves only the directions it was declared with
+(`orderBy('x', 'desc')` needs `desc('x')`), `limitToLast` needs the reversed index, and `sum()` /
+`average()` fields are part of the index. IceBase refuses the same queries before they leave, and
+on the IceBase server, so an index that works locally works on Firebase.
+
+## Management APIs in every mode
+
+`icebase/manage` sets a project up from code on Firebase and on the IceBase server alike:
+`createDb` (named Firestore databases and Realtime Database instances), `setSchema` / `setIndexes`
+(`wait: true` until every index is READY), `setRules`, `createBucket`, `setProviders`,
+`setAuthorizedDomains`, `createSite`, `deploy`, `setDNS` (on the IceBase server a custom domain
+serves its site on the same port).
+
+Custom auth's admin side: `getAuthSecurity(app)` (`listAttempts`, `resetLimits`, `unblock`,
+`cleanup`), `linkCustomIdentity` / `unlinkCustomIdentity`, an audit trail of starts, failures,
+blocks and sign-ins, cleaned daily by `icebaseAuthCleanup`.
 
 ## Status
 
-Phase 1 (firebase + emulator mode) for the services in
-[`docs/prd/phase1-api-cut.html`](docs/prd/phase1-api-cut.html). The console GUI comes next;
-vm mode (Postgres) is phase 3. See [`docs/prd/icebase-prd.html`](docs/prd/icebase-prd.html).
+Phase 1 (firebase + emulator mode, and the console) for the services in
+[`docs/prd/phase1-api-cut.html`](docs/prd/phase1-api-cut.html) is complete. The conformance suites
+run against Firebase's emulators, the IceBase server and a live project
+(`ICEBASE_LIVE_PROJECT=icebase-test-… npx vitest run live/` in `packages/tests`). vm mode (Postgres) is phase 3. See [`docs/prd/icebase-prd.html`](docs/prd/icebase-prd.html).
 
 ## License
 

@@ -30,7 +30,10 @@ GitHub: <https://github.com/Panth977/icebase> (public). License: Apache-2.0.
   `setRules`, `createBucket`, `createSite`, `deploy`, `setDNS`, `setProviders`) so a project
   can be set up from code instead of the Firebase console.
 - Modes in phase 1: **firebase and emulator** (SQLite). vm mode is phase 3.
-- Console GUI comes after the SDK and CLI.
+- Console GUI comes after the SDK and CLI. Done 2026-10-28 (v1): `packages/cli/src/console/` —
+  `api.ts` (operations over the admin APIs), `page.ts` (plain DOM, strict CSP), served by the
+  server at `/__/icebase/console` and by `icebase console --env X`. Not yet: logs tail, usage/cost,
+  rules playground, import/export, Remote Config / FCM / App Check screens (not phase-1 services).
 - Firebase names and call shapes exactly. No new query language. Typed from the schema.
 
 ## Build order (worked on ORCH-26, no separate board)
@@ -112,7 +115,9 @@ suite and publishes the three packages to JSR (linked to this repository, OIDC, 
   (regenerate the fixture with `node --import tsx ../../../../cli/src/cli/index.ts gen dart --out
   icebase.g.dart` in `test/fixture`); `cd packages/dart/icebase_flutter && flutter analyze && flutter test`.
   Not on pub.dev yet: publishing needs Panth's pub.dev account.
-- Management APIs: `ICEBASE_LIVE_PROJECT=icebase-test-p977 npx tsx test/live/manage.live.ts`
+- Live conformance (Firestore via the web SDK, RTDB via admin; rules opened for the run and locked
+  after): `ICEBASE_LIVE_PROJECT=icebase-test-p977 npx vitest run live/` in `packages/tests`.
+- Management APIs: `ICEBASE_LIVE_PROJECT=icebase-test-p977 npx tsx live/manage.live.ts`
   in `packages/tests` (uses `gcloud auth print-access-token`; the project is IceBase's own
   test project, Spark plan: Auth "Get started" and the default Storage bucket need the console
   or Blaze).
