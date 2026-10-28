@@ -112,6 +112,19 @@ describe('console · IceBase server', () => {
     }
   });
 
+  it('Schema as TypeScript; the API reference page (Scalar pinned by hash) and its script', async () => {
+    const ts = (await ok('schema.ts')).blocks as { kind: string; path: string; code: string }[];
+    expect(ts.find((b) => b.path === 'users/{uid}/orders')!.code).toContain('product: DocumentReference<Products>;');
+    expect(ts.find((b) => b.path === 'products')!.code).toMatch(/export interface Products \{\n  name: string;\n  stock: number; \/\/ integer\n\}/);
+    const page = await fetch(`${s.url}/__/icebase/console/api-reference.html`);
+    const html = await page.text();
+    expect(html).toMatch(/integrity="sha384-[A-Za-z0-9+/=]+" crossorigin="anonymous"/);
+    expect(page.headers.get('content-security-policy')).toContain("script-src 'self' https://cdn.jsdelivr.net");
+    expect(page.headers.get('content-security-policy')).toContain("frame-ancestors 'self'");
+    const ref = await (await fetch(`${s.url}/__/icebase/console/api-reference.js`)).text();
+    expect(() => new Function(ref.replace(/\bawait\b/g, ''))).not.toThrow();
+  });
+
   it('Functions, Hosting and Rules', async () => {
     const fns = (await ok('fn.list')).functions as { name: string; kind: string; trigger: string }[];
     expect(fns.find((f) => f.name === 'nightly')).toMatchObject({ kind: 'schedule', trigger: 'every 24 hours' });

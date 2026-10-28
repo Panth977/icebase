@@ -1,6 +1,6 @@
 {
   "name": "@panth977/icebase",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "description": "Firebase's client API with an explicit schema, declared indexes and modes per service (firebase | emulator).",
   "license": "Apache-2.0",
   "type": "module",

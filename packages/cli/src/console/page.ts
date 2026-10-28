@@ -18,6 +18,7 @@ textarea,input,select{font:12.5px ui-monospace,Menlo,monospace;background:var(--
 button{font:inherit;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:6px;padding:5px 10px;cursor:pointer;margin:2px 4px 2px 0}button.p{background:var(--acc);border-color:var(--acc);color:#fff}button.d{color:var(--bad)}
 .badge{display:inline-block;font-size:11.5px;border:1px solid var(--line);border-radius:10px;padding:1px 8px;margin:0 4px 4px 0}.firebase{color:#c2410c}.emulator{color:var(--acc)}
 .err{color:var(--bad);white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12.5px}.ok{color:var(--ok)}.mute{color:var(--mute)}pre{white-space:pre-wrap;font-size:12.5px;margin:0}
+.code pre.ts{font:12.5px/1.55 ui-monospace,Menlo,monospace;overflow:auto;margin:0}.tk-c{color:#8a8a83;font-style:italic}.tk-s{color:#15803d}.tk-k{color:#7c3aed;font-weight:600}.tk-t{color:#0e7490}.tk-n{color:#c2410c}@media (prefers-color-scheme:dark){.tk-s{color:#86efac}.tk-k{color:#c4b5fd}.tk-t{color:#67e8f9}.tk-n{color:#fdba74}}
 .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0}
 </style></head><body>
 <nav><h1>IceBase<small id="proj">…</small></h1><div id="nav"></div></nav>
@@ -44,6 +45,21 @@ const err = (e) => $('div', { class: 'err' }, e.message || String(e));
 const json = (v) => JSON.stringify(v, null, 2);
 const set = (el, ...kids) => { el.replaceChildren(...kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false)); return el; };
 async function guard(el, fn) { try { await fn(); } catch (e) { el.append(err(e)); } }
+
+// TypeScript, coloured: comments, strings, keywords, types, numbers. Text only (no HTML is built from data).
+const TS_TOKEN = /(\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*)|("(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*')|\\b(export|interface|type|readonly|extends|import|from)\\b|\\b(string|number|boolean|unknown|null|undefined|Record|Timestamp|GeoPoint|DocumentReference|DocumentData|[A-Z][A-Za-z0-9_]*)\\b|\\b(\\d+(?:\\.\\d+)?)\\b/g;
+function highlight(code) {
+  const pre = $('pre', { class: 'ts' });
+  let at = 0;
+  for (const m of code.matchAll(TS_TOKEN)) {
+    if (m.index > at) pre.append(code.slice(at, m.index));
+    const cls = m[1] ? 'c' : m[2] ? 's' : m[3] ? 'k' : m[4] ? 't' : 'n';
+    pre.append($('span', { class: 'tk-' + cls }, m[0]));
+    at = m.index + m[0].length;
+  }
+  if (at < code.length) pre.append(code.slice(at));
+  return pre;
+}
 
 const pages = {
   async overview() {
@@ -114,12 +130,18 @@ const pages = {
   },
 
   async schema() {
-    const s = await api('schema');
-    return [$('h2', {}, 'Schema'), s.collections.map((c) => $('div', { class: 'card' }, $('b', {}, c.path), c.group ? $('span', { class: 'badge' }, 'group') : null, c.ttl ? $('span', { class: 'badge' }, 'ttl ' + c.ttl) : null,
-      $('table', {}, $('tr', {}, $('th', {}, 'Field'), $('th', {}, 'Type'), $('th', {}, '')), c.fields.map((f) => $('tr', {}, $('td', {}, f.name), $('td', {}, f.type), $('td', { class: 'mute' }, f.optional ? 'optional' : '')))),
-      $('div', { class: 'row' }, c.indexes.map((i) => $('span', { class: 'badge' }, i.code))))),
-      s.paths.length ? [$('h3', {}, 'Realtime Database paths'), s.paths.map((p) => $('div', { class: 'card' }, $('b', {}, p.path), ' ', $('span', { class: 'mute' }, p.value.type), p.indexOn.length ? $('span', { class: 'badge' }, '.indexOn ' + p.indexOn.join(', ')) : null))] : null,
-      s.files.length ? [$('h3', {}, 'Storage paths'), s.files.map((f) => $('div', { class: 'card' }, $('b', {}, f.path), ' ', $('span', { class: 'mute' }, (f.contentTypes.join(', ') || 'any type') + (f.maxBytes ? ' · max ' + f.maxBytes + ' bytes' : ''))))] : null];
+    const r = await api('schema.ts');
+    const q = $('input', { placeholder: 'filter: collection, field or type', style: 'width:340px' });
+    const list = $('div');
+    const show = () => {
+      const f = q.value.trim().toLowerCase();
+      const blocks = r.blocks.filter((b) => !f || b.code.toLowerCase().includes(f) || b.path.toLowerCase().includes(f));
+      set(list, blocks.map((b) => $('div', { class: 'card code' }, $('div', { class: 'row', style: 'margin:0 0 6px' }, $('b', {}, b.path), $('span', { class: 'badge' }, b.kind === 'collection' ? 'Firestore' : b.kind === 'path' ? 'Realtime Database' : 'Storage'), $('button', { style: 'margin-left:auto', on: { click: () => navigator.clipboard.writeText(b.code) } }, 'Copy')), highlight(b.code))));
+    };
+    q.addEventListener('input', show);
+    show();
+    const all = r.blocks.map((b) => b.code).join('\\n\\n');
+    return [$('h2', {}, 'Schema'), $('div', { class: 'row' }, q, $('span', { class: 'mute' }, r.blocks.length + ' declarations'), $('button', { on: { click: () => navigator.clipboard.writeText(all) } }, 'Copy all as .ts')), list];
   },
 
   async indexes() {
@@ -214,22 +236,13 @@ const pages = {
 
   async apis() {
     const r = await api('apis');
-    const method = (m) => $('span', { class: 'badge' }, m.toUpperCase());
-    const docs = r.openapi.map((d) => {
-      if (d.error) return $('div', { class: 'card' }, $('b', {}, d.title), ' ', $('span', { class: 'err' }, d.error));
-      const rows = [];
-      for (const [p, ops] of Object.entries(d.doc.paths || {})) for (const [m, op] of Object.entries(ops)) {
-        if (!op || typeof op !== 'object' || !op.responses) continue;
-        const detail = $('pre', { style: 'display:none' }, json({ parameters: op.parameters, requestBody: op.requestBody, responses: op.responses, security: op.security }));
-        rows.push($('tr', {}, $('td', {}, method(m)), $('td', {}, $('a', { href: '#', on: { click: (e) => { e.preventDefault(); detail.style.display = detail.style.display ? '' : 'none'; } } }, p), detail), $('td', {}, op.summary || ''), $('td', { class: 'mute' }, (op['x-scopes'] || op.tags || []).join(', '))));
-      }
-      return $('div', { class: 'card' }, $('b', {}, d.title), ' ', $('span', { class: 'mute' }, (d.doc.info && d.doc.info.version ? 'v' + d.doc.info.version + ' · ' : '') + rows.length + ' operations · ' + d.url), $('table', {}, rows));
-    });
     const fns = Array.isArray(r.functions) ? r.functions : [];
+    const frame = $('iframe', { src: 'api-reference.html', title: 'API reference', style: 'width:100%;height:calc(100vh - 150px);border:1px solid var(--line);border-radius:8px;background:var(--panel)' });
+    const fnTable = $('div', { class: 'card', style: 'display:none' }, r.functions.error ? $('span', { class: 'err' }, r.functions.error) : $('table', {}, fns.map((f) => $('tr', {}, $('td', {}, f.name), $('td', {}, f.kind), $('td', { class: 'mute' }, f.trigger || '')))));
+    const docs = r.openapi.map((d) => d.error ? d.title + ': ' + d.error : d.title + ' (' + Object.keys((d.doc && d.doc.paths) || {}).length + ' paths)');
     return [$('h2', {}, 'APIs'),
-      $('h3', {}, 'Hosted functions'), $('div', { class: 'card' }, r.functions.error ? $('span', { class: 'err' }, r.functions.error) : $('table', {}, fns.map((f) => $('tr', {}, $('td', {}, f.name), $('td', {}, f.kind), $('td', { class: 'mute' }, f.trigger || ''))))),
-      r.endpoints.length ? [$('h3', {}, 'Declared endpoints (icebase/api)'), $('div', { class: 'card' }, $('table', {}, r.endpoints.map((e) => $('tr', {}, $('td', {}, e.name), $('td', {}, e.http ? method(e.http.method) : 'callable', ' ', e.http ? e.http.path : ''), $('td', {}, e.summary || ''), $('td', { class: 'mute' }, e.auth || '')))))] : null,
-      r.openapi.length ? [$('h3', {}, 'OpenAPI documents'), docs] : null];
+      $('div', { class: 'row' }, $('span', { class: 'mute' }, docs.join(' · ')), $('button', { style: 'margin-left:auto', on: { click: () => { fnTable.style.display = fnTable.style.display ? '' : 'none'; } } }, 'Hosted functions (' + fns.length + ')'), $('a', { href: 'api-reference.html', target: '_blank' }, 'Open in a tab')),
+      fnTable, frame];
   },
 
   async rules() {
@@ -258,4 +271,41 @@ fetch('targets.json').then((r) => r.json()).then(({ targets }) => {
 }).catch(() => {});
 go();
 api('overview').then((o) => { document.getElementById('proj').textContent = o.name + ' · ' + o.env; }).catch(() => {});
+`;
+
+/** Scalar's API reference, pinned (the console's CSP lets in this one file, checked by its hash). */
+export const SCALAR = {
+  src: 'https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.76.0/dist/browser/standalone.js',
+  integrity: 'sha384-oH1C0RwqcwbVXkC+r8A+4qRoyEUQdtxAzOwumkxZtQBBcsy61FOoPt7B50OVJYYQ',
+};
+
+export const REFERENCE_HTML = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>API reference · IceBase console</title>
+</head><body style="margin:0">
+<div id="app"></div>
+<script data-cfasync="false" src="${SCALAR.src}" integrity="${SCALAR.integrity}" crossorigin="anonymous"></script>
+<script type="module" data-cfasync="false" src="api-reference.js"></script>
+</body></html>`;
+
+export const REFERENCE_JS = `'use strict';
+// The API reference (Scalar): every OpenAPI document of the deployment the console is on.
+const base = sessionStorage.getItem('icebase-console-base') || '';
+const token = sessionStorage.getItem('icebase-console-token:' + base) || 'owner';
+const app = document.getElementById('app');
+const say = (t) => { app.textContent = t; app.style.cssText = 'padding:24px;font:14px system-ui;color:#b91c1c'; };
+try {
+  const res = await fetch((base ? base.replace(/\\/?$/, '/') : '') + 'api/apis', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token }, body: '{}' });
+  const r = await res.json();
+  if (!res.ok || r.error) throw new Error((r.error && r.error.message) || 'HTTP ' + res.status);
+  const sources = r.openapi.filter((d) => d.doc && !d.error).map((d, i) => ({ title: d.title, slug: 'doc-' + i, content: d.doc, default: i === 0 }));
+  const failed = r.openapi.filter((d) => d.error).map((d) => d.title + ': ' + d.error);
+  if (!sources.length) say('No OpenAPI document could be read. ' + failed.join(' · '));
+  else {
+    if (failed.length) console.warn('API reference: ' + failed.join(' · '));
+    window.Scalar.createApiReference('#app', { sources, withDefaultFonts: false, darkMode: matchMedia('(prefers-color-scheme: dark)').matches, hideDarkModeToggle: false, showSidebar: true, defaultOpenAllTags: false, persistAuth: false, telemetry: false, hideClientButton: false });
+  }
+} catch (e) {
+  say('Could not load the API documents: ' + e.message + ' (open the console first: it holds the token).');
+}
 `;

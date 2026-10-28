@@ -6,7 +6,7 @@ import type { AnyConfig } from '@panth977/icebase/config';
 import { IceBaseError } from '@panth977/icebase/errors';
 import { googleClient } from '../internal/google-rest.ts';
 import { consoleApi, type ConsoleOptions } from './api.ts';
-import { CONSOLE_HTML, CONSOLE_JS } from './page.ts';
+import { CONSOLE_HTML, CONSOLE_JS, REFERENCE_HTML, REFERENCE_JS } from './page.ts';
 
 export type { ConsoleOptions } from './api.ts';
 export { consoleApi } from './api.ts';
@@ -55,6 +55,20 @@ export function consoleHandler(base: string, makeOptions: () => ConsoleOptions, 
     if (path !== b && !path.startsWith(`${b}/`)) return null;
     if (path === b) return new Response(null, { status: 301, headers: { location: `${b}/` } });
     if (path === `${b}/` && req.method === 'GET') return new Response(CONSOLE_HTML, { headers: { 'content-type': 'text/html; charset=utf-8', ...SECURITY, 'content-security-policy': csp(options().config.console?.targets ?? []) } });
+    // The API reference (Scalar, pinned by hash), shown in a frame of the console.
+    if (path === `${b}/api-reference.html` && req.method === 'GET') {
+      const o = options();
+      const site = o.siteOrigin && !/\/\/(127\.|localhost|\[::1\])/.test(o.siteOrigin) ? ` ${new URL(o.siteOrigin).origin}` : '';
+      const targets = (o.config.console?.targets ?? []).map((t) => ` ${new URL(t.url).origin}`).join('');
+      return new Response(REFERENCE_HTML, {
+        headers: {
+          'content-type': 'text/html; charset=utf-8',
+          ...SECURITY,
+          'content-security-policy': `default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'${targets}${site}; frame-ancestors 'self'`,
+        },
+      });
+    }
+    if (path === `${b}/api-reference.js` && req.method === 'GET') return new Response(REFERENCE_JS, { headers: { 'content-type': 'text/javascript; charset=utf-8', ...SECURITY } });
     if (path === `${b}/app.js` && req.method === 'GET') return new Response(CONSOLE_JS, { headers: { 'content-type': 'text/javascript; charset=utf-8', ...SECURITY } });
     // The deployments the page can switch to (config.console.targets): public, no data in it.
     if (path === `${b}/targets.json` && req.method === 'GET') return new Response(JSON.stringify({ targets: options().config.console?.targets ?? [] }), { headers: { 'content-type': 'application/json', ...SECURITY } });

@@ -5,7 +5,8 @@
 
 import type { IceBaseApp } from '@panth977/icebase/app';
 import { readEnv, resolveModes, SERVICES, type AnyConfig } from '@panth977/icebase/config';
-import { describe } from '@panth977/icebase/describe';
+import { describe, openApi } from '@panth977/icebase/describe';
+import { schemaTypeScript } from './typescript.ts';
 import { IceBaseError } from '@panth977/icebase/errors';
 import { matchCollectionPath } from '@panth977/icebase/schema';
 import { getAdminAuth, getAdminDatabase, getAdminStorage } from '@panth977/icebase-server/admin';
@@ -97,6 +98,8 @@ export function consoleApi(o: ConsoleOptions): (op: string, b: Record<string, un
       };
     },
     schema: () => describe(config),
+    // The schema as TypeScript (the Schema page).
+    'schema.ts': () => ({ blocks: schemaTypeScript(config) }),
     async apis() {
       // Everything the project serves: IceBase-declared endpoints, the deployed functions, and the
       // app's own OpenAPI documents (config.console.openapi).
@@ -108,12 +111,17 @@ export function consoleApi(o: ConsoleOptions): (op: string, b: Record<string, un
           try {
             const r = await fetch(url);
             if (!r.ok) throw new Error(`${r.status} from ${url}`);
-            return { title: d.title, url, doc: await r.json() };
+            const doc = (await r.json()) as { servers?: unknown[] };
+            // "Try it" needs the app's address: the site's, when it is one a browser can reach.
+            if (!doc.servers?.length && o.siteOrigin && !/\/\/(127\.|localhost|\[::1\])/.test(o.siteOrigin)) doc.servers = [{ url: new URL(o.siteOrigin).origin }];
+            return { title: d.title, url, doc };
           } catch (e) {
             return { title: d.title, url, error: (e as Error).message };
           }
         }),
       );
+      // The endpoints declared with icebase/api, as OpenAPI too (the API reference shows every document alike).
+      if (doc.endpoints.length) openapi.unshift({ title: 'Declared endpoints (icebase/api)', url: 'icebase.config', doc: openApi(config, doc) as never });
       return { endpoints: doc.endpoints, functions: fns, openapi };
     },
 
