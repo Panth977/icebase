@@ -121,11 +121,18 @@ export interface IceBaseConfig<C extends Record<string, AnyCollection>, E extend
   /** Needed when any environment uses mode 'vm' (phase 3). */
   vm?: { url: string; databaseUrlEnv: string; blobs?: { kind: 'disk'; dir: string } | { kind: 's3'; bucket: string; endpointEnv?: string } };
   /** Emulator defaults: data in .icebase/, API on :4400, hosting on :5002. */
+  /** The console (/__/icebase/console, `icebase console`). */
+  console?: {
+    /** Port of `icebase console` (default 4600). */
+    port?: number;
+    /** Other deployments of this project the console switches to, e.g. { name: 'Firebase', url: 'https://…/__/icebase/console' }. */
+    targets?: readonly { name: string; url: string }[];
+    /** OpenAPI documents the app serves, shown on the API page: a path on the app's site, or a full URL. */
+    openapi?: readonly { title: string; path: string }[];
+  };
   emulator?: { dataDir?: string; port?: number; hostingPort?: number; host?: string; seed?: string; /** Sign ID tokens and refuse unsigned ones (a server others reach). */ signTokens?: boolean; /** Also take the realtime socket on this path (besides /v1/rt) — e.g. the one a proxy already upgrades. */ socketPath?: string };
 
   environments: Record<E, Environment>;
-  /** Same console GUI for every mode. */
-  console?: { port?: number; enabled?: boolean };
 }
 
 export type AnyConfig = IceBaseConfig<Record<string, AnyCollection>, string, any>;

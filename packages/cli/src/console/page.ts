@@ -28,13 +28,15 @@ button{font:inherit;border:1px solid var(--line);background:var(--panel);color:v
 export const CONSOLE_JS = `'use strict';
 const $ = (t, a = {}, ...kids) => { const e = document.createElement(t); for (const [k, v] of Object.entries(a)) { if (k === 'on') for (const [ev, fn] of Object.entries(v)) e.addEventListener(ev, fn); else if (k === 'class') e.className = v; else if (v !== undefined && v !== null && v !== false) e.setAttribute(k, v === true ? '' : v); } for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) e.append(k instanceof Node ? k : String(k)); return e; };
 const main = document.getElementById('main');
-const tokenKey = 'icebase-console-token';
+// The deployment this page acts on: '' is the one serving it; others come from config.console.targets.
+let base = sessionStorage.getItem('icebase-console-base') || '';
+const tokenKey = () => 'icebase-console-token:' + base;
 const fromHash = new URLSearchParams(location.hash.slice(1)).get('token');
-if (fromHash) { sessionStorage.setItem(tokenKey, fromHash); history.replaceState(null, '', location.pathname); }
+if (fromHash) { sessionStorage.setItem(tokenKey(), fromHash); history.replaceState(null, '', location.pathname); }
 async function api(op, body = {}) {
-  const r = await fetch('api/' + op, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (sessionStorage.getItem(tokenKey) || 'owner') }, body: JSON.stringify(body) });
+  const r = await fetch((base ? base.replace(/\/?$/, '/') : '') + 'api/' + op, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (sessionStorage.getItem(tokenKey()) || 'owner') }, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
-  if (r.status === 401 || r.status === 403) { const t = prompt('Admin token (ICEBASE_ADMIN_TOKEN, or the admin-token file in the data directory):'); if (t) { sessionStorage.setItem(tokenKey, t); return api(op, body); } }
+  if (r.status === 401 || r.status === 403) { const t = prompt('Admin token for ' + (base || location.host) + ' (ICEBASE_ADMIN_TOKEN, or the admin-token file in the data directory):'); if (t) { sessionStorage.setItem(tokenKey(), t); return api(op, body); } }
   if (!r.ok || j.error) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
   return j;
 }
@@ -210,6 +212,26 @@ const pages = {
       $('p', { class: 'mute' }, 'Deploy a release with icebase deploy, or manageHosting(app).deploy().')];
   },
 
+  async apis() {
+    const r = await api('apis');
+    const method = (m) => $('span', { class: 'badge' }, m.toUpperCase());
+    const docs = r.openapi.map((d) => {
+      if (d.error) return $('div', { class: 'card' }, $('b', {}, d.title), ' ', $('span', { class: 'err' }, d.error));
+      const rows = [];
+      for (const [p, ops] of Object.entries(d.doc.paths || {})) for (const [m, op] of Object.entries(ops)) {
+        if (!op || typeof op !== 'object' || !op.responses) continue;
+        const detail = $('pre', { style: 'display:none' }, json({ parameters: op.parameters, requestBody: op.requestBody, responses: op.responses, security: op.security }));
+        rows.push($('tr', {}, $('td', {}, method(m)), $('td', {}, $('a', { href: '#', on: { click: (e) => { e.preventDefault(); detail.style.display = detail.style.display ? '' : 'none'; } } }, p), detail), $('td', {}, op.summary || ''), $('td', { class: 'mute' }, (op['x-scopes'] || op.tags || []).join(', '))));
+      }
+      return $('div', { class: 'card' }, $('b', {}, d.title), ' ', $('span', { class: 'mute' }, (d.doc.info && d.doc.info.version ? 'v' + d.doc.info.version + ' · ' : '') + rows.length + ' operations · ' + d.url), $('table', {}, rows));
+    });
+    const fns = Array.isArray(r.functions) ? r.functions : [];
+    return [$('h2', {}, 'APIs'),
+      $('h3', {}, 'Hosted functions'), $('div', { class: 'card' }, r.functions.error ? $('span', { class: 'err' }, r.functions.error) : $('table', {}, fns.map((f) => $('tr', {}, $('td', {}, f.name), $('td', {}, f.kind), $('td', { class: 'mute' }, f.trigger || ''))))),
+      r.endpoints.length ? [$('h3', {}, 'Declared endpoints (icebase/api)'), $('div', { class: 'card' }, $('table', {}, r.endpoints.map((e) => $('tr', {}, $('td', {}, e.name), $('td', {}, e.http ? method(e.http.method) : 'callable', ' ', e.http ? e.http.path : ''), $('td', {}, e.summary || ''), $('td', { class: 'mute' }, e.auth || '')))))] : null,
+      r.openapi.length ? [$('h3', {}, 'OpenAPI documents'), docs] : null];
+  },
+
   async rules() {
     const out = $('div');
     const show = (svc) => guard(out, async () => { const r = await api('rules', { service: svc }); set(out, $('div', { class: 'mute' }, r.file ? 'file: ' + r.file : 'no rules file in the config'), $('pre', { class: 'card' }, r.text ?? '(none)')); });
@@ -218,7 +240,7 @@ const pages = {
   },
 };
 
-const names = { overview: 'Overview', firestore: 'Firestore', query: 'Query runner', schema: 'Schema', indexes: 'Indexes', database: 'Realtime Database', auth: 'Authentication', storage: 'Storage', functions: 'Functions', hosting: 'Hosting', rules: 'Rules' };
+const names = { overview: 'Overview', apis: 'APIs', firestore: 'Firestore', query: 'Query runner', schema: 'Schema', indexes: 'Indexes', database: 'Realtime Database', auth: 'Authentication', storage: 'Storage', functions: 'Functions', hosting: 'Hosting', rules: 'Rules' };
 async function go() {
   const page = (location.hash.slice(1) || 'overview').split('?')[0];
   set(document.getElementById('nav'), Object.entries(names).map(([k, v]) => $('a', { href: '#' + k, class: k === page ? 'on' : '' }, v)));
@@ -226,6 +248,14 @@ async function go() {
   try { set(main, ...(await (pages[page] || pages.overview)()).flat()); } catch (e) { set(main, $('h2', {}, names[page] || ''), err(e)); }
 }
 window.addEventListener('hashchange', go);
+// The deployment switcher (config.console.targets).
+fetch('targets.json').then((r) => r.json()).then(({ targets }) => {
+  if (!targets.length) return;
+  const sel = $('select', { style: 'width:100%;margin:0 0 10px' }, $('option', { value: '' }, 'This server'), targets.map((t) => $('option', { value: t.url }, t.name)));
+  sel.value = base;
+  sel.addEventListener('change', () => { base = sel.value; sessionStorage.setItem('icebase-console-base', base); go(); api('overview').then((o) => { document.getElementById('proj').textContent = o.name + ' · ' + o.env; }).catch(() => {}); });
+  document.getElementById('nav').before(sel);
+}).catch(() => {});
 go();
 api('overview').then((o) => { document.getElementById('proj').textContent = o.name + ' · ' + o.env; }).catch(() => {});
 `;

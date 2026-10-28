@@ -278,6 +278,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
       return {
         config: ctx.config,
         env,
+        siteOrigin: ctx.origin,
         app: initializeAdminApp(ctx.config, env, { name: `icebase-console-${Date.now()}`, emulator: { origin: ctx.origin, adminToken } }),
         server: {
           manage: async (svc, op, body) => {
@@ -301,6 +302,16 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
   );
 
   const handler = async (req: Request): Promise<Response> => {
+    // The console (/__/icebase/console): the page for anyone, its API for the admin, and its own
+    // CORS (only config.console.targets) — never the services' wildcard.
+    if (new URL(req.url).pathname.startsWith('/__/icebase/console')) {
+      try {
+        const r = await consoleRoute(req);
+        if (r) return r;
+      } catch (e) {
+        return errorResponse(e);
+      }
+    }
     // Preflight for the service APIs; with hosting, anything else is the app's (a function may answer it).
     if (req.method === 'OPTIONS' && (!hosting || SERVICE_PATH.test(new URL(req.url).pathname))) return new Response(null, { status: 204, headers: CORS });
     const url = new URL(req.url);
@@ -308,11 +319,6 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
       if (url.pathname === '/__/icebase/health') return json({ ok: true, project: projectId, services: [...services.keys()], documents: firestore.count() });
       const authz = req.headers.get('authorization');
       const caller = await ctx.verify(authz ? authz.replace(/^(Bearer|Firebase)\s+/i, '') : null);
-      // The console (/__/icebase/console): the page for anyone, its API for the admin.
-      if (url.pathname.startsWith('/__/icebase/console')) {
-        const r = await consoleRoute(req);
-        if (r) return r;
-      }
       const mg = /^\/__\/icebase\/admin\/manage\/([a-zA-Z]+)\/([a-zA-Z]+)$/.exec(url.pathname);
       if (mg && req.method === 'POST') {
         if (!caller.admin) throw new IceBaseError('permission-denied', 'the management API is the admin\'s');

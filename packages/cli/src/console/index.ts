@@ -14,8 +14,10 @@ const SECURITY = {
   'cache-control': 'no-store',
 };
 
-export function consoleHandler(base: string, options: () => ConsoleOptions, isAdmin: (req: Request) => Promise<boolean>): (req: Request) => Promise<Response | null> {
+export function consoleHandler(base: string, makeOptions: () => ConsoleOptions, isAdmin: (req: Request) => Promise<boolean>): (req: Request) => Promise<Response | null> {
   let api: ReturnType<typeof consoleApi> | null = null;
+  let made: ConsoleOptions | null = null;
+  const options = () => (made ??= makeOptions());
   const b = base.replace(/\/$/, '');
   return async (req) => {
     const path = new URL(req.url).pathname;
@@ -23,9 +25,15 @@ export function consoleHandler(base: string, options: () => ConsoleOptions, isAd
     if (path === b) return new Response(null, { status: 301, headers: { location: `${b}/` } });
     if (path === `${b}/` && req.method === 'GET') return new Response(CONSOLE_HTML, { headers: { 'content-type': 'text/html; charset=utf-8', ...SECURITY } });
     if (path === `${b}/app.js` && req.method === 'GET') return new Response(CONSOLE_JS, { headers: { 'content-type': 'text/javascript; charset=utf-8', ...SECURITY } });
+    // The deployments the page can switch to (config.console.targets): public, no data in it.
+    if (path === `${b}/targets.json` && req.method === 'GET') return new Response(JSON.stringify({ targets: options().config.console?.targets ?? [] }), { headers: { 'content-type': 'application/json', ...SECURITY } });
+    // Another deployment's console page calls this API across origins: only the listed ones.
+    const origin = req.headers.get('origin');
+    const allowed: Record<string, string> = origin && (options().config.console?.targets ?? []).some((t) => new URL(t.url).origin === origin) ? { 'access-control-allow-origin': origin, vary: 'origin', 'access-control-allow-headers': 'authorization, content-type', 'access-control-allow-methods': 'POST, OPTIONS' } : {};
+    if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: allowed });
     const m = /\/api\/([A-Za-z.]+)$/.exec(path);
     if (!m || req.method !== 'POST') return new Response('Not found', { status: 404 });
-    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...SECURITY } });
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...SECURITY, ...allowed } });
     if (!(await isAdmin(req))) return json({ error: { code: 'permission-denied', message: 'the console is the admin\'s' } }, 403);
     try {
       api ??= consoleApi(options());

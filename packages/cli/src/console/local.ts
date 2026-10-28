@@ -36,7 +36,7 @@ export async function startConsole(config: AnyConfig, env: string, port = 4600):
       return (r.functions ?? []).map((f) => ({ name: f.name.split('/').pop(), kind: f.eventTrigger ? 'event' : 'https', trigger: f.eventTrigger?.eventType ?? f.serviceConfig?.uri ?? '' }));
     },
   };
-  const route = consoleHandler('/__/icebase/console', () => ({ config, env, app, ...(project ? { firebase } : {}) }), async (req) => req.headers.get('authorization') === `Bearer ${token}`);
+  const route = consoleHandler('/__/icebase/console', () => ({ config, env, app, ...(project ? { firebase, siteOrigin: `https://${config.hosting?.site ?? project}.web.app` } : {}) }), async (req) => req.headers.get('authorization') === `Bearer ${token}`);
   const server = createServer(
     nodeListener(async (req) => (new URL(req.url).pathname === '/' ? new Response(null, { status: 302, headers: { location: '/__/icebase/console/' } }) : ((await route(req)) ?? new Response('Not found', { status: 404 })))),
   );

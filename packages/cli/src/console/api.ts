@@ -22,6 +22,8 @@ export interface ConsoleOptions {
   app: IceBaseApp;
   /** On the IceBase server: its own management API (functions, SQL indexes, health). */
   server?: { manage(service: string, op: string, body: Record<string, unknown>): Promise<unknown>; health(): unknown; rules(service: string): string | null };
+  /** Where the app's site answers (for config.console.openapi paths). */
+  siteOrigin?: string;
   /** Firebase mode: rules as deployed, and Cloud Functions (needs the management credential). */
   firebase?: { rules(service: 'firestore' | 'storage' | 'database'): Promise<string | null>; functions(): Promise<unknown[]> };
 }
@@ -95,6 +97,25 @@ export function consoleApi(o: ConsoleOptions): (op: string, b: Record<string, un
       };
     },
     schema: () => describe(config),
+    async apis() {
+      // Everything the project serves: IceBase-declared endpoints, the deployed functions, and the
+      // app's own OpenAPI documents (config.console.openapi).
+      const doc = describe(config);
+      const fns = await Promise.resolve(ops['fn.list']!({})).then((r: unknown) => (r as { functions: unknown[] }).functions).catch((e: Error) => ({ error: e.message }));
+      const openapi = await Promise.all(
+        (config.console?.openapi ?? []).map(async (d) => {
+          const url = /^https?:/.test(d.path) ? d.path : `${(o.siteOrigin ?? '').replace(/\/$/, '')}${d.path}`;
+          try {
+            const r = await fetch(url);
+            if (!r.ok) throw new Error(`${r.status} from ${url}`);
+            return { title: d.title, url, doc: await r.json() };
+          } catch (e) {
+            return { title: d.title, url, error: (e as Error).message };
+          }
+        }),
+      );
+      return { endpoints: doc.endpoints, functions: fns, openapi };
+    },
 
     // ── Firestore ──
     async 'fs.collections'(b) {
