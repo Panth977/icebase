@@ -8,7 +8,7 @@ import fixture from './fixtures/functions-app/functions/config.js';
 
 describe('console · IceBase server', () => {
   let s: RunningEmulator;
-  const config = defineConfig({ name: 'console', schema: fixture.schema, functions: { source: 'functions' }, console: { targets: [{ name: 'Firebase', url: 'https://console.example.com/__/icebase/console' }], openapi: [{ title: 'REST', path: '/demo-icebase/us-central1/hello/openapi.json' }] }, firebase: { projectId: 'demo-icebase', storageBucket: 'demo-icebase.appspot.com' }, environments: { local: { mode: 'emulator' } } });
+  const config = defineConfig({ name: 'console', schema: fixture.schema, functions: { source: 'functions' }, console: { openapi: [{ title: 'REST', path: '/demo-icebase/us-central1/hello/openapi.json' }] }, firebase: { projectId: 'demo-icebase', storageBucket: 'demo-icebase.appspot.com' }, environments: { local: { mode: 'emulator' } } });
   const api = async (op: string, body: Record<string, unknown> = {}, token = 'console-admin') => {
     const r = await fetch(`${s.url}/__/icebase/console/api/${op}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
     return { status: r.status, body: (await r.json()) as Record<string, any> };
@@ -92,15 +92,16 @@ describe('console · IceBase server', () => {
     expect((await ok('st.list', { prefix: 'docs/' })).files).toEqual([]);
   });
 
-  it('APIs: hosted functions and the app\'s OpenAPI documents; targets and cross-origin access for them only', async () => {
+  it('APIs: hosted functions and the app\'s OpenAPI documents; the console knows only its own deployment', async () => {
     const r = await ok('apis');
     expect(r.functions.map((f: { name: string }) => f.name)).toContain('hello');
     expect(r.openapi[0]).toMatchObject({ title: 'REST', doc: { path: '/openapi.json', method: 'GET' } });
-    expect(await (await fetch(`${s.url}/__/icebase/console/targets.json`)).json()).toEqual({ targets: [{ name: 'Firebase', url: 'https://console.example.com/__/icebase/console' }] });
+    // No list of other deployments, and no cross-origin access to its API for anyone.
+    expect((await fetch(`${s.url}/__/icebase/console/targets.json`)).status).toBe(404);
     const pre = await fetch(`${s.url}/__/icebase/console/api/overview`, { method: 'OPTIONS', headers: { origin: 'https://console.example.com' } });
-    expect(pre.headers.get('access-control-allow-origin')).toBe('https://console.example.com');
-    const evil = await fetch(`${s.url}/__/icebase/console/api/overview`, { method: 'OPTIONS', headers: { origin: 'https://evil.example' } });
-    expect(evil.headers.get('access-control-allow-origin')).toBeNull();
+    expect(pre.headers.get('access-control-allow-origin')).toBeNull();
+    const page = await fetch(`${s.url}/__/icebase/console/`);
+    expect(page.headers.get('content-security-policy')).toContain("connect-src 'self';");
   });
 
   it('ICEBASE_CONSOLE_TOKEN opens the console (not the services); a wrong one does not', async () => {

@@ -307,8 +307,8 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
   );
 
   const handler = async (req: Request): Promise<Response> => {
-    // The console (/__/icebase/console): the page for anyone, its API for the admin, and its own
-    // CORS (only config.console.targets) — never the services' wildcard.
+    // The console (/__/icebase/console): the page for anyone, its API for the admin. Same origin
+    // only: a console manages the deployment serving it and knows of no other (no CORS).
     if (new URL(req.url).pathname.startsWith('/__/icebase/console')) {
       try {
         const r = await consoleRoute(req);

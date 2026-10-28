@@ -1,4 +1,4 @@
-import { api, session, targets, type Target } from './api';
+import { api } from './api';
 
 export interface Overview {
   name: string;
@@ -16,12 +16,8 @@ export interface Overview {
 }
 
 export const app = $state({
-  base: session.base,
-  targets: [] as Target[],
   overview: null as Overview | null,
   error: '' as string,
-  /** Bumped when the deployment changes: pages reload. */
-  epoch: 0,
 });
 
 export async function load() {
@@ -33,18 +29,3 @@ export async function load() {
     app.error = (e as Error).message;
   }
 }
-
-export async function boot() {
-  app.targets = await targets();
-  await load();
-}
-
-export async function switchTo(base: string) {
-  session.base = base;
-  app.base = base;
-  app.overview = null;
-  app.epoch++;
-  await load();
-}
-
-export const deploymentName = () => (app.base ? (app.targets.find((t) => t.url === app.base)?.name ?? app.base) : 'This server');

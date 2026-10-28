@@ -3,7 +3,7 @@
   import Toasts from './components/Toasts.svelte';
   import SignIn from './components/SignIn.svelte';
   import { route, go } from './lib/router.svelte';
-  import { app, boot, switchTo, deploymentName } from './lib/state.svelte';
+  import { app, load } from './lib/state.svelte';
   import Overview from './pages/Overview.svelte';
   import Apis from './pages/Apis.svelte';
   import Firestore from './pages/Firestore.svelte';
@@ -27,7 +27,7 @@
   const label = $derived(NAV.flatMap((g) => g.items).find((i) => i.id === route.page)?.label ?? 'Overview');
   const Page = $derived(PAGES[route.page] ?? Overview);
 
-  boot();
+  load();
 </script>
 
 <div class="shell">
@@ -62,29 +62,20 @@
       </div>
       <div class="right">
         {#if app.overview}<span class="pill" class:accent={app.overview.modes.firestore === 'emulator'} title="Where this deployment's data lives">{app.overview.modes.firestore === 'emulator' ? 'IceBase server' : 'Firebase'} · {app.overview.env}</span>{/if}
-        {#if app.targets.length}
-          <label class="switch">
-            <span class="sr">Deployment</span>
-            <select class="select" value={app.base} onchange={(e) => switchTo((e.target as HTMLSelectElement).value)}>
-              <option value="">This server</option>
-              {#each app.targets as t}<option value={t.url}>{t.name}</option>{/each}
-            </select>
-          </label>
-        {/if}
       </div>
     </header>
 
     <main>
       {#if app.error && !app.overview}
         <div class="gate surface">
-          <p><strong>Can't open {deploymentName()}.</strong></p>
+          <p><strong>Can't open this console.</strong></p>
           <p class="muted">{app.error}</p>
-          <button class="btn primary" onclick={() => switchTo(app.base)}>Try again</button>
+          <button class="btn primary" onclick={() => load()}>Try again</button>
         </div>
       {:else if !app.overview}
-        <div class="loading muted">Opening {deploymentName()}…</div>
+        <div class="loading muted">Opening…</div>
       {:else}
-        {#key `${app.epoch}:${route.page}`}
+        {#key route.page}
           <Page />
         {/key}
       {/if}
@@ -115,7 +106,6 @@
   .crumb:hover { background: var(--hover); }
   .crumb:last-child:not(:first-child) { color: var(--ink); }
   .right { display: flex; align-items: center; gap: 10px; flex: none; }
-  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
   main { overflow: auto; min-height: 0; }
   .gate { max-width: 460px; margin: 80px auto; padding: 24px; }
   @media (max-width: 760px) {

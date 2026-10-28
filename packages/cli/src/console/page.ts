@@ -30,12 +30,11 @@ export const REFERENCE_HTML = `<!doctype html>
 
 export const REFERENCE_JS = `'use strict';
 // The API reference (Scalar): every OpenAPI document of the deployment the console is on.
-const base = sessionStorage.getItem('icebase-console-base') || '';
-const token = sessionStorage.getItem('icebase-console-token:' + base) || 'owner';
+const token = sessionStorage.getItem('icebase-console-token') || '';
 const app = document.getElementById('app');
 const say = (t) => { app.textContent = t; app.style.cssText = 'padding:24px;font:14px system-ui;color:#b91c1c'; };
 try {
-  const res = await fetch((base ? base.replace(/\\/?$/, '/') : '') + 'api/apis', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token }, body: '{}' });
+  const res = await fetch('api/apis', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token }, body: '{}' });
   const r = await res.json();
   if (!res.ok || r.error) throw new Error((r.error && r.error.message) || 'HTTP ' + res.status);
   const sources = r.openapi.filter((d) => d.doc && !d.error).map((d, i) => ({ title: d.title, slug: 'doc-' + i, content: d.doc, default: i === 0 }));

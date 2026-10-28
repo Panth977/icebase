@@ -1,9 +1,8 @@
 <script lang="ts">
   // Every API the deployment serves, in a full reference (Scalar): try-it, models, client code.
   import { session } from '../lib/api';
-  import { app } from '../lib/state.svelte';
   import Icon from '../components/Icon.svelte';
-  const src = $derived(`api-reference.html#d=${encodeURIComponent(app.base)}`);
+  const src = 'api-reference.html';
 </script>
 
 <div class="wrap">

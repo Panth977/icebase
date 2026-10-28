@@ -125,8 +125,6 @@ export interface IceBaseConfig<C extends Record<string, AnyCollection>, E extend
   console?: {
     /** Port of `icebase console` (default 4600). */
     port?: number;
-    /** Other deployments of this project the console switches to, e.g. { name: 'Firebase', url: 'https://…/__/icebase/console' }. */
-    targets?: readonly { name: string; url: string }[];
     /** OpenAPI documents the app serves, shown on the API page: a path on the app's site, or a full URL. */
     openapi?: readonly { title: string; path: string }[];
   };

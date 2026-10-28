@@ -7,9 +7,9 @@
     "typecheck": "tsc -p ."
   },
   "dependencies": {
-    "@panth977/icebase": "0.5.7",
-    "@panth977/icebase-cli": "0.5.7",
-    "@panth977/icebase-server": "0.5.7"
+    "@panth977/icebase": "0.5.8",
+    "@panth977/icebase-cli": "0.5.8",
+    "@panth977/icebase-server": "0.5.8"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
