@@ -30,7 +30,13 @@ describe('console · IceBase server', () => {
     expect(page.status).toBe(200);
     expect(await page.text()).toContain('src="app.js"');
     expect(page.headers.get('content-security-policy')).toContain("script-src 'self'");
-    expect((await fetch(`${s.url}/__/icebase/console/app.js`)).headers.get('content-type')).toContain('javascript');
+    const js = await fetch(`${s.url}/__/icebase/console/app.js`);
+    expect(js.headers.get('content-type')).toContain('javascript');
+    // The shipped script parses (it is a string in page.ts: an escaping slip would only show in a browser).
+    const { SourceTextModule } = await import('node:vm').then((m) => m as unknown as { SourceTextModule?: new (s: string) => unknown });
+    const src = await js.text();
+    if (SourceTextModule) new SourceTextModule(src);
+    else expect(() => new Function(src)).not.toThrow();
     expect((await api('overview', {}, 'not-the-admin')).status).toBe(403);
     const o = await ok('overview');
     expect(o).toMatchObject({ name: 'console', env: 'local', modes: { firestore: 'emulator' } });

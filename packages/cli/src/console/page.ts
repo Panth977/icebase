@@ -22,7 +22,7 @@ button{font:inherit;border:1px solid var(--line);background:var(--panel);color:v
 </style></head><body>
 <nav><h1>IceBase<small id="proj">…</small></h1><div id="nav"></div></nav>
 <main id="main"></main>
-<script data-cfasync="false" src="app.js"></script>
+<script type="module" data-cfasync="false" src="app.js"></script>
 </body></html>`;
 
 export const CONSOLE_JS = `'use strict';
@@ -34,7 +34,7 @@ const tokenKey = () => 'icebase-console-token:' + base;
 const fromHash = new URLSearchParams(location.hash.slice(1)).get('token');
 if (fromHash) { sessionStorage.setItem(tokenKey(), fromHash); history.replaceState(null, '', location.pathname); }
 async function api(op, body = {}) {
-  const r = await fetch((base ? base.replace(/\/?$/, '/') : '') + 'api/' + op, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (sessionStorage.getItem(tokenKey()) || 'owner') }, body: JSON.stringify(body) });
+  const r = await fetch((base ? base.replace(/\\/?$/, '/') : '') + 'api/' + op, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (sessionStorage.getItem(tokenKey()) || 'owner') }, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
   if (r.status === 401 || r.status === 403) { const t = prompt('Admin token for ' + (base || location.host) + ' (ICEBASE_ADMIN_TOKEN, or the admin-token file in the data directory):'); if (t) { sessionStorage.setItem(tokenKey(), t); return api(op, body); } }
   if (!r.ok || j.error) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));

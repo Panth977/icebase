@@ -1,6 +1,6 @@
 {
   "name": "@panth977/icebase-cli",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "The icebase CLI (init, dev, deploy, indexes check), the management APIs (create databases, deploy indexes, rules, hosting from code) and the IceBase emulator server.",
   "license": "Apache-2.0",
   "type": "module",
@@ -47,8 +47,8 @@
     "typecheck": "tsc -p ."
   },
   "dependencies": {
-    "@panth977/icebase": "0.5.3",
-    "@panth977/icebase-server": "0.5.3",
+    "@panth977/icebase": "0.5.4",
+    "@panth977/icebase-server": "0.5.4",
     "ws": "^8.18.0",
     "tsx": "^4.20.0",
     "esbuild": "^0.25.0"
