@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import type { IceBaseFunctionRecord } from '@panth977/icebase-server/functions';
 import { matchCollectionPath } from '@panth977/icebase/schema';
+import { IceBaseError } from '@panth977/icebase/errors';
 import { toWire } from './firestore-service.ts';
 import { json, type EmulatorContext, type Service } from './server.ts';
 
@@ -300,8 +301,39 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
   };
   timer = setTimeout(tick, 60_000 - (Date.now() % 60_000));
 
+  // What a function is, for the console: its kind and what triggers it.
+  const describeFn = (name: string, r: Rec) => ({
+    name,
+    kind: r.kind,
+    trigger:
+      r.kind === 'schedule' ? r.schedule
+      : r.kind === 'document' ? `${r.event} ${r.collection ? r.collection.path : r.pattern}`
+      : r.kind === 'database' ? `${r.event} ${r.ref}`
+      : r.kind === 'storage' ? `${r.event}${r.bucket ? ` ${r.bucket}` : ''}`
+      : r.kind === 'auth' ? r.event
+      : r.kind === 'task' ? `queue (max ${r.retry.maxAttempts} attempts)`
+      : r.kind === 'call' ? 'callable'
+      : 'https',
+  });
   return {
     started: () => void ready().then(() => kick()),
+    async manage(op, b) {
+      await ready();
+      switch (op) {
+        case 'list':
+          return { functions: [...fns].map(([n, r]) => describeFn(n, r)) };
+        case 'run': {
+          const r = fns.get(String(b.name ?? ''));
+          if (r?.kind !== 'schedule') throw new IceBaseError('not-found', `no scheduled function ${String(b.name)}`);
+          const t = Date.now();
+          await r.handler();
+          return { ok: true, ms: Date.now() - t };
+        }
+        case 'tasks':
+          return { tasks: tq.prepare(`SELECT id, fn, run_at, attempts FROM tasks ORDER BY run_at LIMIT 500`).all() };
+      }
+      throw new IceBaseError('invalid-argument', `functions: no management operation '${op}'`);
+    },
     async handle(req, url, caller) {
       const m = /^\/([^/]+)\/([a-z]+-[a-z]+\d+)\/([A-Za-z0-9_-]+)(\/.*)?$/.exec(url.pathname);
       if (!m) {

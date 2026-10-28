@@ -284,6 +284,9 @@ export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
       switch (op) {
         case 'listDbs':
           return { databases: [...dbs.keys()].map(info) };
+        case 'sqlIndexes':
+          // What the IceBase server built from the declared indexes, and the document count, per database.
+          return { databases: [...dbs].map(([id, d]) => ({ id, documents: d.engine.count(), sqlIndexes: d.engine.sqlIndexes })) };
         case 'createDb': {
           const id = typeof b.id === 'string' ? b.id : '(default)';
           // The default database is always there on an IceBase server.

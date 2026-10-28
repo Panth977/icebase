@@ -29,6 +29,8 @@ const HELP = `icebase <command>
   check [--strict]              Dry run: the declarations are consistent and every declared endpoint is implemented
                                 (--strict: undeclared callables / HTTP functions are errors too)
   drivers --env X               Print the mode of each service, the wiring between them, and warnings
+  console --env X [--port N]    The IceBase console on this machine for environment X (on the IceBase server it is
+                                also at /__/icebase/console)
 `;
 
 function flags(argv: string[]): { pos: string[]; f: Record<string, string | true> } {
@@ -156,6 +158,16 @@ async function main(argv: string[]): Promise<number> {
       const { dev } = await import('./dev.ts');
       await dev(config, cwd, log, { ...(str(f.env) ? { env: str(f.env)! } : {}) });
       // Runs until Ctrl-C.
+      await new Promise(() => {});
+      return 0;
+    }
+    case 'console': {
+      const env = str(f.env);
+      if (!env) throw new Error('console needs --env');
+      const { config } = await loadConfig(cwd);
+      const { startConsole } = await import('../console/local.ts');
+      const c = await startConsole(config, env, Number(str(f.port) ?? 4600));
+      log(`IceBase console for ${config.name} (env ${env}): ${c.url}`);
       await new Promise(() => {});
       return 0;
     }

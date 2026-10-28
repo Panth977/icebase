@@ -20,6 +20,7 @@ import type { AnyConfig } from '@panth977/icebase/config';
 import { IceBaseError } from '@panth977/icebase/errors';
 import { registerEmbedded } from '@panth977/icebase/app';
 import { nodeListener } from '@panth977/icebase-server/internal';
+import { initializeAdminApp } from '@panth977/icebase-server/admin';
 import { FirestoreEngine } from './firestore-engine.ts';
 
 /** Who is calling: the owner (admin SDKs, the console) or a signed-in user (or nobody). */
@@ -268,6 +269,37 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
     });
   }
 
+  // The console, acting as an admin app of this server.
+  const { consoleHandler } = await import('../console/index.ts');
+  const consoleRoute = consoleHandler(
+    '/__/icebase/console',
+    () => {
+      const env = opts.env ?? Object.keys(config.environments)[0]!;
+      return {
+        config: ctx.config,
+        env,
+        app: initializeAdminApp(ctx.config, env, { name: `icebase-console-${Date.now()}`, emulator: { origin: ctx.origin, adminToken } }),
+        server: {
+          manage: async (svc, op, body) => {
+            const s = services.get(svc) ?? (svc === 'hosting' ? hostingManage : undefined);
+            if (!s?.manage) throw new IceBaseError('not-found', `no ${svc} service on this server`);
+            return s.manage(op, body);
+          },
+          health: () => ({ ok: true, project: projectId, services: [...services.keys()], documents: firestore.count() }),
+          rules: (svc) => {
+            if (svc === 'firestore') return ctx.deployedRules.get('firestore:(default)') ?? (config.rules?.firestore ? readFileSync(resolve(root, config.rules.firestore), 'utf8') : null);
+            if (svc === 'storage') return ctx.deployedRules.get(`storage:${config.firebase?.storageBucket ?? `${projectId}.appspot.com`}`) ?? (config.rules?.storage ? readFileSync(resolve(root, config.rules.storage), 'utf8') : null);
+            return ctx.deployedRules.get(`database:${projectId}-default-rtdb`) ?? (config.rules?.database ? readFileSync(resolve(root, config.rules.database), 'utf8') : null);
+          },
+        },
+      };
+    },
+    async (req) => {
+      const a = req.headers.get('authorization');
+      return (await ctx.verify(a ? a.replace(/^(Bearer|Firebase)\s+/i, '') : null)).admin;
+    },
+  );
+
   const handler = async (req: Request): Promise<Response> => {
     // Preflight for the service APIs; with hosting, anything else is the app's (a function may answer it).
     if (req.method === 'OPTIONS' && (!hosting || SERVICE_PATH.test(new URL(req.url).pathname))) return new Response(null, { status: 204, headers: CORS });
@@ -276,6 +308,11 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
       if (url.pathname === '/__/icebase/health') return json({ ok: true, project: projectId, services: [...services.keys()], documents: firestore.count() });
       const authz = req.headers.get('authorization');
       const caller = await ctx.verify(authz ? authz.replace(/^(Bearer|Firebase)\s+/i, '') : null);
+      // The console (/__/icebase/console): the page for anyone, its API for the admin.
+      if (url.pathname.startsWith('/__/icebase/console')) {
+        const r = await consoleRoute(req);
+        if (r) return r;
+      }
       const mg = /^\/__\/icebase\/admin\/manage\/([a-zA-Z]+)\/([a-zA-Z]+)$/.exec(url.pathname);
       if (mg && req.method === 'POST') {
         if (!caller.admin) throw new IceBaseError('permission-denied', 'the management API is the admin\'s');

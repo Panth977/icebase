@@ -83,6 +83,8 @@ export interface FirestoreManager {
   setIndexes(indexes?: IndexesFile | Schema<Record<string, AnyCollection>, any, any>, opts?: { database?: string; prune?: boolean; wait?: boolean }): Promise<IndexSync>;
   /** Deploy firestore.rules (source text, or { file }). Default: config.rules.firestore. */
   setRules(source?: string | { file: string }, opts?: { database?: string }): Promise<{ ruleset: string; release: string }>;
+  /** The indexes as built: on Firebase each composite with its state (CREATING / READY); on the IceBase server the SQL indexes made from the schema. */
+  listIndexes(opts?: { database?: string }): Promise<{ collectionGroup: string; queryScope?: string; fields: string; state: string }[]>;
 }
 
 export function manageFirestore(app: IceBaseApp): FirestoreManager {
@@ -94,6 +96,11 @@ export function manageFirestore(app: IceBaseApp): FirestoreManager {
     };
     return {
       createDb: (id = '(default)') => onServer(app, 'firestore', 'createDb', { id }),
+      async listIndexes(opts = {}) {
+        const r = await onServer<{ databases: { id: string; sqlIndexes: string[] }[] }>(app, 'firestore', 'sqlIndexes');
+        const d = r.databases.find((x) => x.id === (opts.database ?? '(default)'));
+        return (d?.sqlIndexes ?? []).map((line) => ({ collectionGroup: line.split(':')[0]!, fields: line.split(':').slice(1).join(':').trim(), state: 'READY' }));
+      },
       listDbs: async () => (await onServer<{ databases: FirestoreDatabaseInfo[] }>(app, 'firestore', 'listDbs')).databases,
       setSchema: async (schema) => onServer(app, 'firestore', 'setSchema', await schemaBody(schema)),
       setIndexes: async (indexes) => onServer(app, 'firestore', 'setIndexes', !indexes || 'collections' in indexes ? await schemaBody(indexes as Schema<Record<string, AnyCollection>, any, any> | undefined) : { indexes }),
@@ -193,6 +200,19 @@ export function manageFirestore(app: IceBaseApp): FirestoreManager {
       return (r.databases ?? []).map(info);
     },
     setSchema: (schema, opts = {}) => syncIndexes(toFile(schema), opts.database, opts.prune ?? false, opts.wait ?? false, true),
+    async listIndexes(opts = {}) {
+      const out: { collectionGroup: string; queryScope: string; fields: string; state: string }[] = [];
+      let pageToken: string | undefined;
+      do {
+        const page = await g.call<{ indexes?: { name: string; queryScope: string; state: string; fields: { fieldPath: string; order?: string; arrayConfig?: string }[] }[]; nextPageToken?: string }>('GET', `${FIRESTORE}/${dbPath(opts.database)}/collectionGroups/-/indexes${pageToken ? `?pageToken=${pageToken}` : ''}`);
+        for (const ix of page.indexes ?? []) {
+          const parts = ix.name.split('/');
+          out.push({ collectionGroup: parts[parts.indexOf('collectionGroups') + 1]!, queryScope: ix.queryScope, state: ix.state, fields: ix.fields.filter((f) => f.fieldPath !== '__name__').map((f) => `${f.fieldPath} ${(f.order ?? f.arrayConfig ?? '').toLowerCase()}`).join(', ') });
+        }
+        pageToken = page.nextPageToken;
+      } while (pageToken);
+      return out;
+    },
     setIndexes: (indexes, opts = {}) => {
       const file = toFile(indexes);
       return syncIndexes(file, opts.database, opts.prune ?? false, opts.wait ?? false, false);
