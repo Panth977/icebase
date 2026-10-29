@@ -1,6 +1,6 @@
 {
   "name": "@panth977/icebase-server",
-  "version": "0.5.8",
+  "version": "0.6.0",
   "description": "IceBase on the server: admin (firebase-admin), functions (firebase-functions v2, typed triggers) and the custom-auth endpoint.",
   "license": "Apache-2.0",
   "type": "module",
@@ -47,7 +47,7 @@
     "typecheck": "tsc -p ."
   },
   "dependencies": {
-    "@panth977/icebase": "0.5.8"
+    "@panth977/icebase": "0.6.0"
   },
   "peerDependencies": {
     "firebase": "^13.1.0",
