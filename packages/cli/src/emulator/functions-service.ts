@@ -6,13 +6,13 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import type { IceBaseFunctionRecord } from '@panth977/icebase-server/functions';
 import { matchCollectionPath } from '@panth977/icebase/schema';
 import { IceBaseError } from '@panth977/icebase/errors';
 import { toWire } from './firestore-service.ts';
 import { json, type EmulatorContext, type Service } from './server.ts';
+import { taskTables } from './tables.ts';
 
 type Rec = IceBaseFunctionRecord;
 
@@ -229,15 +229,13 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
   ctx.hooks.beforeSignIn = blocking('beforeSignIn');
 
   // Task queues (onTaskDispatched): durable in the data directory, retried with backoff.
-  const tq = new DatabaseSync(ctx.dataDir === ':memory:' ? ':memory:' : join(ctx.dataDir, 'tasks.sqlite'));
-  tq.exec(`PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 10000;
-    CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, fn TEXT NOT NULL, data TEXT NOT NULL, run_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, scheduled TEXT NOT NULL);
-    CREATE INDEX IF NOT EXISTS tasks_due ON tasks (run_at);`);
-  const enqueue = (fn: string, data: unknown, o: { id?: string; scheduleDelaySeconds?: number; scheduleTime?: string }) => {
+  const tq = await ctx.stores.open('tasks');
+  await taskTables(tq);
+  const enqueue = async (fn: string, data: unknown, o: { id?: string; scheduleDelaySeconds?: number; scheduleTime?: string }) => {
     const at = o.scheduleTime ? Date.parse(o.scheduleTime) : Date.now() + (o.scheduleDelaySeconds ?? 0) * 1000;
     const id = o.id ?? randomUUID();
     try {
-      tq.prepare(`INSERT INTO tasks (id, fn, data, run_at, scheduled) VALUES (?, ?, ?, ?, ?)`).run(id, fn, JSON.stringify(data ?? null), at, new Date(at).toISOString());
+      await tq.run(`INSERT INTO tasks (id, fn, data, run_at, scheduled) VALUES (?, ?, ?, ?, ?)`, id, fn, JSON.stringify(data ?? null), at, new Date(at).toISOString());
     } catch (e) {
       if (/UNIQUE/.test(String(e))) throw Object.assign(new Error(`A task with id ${id} already exists`), { code: 'functions/task-already-exists' });
       throw e;
@@ -257,33 +255,33 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
     try {
       await ready();
       for (;;) {
-        const t = tq.prepare(`SELECT * FROM tasks WHERE run_at <= ? ORDER BY run_at LIMIT 1`).get(Date.now()) as { id: string; fn: string; data: string; attempts: number; scheduled: string } | undefined;
+        const t = (await tq.get(`SELECT * FROM tasks WHERE run_at <= ? ORDER BY run_at LIMIT 1`, Date.now())) as { id: string; fn: string; data: string; attempts: number; scheduled: string } | undefined;
         if (!t) break;
         const r = fns.get(t.fn);
         if (r?.kind !== 'task') {
           log(`functions: task for ${t.fn}, which is not a task queue function — dropped`);
-          tq.prepare(`DELETE FROM tasks WHERE id = ?`).run(t.id);
+          await tq.run(`DELETE FROM tasks WHERE id = ?`, t.id);
           continue;
         }
         try {
           await r.handler({ data: JSON.parse(t.data), queueName: t.fn, id: t.id, retryCount: t.attempts, executionCount: t.attempts, scheduledTime: t.scheduled, previousResponse: undefined, retryReason: undefined, headers: {} } as never);
-          tq.prepare(`DELETE FROM tasks WHERE id = ?`).run(t.id);
+          await tq.run(`DELETE FROM tasks WHERE id = ?`, t.id);
         } catch (e) {
           const n = t.attempts + 1;
           if (n >= r.retry.maxAttempts) {
             fail(t.fn)(e);
             log(`functions: task ${t.id} for ${t.fn} gave up after ${n} attempt(s)`);
-            tq.prepare(`DELETE FROM tasks WHERE id = ?`).run(t.id);
+            await tq.run(`DELETE FROM tasks WHERE id = ?`, t.id);
           } else {
             const backoff = Math.min(r.retry.minBackoffSeconds * 2 ** (n - 1), r.retry.maxBackoffSeconds) * 1000;
-            tq.prepare(`UPDATE tasks SET attempts = ?, run_at = ? WHERE id = ?`).run(n, Date.now() + backoff, t.id);
+            await tq.run(`UPDATE tasks SET attempts = ?, run_at = ? WHERE id = ?`, n, Date.now() + backoff, t.id);
           }
         }
       }
     } finally {
       busy = false;
-      const next = tq.prepare(`SELECT MIN(run_at) at FROM tasks`).get() as { at: number | null };
-      if (next.at !== null) {
+      const next = (await tq.get(`SELECT MIN(run_at) at FROM tasks`).catch(() => undefined)) as { at: number | null } | undefined;
+      if (next && next.at !== null) {
         if (wake) clearTimeout(wake);
         wake = setTimeout(() => void dispatch(), Math.max(0, Math.min(next.at - Date.now(), 60_000)));
       }
@@ -330,7 +328,7 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
           return { ok: true, ms: Date.now() - t };
         }
         case 'tasks':
-          return { tasks: tq.prepare(`SELECT id, fn, run_at, attempts FROM tasks ORDER BY run_at LIMIT 500`).all() };
+          return { tasks: await tq.all(`SELECT id, fn, run_at, attempts FROM tasks ORDER BY run_at LIMIT 500`) };
       }
       throw new IceBaseError('invalid-argument', `functions: no management operation '${op}'`);
     },
@@ -351,13 +349,13 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
           const b = (await req.json().catch(() => ({}))) as { name?: string; data?: unknown; id?: string; scheduleDelaySeconds?: number; scheduleTime?: string };
           if (!b.name) return json({ error: { code: 'invalid-argument', message: 'name' } }, 400);
           try {
-            return json({ id: enqueue(b.name, b.data, b) });
+            return json({ id: await enqueue(b.name, b.data, b) });
           } catch (e) {
             return json({ error: { code: 'already-exists', message: (e as Error).message } }, 409);
           }
         }
         if (url.pathname === '/__/icebase/tasks' && caller.admin) {
-          return json({ tasks: tq.prepare(`SELECT id, fn, run_at, attempts FROM tasks ORDER BY run_at`).all() });
+          return json({ tasks: await tq.all(`SELECT id, fn, run_at, attempts FROM tasks ORDER BY run_at`) });
         }
         if (url.pathname === '/__/icebase/functions/reload' && caller.admin) {
           loading = null;
@@ -388,11 +386,11 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
         return json({ error: { status, message: status === 'INTERNAL' && !err.code ? 'INTERNAL' : (err.message ?? status), ...(err.details !== undefined ? { details: err.details } : {}) } }, http);
       }
     },
-    close() {
+    async close() {
       unsub();
       if (timer) clearTimeout(timer);
       if (wake) clearTimeout(wake);
-      tq.close();
+      await tq.close();
     },
   };
 }

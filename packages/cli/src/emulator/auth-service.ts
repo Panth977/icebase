@@ -4,11 +4,11 @@
 // unsigned JWTs, exactly like Firebase's emulator, which both SDKs accept in emulator mode.
 
 import { createHmac, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { IceBaseError } from '@panth977/icebase/errors';
 import { json, type EmulatorContext, type Service } from './server.ts';
+import { authTables } from './tables.ts';
 import { Buffer } from 'node:buffer';
 
 interface UserRec {
@@ -75,7 +75,7 @@ export function decodeToken(token: string): Record<string, unknown> | null {
   }
 }
 
-export function authService(ctx: EmulatorContext): Service {
+export async function authService(ctx: EmulatorContext): Promise<Service> {
   const p = ctx.projectId;
   // Tokens: unsigned (alg none, like Firebase's emulator) on a developer machine; HMAC-signed
   // when the server signs (signTokens: a server others reach) — then unsigned ones are refused.
@@ -94,43 +94,38 @@ export function authService(ctx: EmulatorContext): Service {
     if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
     return decodeToken(token);
   };
-  const db = new DatabaseSync(ctx.dataDir === ':memory:' ? ':memory:' : join(ctx.dataDir, 'auth.sqlite'));
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS users (uid TEXT PRIMARY KEY, email TEXT, phone TEXT, rec TEXT NOT NULL);
-    CREATE UNIQUE INDEX IF NOT EXISTS users_email ON users (email) WHERE email IS NOT NULL;
-    CREATE UNIQUE INDEX IF NOT EXISTS users_phone ON users (phone) WHERE phone IS NOT NULL;
-    CREATE TABLE IF NOT EXISTS refresh (token TEXT PRIMARY KEY, uid TEXT NOT NULL, provider TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS oob (code TEXT PRIMARY KEY, email TEXT, kind TEXT NOT NULL, uid TEXT, link TEXT, at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS phone_codes (session TEXT PRIMARY KEY, phone TEXT NOT NULL, code TEXT NOT NULL, at INTEGER NOT NULL);
-  `);
-  // A session's own claims (a custom token's, beforeUserSignedIn's sessionClaims) ride on its
-  // refreshed tokens too, and never on the user's other sessions.
-  if (!(db.prepare(`PRAGMA table_info(refresh)`).all() as { name: string }[]).some((c) => c.name === 'claims')) db.exec(`ALTER TABLE refresh ADD COLUMN claims TEXT`);
+  const db = await ctx.stores.open('auth');
+  await authTables(db);
+  const st = (sql: string) => ({
+    get: (...p: unknown[]) => db.get(sql, ...p),
+    all: (...p: unknown[]) => db.all(sql, ...p),
+    run: (...p: unknown[]) => db.run(sql, ...p),
+  });
   const q = {
-    byUid: db.prepare(`SELECT rec FROM users WHERE uid = ?`),
-    byEmail: db.prepare(`SELECT rec FROM users WHERE email = ?`),
-    byPhone: db.prepare(`SELECT rec FROM users WHERE phone = ?`),
-    put: db.prepare(`INSERT INTO users (uid, email, phone, rec) VALUES (?, ?, ?, ?) ON CONFLICT(uid) DO UPDATE SET email = excluded.email, phone = excluded.phone, rec = excluded.rec`),
-    del: db.prepare(`DELETE FROM users WHERE uid = ?`),
-    page: db.prepare(`SELECT rec FROM users WHERE uid > ? ORDER BY uid LIMIT ?`),
-    refreshPut: db.prepare(`INSERT INTO refresh (token, uid, provider, claims) VALUES (?, ?, ?, ?)`),
-    refreshGet: db.prepare(`SELECT uid, provider, claims FROM refresh WHERE token = ?`),
-    oobPut: db.prepare(`INSERT INTO oob (code, email, kind, uid, link, at) VALUES (?, ?, ?, ?, ?, ?)`),
-    oobGet: db.prepare(`SELECT * FROM oob WHERE code = ?`),
-    oobDel: db.prepare(`DELETE FROM oob WHERE code = ?`),
-    oobAll: db.prepare(`SELECT * FROM oob ORDER BY at`),
-    codePut: db.prepare(`INSERT INTO phone_codes (session, phone, code, at) VALUES (?, ?, ?, ?)`),
-    codeGet: db.prepare(`SELECT * FROM phone_codes WHERE session = ?`),
-    codeAll: db.prepare(`SELECT * FROM phone_codes ORDER BY at`),
+    byUid: st(`SELECT rec FROM users WHERE uid = ?`),
+    byEmail: st(`SELECT rec FROM users WHERE email = ?`),
+    byPhone: st(`SELECT rec FROM users WHERE phone = ?`),
+    put: st(`INSERT INTO users (uid, email, phone, rec) VALUES (?, ?, ?, ?) ON CONFLICT(uid) DO UPDATE SET email = excluded.email, phone = excluded.phone, rec = excluded.rec`),
+    del: st(`DELETE FROM users WHERE uid = ?`),
+    page: st(`SELECT rec FROM users WHERE uid > ? ORDER BY uid LIMIT ?`),
+    refreshPut: st(`INSERT INTO refresh (token, uid, provider, claims) VALUES (?, ?, ?, ?)`),
+    refreshGet: st(`SELECT uid, provider, claims FROM refresh WHERE token = ?`),
+    oobPut: st(`INSERT INTO oob (code, email, kind, uid, link, at) VALUES (?, ?, ?, ?, ?, ?)`),
+    oobGet: st(`SELECT * FROM oob WHERE code = ?`),
+    oobDel: st(`DELETE FROM oob WHERE code = ?`),
+    oobAll: st(`SELECT * FROM oob ORDER BY at`),
+    codePut: st(`INSERT INTO phone_codes (session, phone, code, at) VALUES (?, ?, ?, ?)`),
+    codeGet: st(`SELECT * FROM phone_codes WHERE session = ?`),
+    codeAll: st(`SELECT * FROM phone_codes ORDER BY at`),
   };
   const read = (r: unknown): UserRec | null => (r ? (JSON.parse((r as { rec: string }).rec) as UserRec) : null);
-  const get = (uid: string) => read(q.byUid.get(uid));
-  const getByEmail = (email: string) => read(q.byEmail.get(email.toLowerCase()));
-  const getByPhone = (phone: string) => read(q.byPhone.get(phone));
-  const save = (u: UserRec) => {
+  const get = async (uid: string) => read(await q.byUid.get(uid));
+  const getByEmail = async (email: string) => read(await q.byEmail.get(email.toLowerCase()));
+  const getByPhone = async (phone: string) => read(await q.byPhone.get(phone));
+  const save = async (u: UserRec) => {
     if (u.email) u.email = u.email.toLowerCase();
     try {
-      q.put.run(u.localId, u.email ?? null, u.phoneNumber ?? null, JSON.stringify(u));
+      await q.put.run(u.localId, u.email ?? null, u.phoneNumber ?? null, JSON.stringify(u));
     } catch (e) {
       if (/UNIQUE/.test(String(e))) throw new AuthFail(/email/.test(String(e)) ? 'EMAIL_EXISTS' : 'PHONE_NUMBER_EXISTS');
       throw e;
@@ -168,29 +163,29 @@ export function authService(ctx: EmulatorContext): Service {
    * A session's tokens for `u` — which may carry claims of this session only (on top of the
    * stored ones). Only the stored user's lastLoginAt is saved: a session's claims never are.
    */
-  const tokens = (u: UserRec, signInProvider: string, extra: Record<string, unknown> = {}) => {
+  const tokens = async (u: UserRec, signInProvider: string, extra: Record<string, unknown> = {}) => {
     const refreshToken = randomBytes(24).toString('base64url');
-    const stored = get(u.localId);
+    const stored = await get(u.localId);
     const claimsOf = (r: UserRec | null) => (r?.customAttributes ? (JSON.parse(r.customAttributes) as Record<string, unknown>) : {});
     const mine = claimsOf(u);
     const base = claimsOf(stored);
     const session = Object.fromEntries(Object.entries(mine).filter(([k, v]) => JSON.stringify(base[k]) !== JSON.stringify(v)));
-    q.refreshPut.run(refreshToken, u.localId, provider(u, signInProvider), Object.keys(session).length ? JSON.stringify(session) : null);
+    await q.refreshPut.run(refreshToken, u.localId, provider(u, signInProvider), Object.keys(session).length ? JSON.stringify(session) : null);
     const lastLoginAt = String(now());
     u.lastLoginAt = lastLoginAt;
-    if (stored) save({ ...stored, lastLoginAt });
-    else save(u);
+    if (stored) await save({ ...stored, lastLoginAt });
+    else await save(u);
     return { kind: 'identitytoolkit#VerifyPasswordResponse', localId: u.localId, email: u.email ?? '', displayName: u.displayName ?? '', idToken: idToken(u, signInProvider), refreshToken, expiresIn: '3600', registered: true, ...extra };
   };
   const userInfo = (u: UserRec) => {
     const { passwordHash, ...rest } = u;
     return { ...rest, ...(passwordHash ? { passwordHash: 'IceBase-hashed', passwordUpdatedAt: Number(u.validSince) * 1000 } : {}), emailVerified: !!u.emailVerified, disabled: !!u.disabled };
   };
-  const fromIdToken = (t: unknown): UserRec => {
+  const fromIdToken = async (t: unknown): Promise<UserRec> => {
     const c = verifyJwt(String(t ?? ''));
     if (!c || typeof c.user_id !== 'string') throw new AuthFail('INVALID_ID_TOKEN');
     if ((c.exp as number) * 1000 < now()) throw new AuthFail('TOKEN_EXPIRED');
-    const u = get(c.user_id);
+    const u = await get(c.user_id);
     if (!u) throw new AuthFail('USER_NOT_FOUND');
     if (Number(c.iat) < Number(u.validSince)) throw new AuthFail('TOKEN_EXPIRED');
     return u;
@@ -201,7 +196,7 @@ export function authService(ctx: EmulatorContext): Service {
     return u;
   };
   const MODES: Record<string, string> = { PASSWORD_RESET: 'resetPassword', VERIFY_EMAIL: 'verifyEmail', EMAIL_SIGNIN: 'signIn', VERIFY_AND_CHANGE_EMAIL: 'verifyAndChangeEmail' };
-  const oob = (kind: string, email: string | null, uid: string | null, continueUrl?: string) => {
+  const oob = async (kind: string, email: string | null, uid: string | null, continueUrl?: string) => {
     const code = randomBytes(18).toString('base64url');
     const mode = MODES[kind] ?? kind;
     const params = `mode=${mode}&lang=en&oobCode=${code}&apiKey=${secure ? 'icebase' : 'fake-api-key'}`;
@@ -210,7 +205,7 @@ export function authService(ctx: EmulatorContext): Service {
     const link = secure
       ? `${continueUrl || `${ctx.origin}/`}${(continueUrl ?? '').includes('?') ? '&' : '?'}${params}`
       : `${ctx.origin}/emulator/action?${params}${continueUrl ? `&continueUrl=${encodeURIComponent(continueUrl)}` : ''}`;
-    q.oobPut.run(code, email, kind, uid, link, now());
+    await q.oobPut.run(code, email, kind, uid, link, now());
     return { code, link };
   };
   /** Mail the link with the functions' sendAuthEmail export; a signed server without one refuses. */
@@ -223,8 +218,8 @@ export function authService(ctx: EmulatorContext): Service {
     if (!to) throw new AuthFail('MISSING_EMAIL');
     await send({ kind: MODES[kind] ?? kind, to, link, ...(continueUrl ? { continueUrl } : {}) });
   };
-  const takeOob = (code: unknown, kind?: string) => {
-    const r = q.oobGet.get(String(code ?? '')) as { code: string; email: string; kind: string; uid: string | null; at: number } | undefined;
+  const takeOob = async (code: unknown, kind?: string) => {
+    const r = (await q.oobGet.get(String(code ?? ''))) as { code: string; email: string; kind: string; uid: string | null; at: number } | undefined;
     if (!r || (kind && r.kind !== kind)) throw new AuthFail('INVALID_OOB_CODE');
     if (r.at < now() - 3600_000) throw new AuthFail('EXPIRED_OOB_CODE');
     return r;
@@ -282,7 +277,7 @@ export function authService(ctx: EmulatorContext): Service {
         throw blocked(e);
       }
     }
-    save(u);
+    await save(u);
     emitAuth('created', u);
     return u;
   };
@@ -295,7 +290,7 @@ export function authService(ctx: EmulatorContext): Service {
     } catch (e) {
       throw blocked(e);
     }
-    save(u);
+    await save(u);
     if (u.disabled) throw new AuthFail('USER_DISABLED');
     return session ? { ...u, customAttributes: JSON.stringify({ ...(u.customAttributes ? JSON.parse(u.customAttributes) : {}), ...session }) } : u;
   };
@@ -319,25 +314,25 @@ export function authService(ctx: EmulatorContext): Service {
       const email = String(b.email ?? '').toLowerCase();
       if (!/^[^@\s]+@[^@\s]+$/.test(email)) throw new AuthFail('INVALID_EMAIL');
       if (String(b.password ?? '').length < 6) throw new AuthFail('WEAK_PASSWORD : Password should be at least 6 characters');
-      if (getByEmail(email)) throw new AuthFail('EMAIL_EXISTS');
+      if (await getByEmail(email)) throw new AuthFail('EMAIL_EXISTS');
       // Upgrading an anonymous user keeps the uid.
-      const anon = b.idToken ? fromIdToken(b.idToken) : null;
+      const anon = b.idToken ? await fromIdToken(b.idToken) : null;
       const u = anon ?? fresh();
       Object.assign(u, { email, passwordHash: hashPw(String(b.password)), isAnonymous: false, displayName: (b.displayName as string) ?? u.displayName });
       u.providerUserInfo = [...u.providerUserInfo.filter((x) => x.providerId !== 'password'), { providerId: 'password', rawId: email, email, federatedId: email }];
-      return tokens(await signIn(anon ? save(u) : await create(u, 'password'), 'password'), 'password');
+      return tokens(await signIn(anon ? await save(u) : await create(u, 'password'), 'password'), 'password');
     },
     async signInWithPassword(b) {
       method('password');
-      const u = getByEmail(String(b.email ?? ''));
+      const u = await getByEmail(String(b.email ?? ''));
       if (!u || !checkPw(String(b.password ?? ''), u.passwordHash)) throw new AuthFail(u ? 'INVALID_PASSWORD' : 'EMAIL_NOT_FOUND');
       return tokens(await signIn(live(u), 'password'), 'password');
     },
     async signInWithCustomToken(b) {
       const c = claimsOf(String(b.token ?? ''));
       if (!c || typeof c.uid !== 'string') throw new AuthFail('INVALID_CUSTOM_TOKEN');
-      const isNewUser = !get(c.uid);
-      const u = await signIn(live(get(c.uid) ?? (await create(fresh({ localId: c.uid }), 'custom'))), 'custom');
+      const isNewUser = !(await get(c.uid));
+      const u = await signIn(live((await get(c.uid)) ?? (await create(fresh({ localId: c.uid }), 'custom'))), 'custom');
       if (c.claims && typeof c.claims === 'object') {
         // Developer claims from createCustomToken(uid, claims) ride on this session's tokens only.
         const merged = { ...(u.customAttributes ? JSON.parse(u.customAttributes) : {}), ...(c.claims as object) };
@@ -345,27 +340,27 @@ export function authService(ctx: EmulatorContext): Service {
       }
       return tokens(u, 'custom', { isNewUser });
     },
-    lookup(b) {
-      return { kind: 'identitytoolkit#GetAccountInfoResponse', users: [userInfo(fromIdToken(b.idToken))] };
+    async lookup(b) {
+      return { kind: 'identitytoolkit#GetAccountInfoResponse', users: [userInfo(await fromIdToken(b.idToken))] };
     },
-    update(b) {
+    async update(b) {
       if (b.oobCode) {
-        const r = takeOob(b.oobCode);
+        const r = await takeOob(b.oobCode);
         if (r.kind !== 'VERIFY_EMAIL' && r.kind !== 'VERIFY_AND_CHANGE_EMAIL') throw new AuthFail('INVALID_OOB_CODE');
-        q.oobDel.run(r.code);
-        const u = live(r.uid ? get(r.uid) : getByEmail(r.email));
+        await q.oobDel.run(r.code);
+        const u = live(r.uid ? await get(r.uid) : await getByEmail(r.email));
         if (r.kind === 'VERIFY_AND_CHANGE_EMAIL') {
-          if (getByEmail(r.email) && getByEmail(r.email)!.localId !== u.localId) throw new AuthFail('EMAIL_EXISTS');
+          if ((await getByEmail(r.email)) && (await getByEmail(r.email))!.localId !== u.localId) throw new AuthFail('EMAIL_EXISTS');
           u.email = r.email;
           u.providerUserInfo = u.providerUserInfo.map((x) => (x.providerId === 'password' ? { ...x, rawId: r.email, email: r.email, federatedId: r.email } : x));
           // Every session ends: the new address signs in again.
           u.validSince = String(Math.floor(now() / 1000));
         }
         u.emailVerified = true;
-        save(u);
+        await save(u);
         return { kind: 'identitytoolkit#SetAccountInfoResponse', email: u.email, emailVerified: true, localId: u.localId };
       }
-      const u = live(fromIdToken(b.idToken));
+      const u = live(await fromIdToken(b.idToken));
       let reissue = false;
       if (typeof b.displayName === 'string') u.displayName = b.displayName;
       if (typeof b.photoUrl === 'string') u.photoUrl = b.photoUrl;
@@ -379,13 +374,13 @@ export function authService(ctx: EmulatorContext): Service {
         reissue = true;
       }
       if (typeof b.email === 'string') {
-        if (getByEmail(b.email) && getByEmail(b.email)!.localId !== u.localId) throw new AuthFail('EMAIL_EXISTS');
+        if ((await getByEmail(b.email)) && (await getByEmail(b.email))!.localId !== u.localId) throw new AuthFail('EMAIL_EXISTS');
         u.email = b.email.toLowerCase();
         u.emailVerified = false;
         reissue = true;
       }
-      save(u);
-      return { kind: 'identitytoolkit#SetAccountInfoResponse', localId: u.localId, email: u.email, displayName: u.displayName, photoUrl: u.photoUrl, emailVerified: !!u.emailVerified, providerUserInfo: u.providerUserInfo, ...(reissue || b.returnSecureToken ? { idToken: idToken(u, 'password'), refreshToken: tokens(u, 'password').refreshToken, expiresIn: '3600' } : {}) };
+      await save(u);
+      return { kind: 'identitytoolkit#SetAccountInfoResponse', localId: u.localId, email: u.email, displayName: u.displayName, photoUrl: u.photoUrl, emailVerified: !!u.emailVerified, providerUserInfo: u.providerUserInfo, ...(reissue || b.returnSecureToken ? { idToken: idToken(u, 'password'), refreshToken: (await tokens(u, 'password')).refreshToken, expiresIn: '3600' } : {}) };
     },
     async sendOobCode(b) {
       const kind = String(b.requestType);
@@ -393,23 +388,23 @@ export function authService(ctx: EmulatorContext): Service {
       const cont = b.continueUrl as string | undefined;
       if (kind === 'VERIFY_EMAIL' || kind === 'VERIFY_AND_CHANGE_EMAIL') {
         // The client names the user by its ID token; the admin (generateEmailVerificationLink) by email.
-        const u = live(b.idToken ? fromIdToken(b.idToken) : getByEmail(String(b.email ?? '')));
+        const u = live(b.idToken ? await fromIdToken(b.idToken) : await getByEmail(String(b.email ?? '')));
         const to = kind === 'VERIFY_EMAIL' ? (u.email ?? null) : String(b.newEmail ?? '').toLowerCase();
         if (kind === 'VERIFY_AND_CHANGE_EMAIL') {
           if (!/^[^@\s]+@[^@\s]+$/.test(to ?? '')) throw new AuthFail('INVALID_NEW_EMAIL');
-          if (getByEmail(to!)) throw new AuthFail('EMAIL_EXISTS');
+          if (await getByEmail(to!)) throw new AuthFail('EMAIL_EXISTS');
         }
-        const { link } = oob(kind, to, u.localId, cont);
+        const { link } = await oob(kind, to, u.localId, cont);
         await mail(kind, to, link, cont);
         return { kind: 'identitytoolkit#GetOobConfirmationCodeResponse', email: to, ...(b.returnOobLink ? { oobLink: link } : {}) };
       }
       const email = String(b.email ?? '').toLowerCase();
-      if (kind === 'PASSWORD_RESET' && !getByEmail(email)) {
+      if (kind === 'PASSWORD_RESET' && !(await getByEmail(email))) {
         // A server others reach does not tell who has an account.
         if (secure) return { kind: 'identitytoolkit#GetOobConfirmationCodeResponse', email };
         throw new AuthFail('EMAIL_NOT_FOUND');
       }
-      const { link } = oob(kind, email, getByEmail(email)?.localId ?? null, cont);
+      const { link } = await oob(kind, email, (await getByEmail(email))?.localId ?? null, cont);
       await mail(kind, email, link, cont);
       return { kind: 'identitytoolkit#GetOobConfirmationCodeResponse', email, ...(b.returnOobLink ? { oobLink: link } : {}) };
     },
@@ -434,21 +429,21 @@ export function authService(ctx: EmulatorContext): Service {
       const name = typeof claims.name === 'string' ? claims.name : undefined;
       const photo = typeof claims.picture === 'string' ? claims.picture : undefined;
       const info = { providerId, rawId: sub, federatedId: sub, ...(email ? { email } : {}), ...(name ? { displayName: name } : {}), ...(photo ? { photoUrl: photo } : {}) };
-      const owner = (db.prepare(`SELECT rec FROM users WHERE rec LIKE ?`).all(`%"rawId":${JSON.stringify(sub).replace(/[%_]/g, '\\$&')}%`) as { rec: string }[])
+      const owner = (await db.all<{ rec: string }>(`SELECT rec FROM users WHERE rec LIKE ? ESCAPE '\\'`, `%"rawId":${JSON.stringify(sub).replace(/[\\%_]/g, '\\$&')}%`))
         .map(read)
         .find((x) => x?.providerUserInfo.some((p) => p.providerId === providerId && p.rawId === sub)) ?? null;
-      const linking = b.idToken ? live(fromIdToken(b.idToken)) : null;
+      const linking = b.idToken ? live(await fromIdToken(b.idToken)) : null;
       if (linking && owner && owner.localId !== linking.localId) throw new AuthFail('FEDERATED_USER_ID_ALREADY_LINKED');
       // A verified email of an existing account: the provider is added to it (one account per email).
-      let u = linking ?? owner ?? (email && verified ? getByEmail(email) : null);
+      let u = linking ?? owner ?? (email && verified ? await getByEmail(email) : null);
       const isNewUser = !u;
       u ??= fresh({ ...(email ? { email, emailVerified: verified } : {}), ...(name ? { displayName: name } : {}), ...(photo ? { photoUrl: photo } : {}) });
       u.providerUserInfo = [...u.providerUserInfo.filter((p) => p.providerId !== providerId), info];
       if (email && !u.email) Object.assign(u, { email, emailVerified: verified });
       if (u.isAnonymous) u.isAnonymous = false;
-      u = isNewUser ? await create(u, providerId) : save(u);
+      u = isNewUser ? await create(u, providerId) : await save(u);
       return {
-        ...tokens(await signIn(live(u), providerId), providerId),
+        ...(await tokens(await signIn(live(u), providerId), providerId)),
         kind: 'identitytoolkit#VerifyAssertionResponse',
         providerId,
         federatedId: sub,
@@ -461,66 +456,66 @@ export function authService(ctx: EmulatorContext): Service {
         rawUserInfo: JSON.stringify(claims),
       };
     },
-    resetPassword(b) {
-      const r = takeOob(b.oobCode, 'PASSWORD_RESET');
+    async resetPassword(b) {
+      const r = await takeOob(b.oobCode, 'PASSWORD_RESET');
       if (b.newPassword === undefined) return { email: r.email, requestType: 'PASSWORD_RESET' };
-      const u = live(getByEmail(r.email));
+      const u = live(await getByEmail(r.email));
       if (String(b.newPassword).length < 6) throw new AuthFail('WEAK_PASSWORD : Password should be at least 6 characters');
       u.passwordHash = hashPw(String(b.newPassword));
       u.validSince = String(Math.floor(now() / 1000));
-      save(u);
-      q.oobDel.run(r.code);
+      await save(u);
+      await q.oobDel.run(r.code);
       return { email: r.email, requestType: 'PASSWORD_RESET' };
     },
     async signInWithEmailLink(b) {
       method('emailLink');
-      const r = takeOob(b.oobCode, 'EMAIL_SIGNIN');
+      const r = await takeOob(b.oobCode, 'EMAIL_SIGNIN');
       const email = String(b.email ?? '').toLowerCase();
       if (r.email !== email) throw new AuthFail('INVALID_EMAIL');
-      q.oobDel.run(r.code);
-      let u = getByEmail(email);
+      await q.oobDel.run(r.code);
+      let u = await getByEmail(email);
       const isNewUser = !u;
       if (!u) u = await create(fresh({ email, emailVerified: true, providerUserInfo: [{ providerId: 'password', rawId: email, email, federatedId: email }] }), 'emailLink');
       u.emailVerified = true;
-      return tokens(await signIn(live(save(u)), 'emailLink'), 'emailLink', { isNewUser });
+      return tokens(await signIn(live(await save(u)), 'emailLink'), 'emailLink', { isNewUser });
     },
-    createAuthUri(b) {
-      const u = getByEmail(String(b.identifier ?? ''));
+    async createAuthUri(b) {
+      const u = await getByEmail(String(b.identifier ?? ''));
       return { kind: 'identitytoolkit#CreateAuthUriResponse', registered: !!u, signinMethods: u ? [u.passwordHash ? 'password' : 'emailLink'] : [], sessionId: newId() };
     },
-    delete(b) {
-      const u = b.localId ? get(String(b.localId)) : fromIdToken(b.idToken);
+    async delete(b) {
+      const u = b.localId ? await get(String(b.localId)) : await fromIdToken(b.idToken);
       // firebase-admin's deleteUser of an unknown uid is an error (auth/user-not-found).
       if (!u && b.localId) throw new AuthFail('USER_NOT_FOUND');
       if (u) {
-        q.del.run(u.localId);
+        await q.del.run(u.localId);
         emitAuth('deleted', u);
       }
       return { kind: 'identitytoolkit#DeleteAccountResponse' };
     },
-    sendVerificationCode(b) {
+    async sendVerificationCode(b) {
       method('phone');
       const phone = String(b.phoneNumber ?? '');
       if (!/^\+[1-9]\d{7,14}$/.test(phone)) throw new AuthFail('INVALID_PHONE_NUMBER');
       const sessionInfo = randomBytes(18).toString('base64url');
-      q.codePut.run(sessionInfo, phone, String(randomInt(0, 1e6)).padStart(6, '0'), now());
+      await q.codePut.run(sessionInfo, phone, String(randomInt(0, 1e6)).padStart(6, '0'), now());
       return { sessionInfo };
     },
     async signInWithPhoneNumber(b) {
       method('phone');
-      const r = q.codeGet.get(String(b.sessionInfo ?? '')) as { phone: string; code: string } | undefined;
+      const r = await q.codeGet.get(String(b.sessionInfo ?? '')) as { phone: string; code: string } | undefined;
       if (!r) throw new AuthFail('INVALID_SESSION_INFO');
       if (r.code !== String(b.code)) throw new AuthFail('INVALID_CODE');
-      let u = getByPhone(r.phone);
+      let u = await getByPhone(r.phone);
       const isNewUser = !u;
       if (!u) u = await create(fresh({ phoneNumber: r.phone, providerUserInfo: [{ providerId: 'phone', rawId: r.phone, phoneNumber: r.phone }] }), 'phone');
-      return { ...tokens(await signIn(live(u), 'phone'), 'phone'), phoneNumber: r.phone, isNewUser };
+      return { ...(await tokens(await signIn(live(u), 'phone'), 'phone')), phoneNumber: r.phone, isNewUser };
     },
   };
 
   // firebase-admin's calls, under /v1/projects/<p>/…
   const admin: Record<string, (b: Record<string, unknown>) => unknown> = {
-    accounts(b) {
+    async accounts(b) {
       const u = fresh({ ...(b.localId ? { localId: String(b.localId) } : {}) });
       if (b.email) Object.assign(u, { email: String(b.email).toLowerCase(), providerUserInfo: [{ providerId: 'password', rawId: String(b.email).toLowerCase(), email: String(b.email).toLowerCase() }] });
       if (b.password) u.passwordHash = hashPw(String(b.password));
@@ -532,25 +527,25 @@ export function authService(ctx: EmulatorContext): Service {
       if (b.photoUrl) u.photoUrl = String(b.photoUrl);
       if (b.emailVerified !== undefined) u.emailVerified = !!b.emailVerified;
       if (b.disabled !== undefined) u.disabled = !!b.disabled;
-      if (get(u.localId)) throw new AuthFail('DUPLICATE_LOCAL_ID');
+      if (await get(u.localId)) throw new AuthFail('DUPLICATE_LOCAL_ID');
       // Admin SDK creates skip blocking functions (as in Firebase) but fire the created event.
-      save(u);
+      await save(u);
       emitAuth('created', u);
       return { kind: 'identitytoolkit#SignupNewUserResponse', localId: u.localId };
     },
-    'accounts:lookup'(b) {
+    async 'accounts:lookup'(b) {
       const out: UserRec[] = [];
-      for (const id of (b.localId as string[]) ?? []) out.push(...[get(id)].filter((x): x is UserRec => !!x));
-      for (const e of (b.email as string[]) ?? []) out.push(...[getByEmail(e)].filter((x): x is UserRec => !!x));
-      for (const ph of (b.phoneNumber as string[]) ?? []) out.push(...[getByPhone(ph)].filter((x): x is UserRec => !!x));
+      for (const id of (b.localId as string[]) ?? []) out.push(...[await get(id)].filter((x): x is UserRec => !!x));
+      for (const e of (b.email as string[]) ?? []) out.push(...[await getByEmail(e)].filter((x): x is UserRec => !!x));
+      for (const ph of (b.phoneNumber as string[]) ?? []) out.push(...[await getByPhone(ph)].filter((x): x is UserRec => !!x));
       return out.length ? { kind: 'identitytoolkit#GetAccountInfoResponse', users: out.map(userInfo) } : { kind: 'identitytoolkit#GetAccountInfoResponse' };
     },
-    'accounts:update'(b) {
-      const u = get(String(b.localId));
+    async 'accounts:update'(b) {
+      const u = await get(String(b.localId));
       if (!u) throw new AuthFail('USER_NOT_FOUND');
       if (b.email !== undefined) {
         const e = String(b.email).toLowerCase();
-        const other = getByEmail(e);
+        const other = await getByEmail(e);
         if (other && other.localId !== u.localId) throw new AuthFail('EMAIL_EXISTS');
         u.email = e;
       }
@@ -573,29 +568,29 @@ export function authService(ctx: EmulatorContext): Service {
         u.providerUserInfo = u.providerUserInfo.filter((x) => x.providerId !== prov);
         if (prov === 'phone') delete u.phoneNumber;
       }
-      save(u);
+      await save(u);
       return { kind: 'identitytoolkit#SetAccountInfoResponse', localId: u.localId };
     },
-    'accounts:delete'(b) {
-      const u = get(String(b.localId));
+    async 'accounts:delete'(b) {
+      const u = await get(String(b.localId));
       if (!u) throw new AuthFail('USER_NOT_FOUND');
-      q.del.run(String(b.localId));
+      await q.del.run(String(b.localId));
       if (u) emitAuth('deleted', u);
       return { kind: 'identitytoolkit#DeleteAccountResponse' };
     },
-    'accounts:batchDelete'(b) {
+    async 'accounts:batchDelete'(b) {
       for (const id of (b.localIds as string[]) ?? []) {
-        const u = get(id);
-        q.del.run(id);
+        const u = await get(id);
+        await q.del.run(id);
         if (u) emitAuth('deleted', u);
       }
       return {};
     },
-    'accounts:sendOobCode'(b) {
+    async 'accounts:sendOobCode'(b) {
       return client.sendOobCode!({ ...b, returnOobLink: true });
     },
-    'accounts:query'(b) {
-      const all = (db.prepare(`SELECT rec FROM users ORDER BY uid`).all() as { rec: string }[]).map(read).filter((x): x is UserRec => !!x);
+    async 'accounts:query'(b) {
+      const all = (await db.all<{ rec: string }>(`SELECT rec FROM users ORDER BY uid`)).map(read).filter((x): x is UserRec => !!x);
       return { recordsCount: String(all.length), ...(b.returnUserInfo === false ? {} : { userInfo: all.map(userInfo) }) };
     },
   };
@@ -630,7 +625,7 @@ export function authService(ctx: EmulatorContext): Service {
               if (secure && !caller.admin) return adminOnly();
               const max = Math.min(Number(url.searchParams.get('maxResults') ?? 1000), 1000);
               const after = url.searchParams.get('nextPageToken') ?? '';
-              const users = (q.page.all(after, max) as { rec: string }[]).map(read).filter((x): x is UserRec => !!x);
+              const users = (await q.page.all(after, max) as { rec: string }[]).map(read).filter((x): x is UserRec => !!x);
               return json({ kind: 'identitytoolkit#DownloadAccountResponse', users: users.map(userInfo), ...(users.length === max ? { nextPageToken: users[users.length - 1]!.localId } : {}) });
             }
             if (/^projects\/[^/]+\/config$/.test(rest) || rest === 'recaptchaParams') return json({ signIn: { allowDuplicateEmails: false }, recaptchaStoken: 'fake' });
@@ -664,9 +659,9 @@ export function authService(ctx: EmulatorContext): Service {
             const uid = String(x.uid ?? '');
             try {
               if (!uid) throw new Error('uid is required');
-              if (get(uid) && !b.overwrite) throw new Error('a user with this uid exists');
+              if ((await get(uid)) && !b.overwrite) throw new Error('a user with this uid exists');
               const email = typeof x.email === 'string' ? x.email.toLowerCase() : undefined;
-              const other = email ? getByEmail(email) : null;
+              const other = email ? await getByEmail(email) : null;
               if (other && other.localId !== uid) throw new Error('another user has this email');
               const ms = (v: unknown) => (typeof v === 'number' ? String(v) : typeof v === 'string' && v ? String(Date.parse(v) || Number(v)) : undefined);
               const providers = Array.isArray(x.providers) ? (x.providers as string[]) : [];
@@ -685,7 +680,7 @@ export function authService(ctx: EmulatorContext): Service {
                 ...(ms(x.tokensValidAfter) ? { validSince: String(Math.floor(Number(ms(x.tokensValidAfter)) / 1000)) } : {}),
               });
               if (email && (u.passwordHash || providers.includes('password') || providers.includes('emailLink'))) u.providerUserInfo.push({ providerId: 'password', rawId: email, email, federatedId: email });
-              save(u);
+              await save(u);
               results.push({ uid, ok: true });
             } catch (e) {
               results.push({ uid, ok: false, error: (e as Error).message });
@@ -707,7 +702,7 @@ export function authService(ctx: EmulatorContext): Service {
           const c = verifyJwt(String(b.idToken ?? ''));
           if (!c || typeof c.user_id !== 'string') return json({ error: { code: 'auth/argument-error', message: 'Decoding Firebase ID token failed: not a valid token from this server' } }, 401);
           if ((c.exp as number) * 1000 < now()) return json({ error: { code: 'auth/id-token-expired', message: 'Firebase ID token has expired' } }, 401);
-          const u = get(c.user_id);
+          const u = await get(c.user_id);
           if (b.checkRevoked) {
             if (!u) return json({ error: { code: 'auth/user-not-found', message: 'no user' } }, 401);
             if (u.disabled) return json({ error: { code: 'auth/user-disabled', message: 'user disabled' } }, 401);
@@ -717,9 +712,9 @@ export function authService(ctx: EmulatorContext): Service {
         }
         if (path === '/securetoken.googleapis.com/v1/token') {
           const form = new URLSearchParams(await req.text());
-          const r = q.refreshGet.get(form.get('refresh_token') ?? '') as { uid: string; provider: string; claims: string | null } | undefined;
+          const r = await q.refreshGet.get(form.get('refresh_token') ?? '') as { uid: string; provider: string; claims: string | null } | undefined;
           if (!r) return fail('INVALID_REFRESH_TOKEN');
-          const stored = get(r.uid);
+          const stored = await get(r.uid);
           if (!stored) return fail('USER_NOT_FOUND');
           if (stored.disabled) return fail('USER_DISABLED');
           const u = r.claims ? { ...stored, customAttributes: JSON.stringify({ ...(stored.customAttributes ? JSON.parse(stored.customAttributes) : {}), ...JSON.parse(r.claims) }) } : stored;
@@ -729,10 +724,10 @@ export function authService(ctx: EmulatorContext): Service {
         const emu = /^\/emulator\/v1\/projects\/[^/]+\/(oobCodes|verificationCodes|accounts)$/.exec(path);
         if (emu) {
           if (secure && !caller.admin) return adminOnly();
-          if (emu[1] === 'oobCodes') return json({ oobCodes: (q.oobAll.all() as { code: string; email: string; kind: string; link: string }[]).map((r) => ({ email: r.email, requestType: r.kind, oobCode: r.code, oobLink: r.link })) });
-          if (emu[1] === 'verificationCodes') return json({ verificationCodes: (q.codeAll.all() as { phone: string; code: string; session: string }[]).map((r) => ({ phoneNumber: r.phone, code: r.code, sessionInfo: r.session })) });
+          if (emu[1] === 'oobCodes') return json({ oobCodes: (await q.oobAll.all() as { code: string; email: string; kind: string; link: string }[]).map((r) => ({ email: r.email, requestType: r.kind, oobCode: r.code, oobLink: r.link })) });
+          if (emu[1] === 'verificationCodes') return json({ verificationCodes: (await q.codeAll.all() as { phone: string; code: string; session: string }[]).map((r) => ({ phoneNumber: r.phone, code: r.code, sessionInfo: r.session })) });
           if (req.method === 'DELETE') {
-            db.exec(`DELETE FROM users; DELETE FROM refresh; DELETE FROM oob; DELETE FROM phone_codes;`);
+            await db.exec(`DELETE FROM users; DELETE FROM refresh; DELETE FROM oob; DELETE FROM phone_codes;`);
             return json({});
           }
         }

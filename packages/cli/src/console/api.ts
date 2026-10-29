@@ -88,7 +88,7 @@ export function consoleApi(o: ConsoleOptions): (op: string, b: Record<string, un
         environments: Object.keys(config.environments),
         projectId: config.firebase?.projectId ?? null,
         modes: Object.fromEntries(SERVICES.map((s) => [s, modes[s]])),
-        health: o.server?.health() ?? null,
+        health: (await o.server?.health()) ?? null,
         counts: { collections: doc.collections.length, paths: doc.paths.length, files: doc.files.length, endpoints: doc.endpoints.length },
         rules: config.rules ?? {},
         hosting: config.hosting ? { public: config.hosting.public, site: config.hosting.site ?? config.firebase?.projectId ?? null } : null,

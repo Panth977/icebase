@@ -4,10 +4,10 @@
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { IceBaseError } from '@panth977/icebase/errors';
 import type { DbQuery } from '@panth977/icebase/internal';
 import { json, type Caller, type EmulatorContext, type Live, type Service } from './server.ts';
+import { treeTables } from './tables.ts';
 
 type Node = null | boolean | number | string | { [k: string]: Node };
 
@@ -278,17 +278,25 @@ interface DbInstance extends Service {
   reloadRules(): void;
 }
 
-function databaseInstance(ctx: EmulatorContext, instance: string, isDefault: boolean): DbInstance {
-  const file = ctx.dataDir === ':memory:' ? ':memory:' : join(ctx.dataDir, isDefault ? 'database.sqlite' : `database-${instance}.sqlite`);
-  const sql = new DatabaseSync(file);
-  sql.exec(`CREATE TABLE IF NOT EXISTS tree (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL)`);
-  let root: Node = JSON.parse((sql.prepare(`SELECT json FROM tree WHERE id = 1`).get() as { json: string } | undefined)?.json ?? 'null') as Node;
+async function databaseInstance(ctx: EmulatorContext, instance: string, isDefault: boolean): Promise<DbInstance> {
+  // The whole tree is in memory; the store keeps it as one JSON row, written 50 ms after a change.
+  const sql = await ctx.stores.open(isDefault ? 'database' : `database-${instance}`);
+  await treeTables(sql);
+  let root: Node = JSON.parse((await sql.get<{ json: string }>(`SELECT json FROM tree WHERE id = 1`))?.json ?? 'null') as Node;
   let dirty: ReturnType<typeof setTimeout> | null = null;
+  // Saves in order, one at a time.
+  let saving: Promise<void> = Promise.resolve();
+  const save = () => {
+    const json = JSON.stringify(root);
+    saving = saving.then(async () => {
+      await sql.run(`INSERT INTO tree (id, json) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET json = excluded.json`, json);
+    }).catch((e) => console.error('[icebase database] saving', e));
+  };
   const persist = () => {
     if (dirty) return;
     dirty = setTimeout(() => {
       dirty = null;
-      sql.prepare(`INSERT INTO tree (id, json) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET json = excluded.json`).run(JSON.stringify(root));
+      save();
     }, 50);
   };
 
@@ -493,12 +501,14 @@ function databaseInstance(ctx: EmulatorContext, instance: string, isDefault: boo
         live.send({ t: 'ok', s: 'db', id: msg.id });
       }
     },
-    close() {
+    async close() {
       if (dirty) {
         clearTimeout(dirty);
-        sql.prepare(`INSERT INTO tree (id, json) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET json = excluded.json`).run(JSON.stringify(root));
+        dirty = null;
+        save();
       }
-      sql.close();
+      await saving;
+      await sql.close();
     },
   };
 }
@@ -506,16 +516,18 @@ function databaseInstance(ctx: EmulatorContext, instance: string, isDefault: boo
 /** A Realtime Database instance name as Firebase takes it: 6–63 of a-z 0-9 -. */
 const INSTANCE = /^[a-z0-9][a-z0-9-]{4,61}[a-z0-9]$/;
 
-export function databaseService(ctx: EmulatorContext): Service {
+export async function databaseService(ctx: EmulatorContext): Promise<Service> {
   const defaultId = `${ctx.projectId}-default-rtdb`;
-  const instances = new Map<string, DbInstance>([[defaultId, databaseInstance(ctx, defaultId, true)]]);
+  const instances = new Map<string, DbInstance>([[defaultId, await databaseInstance(ctx, defaultId, true)]]);
   const listFile = ctx.dataDir === ':memory:' ? null : join(ctx.dataDir, 'database-instances.json');
-  const open = (id: string) => {
-    const d = databaseInstance(ctx, id, false);
+  const open = async (id: string) => {
+    const d = await databaseInstance(ctx, id, false);
     instances.set(id, d);
     return d;
   };
-  if (listFile && existsSync(listFile)) for (const id of JSON.parse(readFileSync(listFile, 'utf8')) as string[]) open(id);
+  if (listFile && existsSync(listFile)) for (const id of JSON.parse(readFileSync(listFile, 'utf8')) as string[]) await open(id);
+  // The stores know them too (a migrated deployment, a new data directory on Postgres).
+  for (const s of await ctx.stores.list()) if (s.startsWith('database-') && !instances.has(s.slice(9))) await open(s.slice(9));
   // A request names its instance with `ns` (the instance id); none is the default.
   const instanceOf = (ns: unknown): DbInstance => {
     const id = typeof ns === 'string' && ns && ns !== defaultId ? ns : defaultId;
@@ -539,7 +551,7 @@ export function databaseService(ctx: EmulatorContext): Service {
       }
       await instanceOf(msg.ns).socket?.(live, msg);
     },
-    manage(op, b, req) {
+    async manage(op, b, req) {
       const origin = req ? new URL(req.url).origin : ctx.origin;
       switch (op) {
         case 'listDbs':
@@ -549,7 +561,7 @@ export function databaseService(ctx: EmulatorContext): Service {
           if (id === defaultId) return info(id, origin);
           if (!INSTANCE.test(id)) throw new IceBaseError('invalid-argument', `createDb('${id}'): an instance id is 6–63 characters of a-z, 0-9 and -`);
           if (instances.has(id)) throw new IceBaseError('already-exists', `Realtime Database instance '${id}' already exists`);
-          open(id);
+          await open(id);
           if (listFile) writeFileSync(listFile, JSON.stringify([...instances.keys()].filter((k) => k !== defaultId)));
           return info(id, origin);
         }

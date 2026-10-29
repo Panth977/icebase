@@ -6,11 +6,11 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { IceBaseError } from '@panth977/icebase/errors';
 import { matchFilePath, type AnyFilePath } from '@panth977/icebase/schema';
 import { loadRules, type RulesEngine } from './rules.ts';
 import { json, type Caller, type EmulatorContext, type Service } from './server.ts';
+import { storageTables } from './tables.ts';
 import { Buffer } from 'node:buffer';
 
 interface Meta {
@@ -94,22 +94,28 @@ export function callerOrigin(req: Request, fallback: string): string {
   return u.host ? u.origin : fallback;
 }
 
-export function storageService(ctx: EmulatorContext): Service {
+export async function storageService(ctx: EmulatorContext): Promise<Service> {
   const memory = ctx.dataDir === ':memory:';
   const blobs = new Map<string, Buffer>();
-  const blobDir = memory ? '' : join(ctx.dataDir, 'storage');
-  const sql = new DatabaseSync(memory ? ':memory:' : join(ctx.dataDir, 'storage.sqlite'));
-  sql.exec(`CREATE TABLE IF NOT EXISTS objects (bucket TEXT NOT NULL, name TEXT NOT NULL, meta TEXT NOT NULL, PRIMARY KEY (bucket, name));
-            CREATE TABLE IF NOT EXISTS uploads (id TEXT PRIMARY KEY, bucket TEXT NOT NULL, name TEXT NOT NULL, meta TEXT NOT NULL, data BLOB)`);
+  // The files themselves: in memory, or on disk (the data directory's storage/, or blobsDir).
+  const blobDir = memory ? '' : (ctx.blobsDir ?? join(ctx.dataDir, 'storage'));
+  // Their metadata, and resumable uploads in progress: in the 'storage' store.
+  const sql = await ctx.stores.open('storage');
+  await storageTables(sql);
+  const st = (text: string) => ({
+    get: (...p: unknown[]) => sql.get(text, ...p),
+    all: (...p: unknown[]) => sql.all(text, ...p),
+    run: (...p: unknown[]) => sql.run(text, ...p),
+  });
   const q = {
-    get: sql.prepare(`SELECT meta FROM objects WHERE bucket = ? AND name = ?`),
-    put: sql.prepare(`INSERT INTO objects (bucket, name, meta) VALUES (?, ?, ?) ON CONFLICT(bucket, name) DO UPDATE SET meta = excluded.meta`),
-    del: sql.prepare(`DELETE FROM objects WHERE bucket = ? AND name = ?`),
-    list: sql.prepare(`SELECT meta FROM objects WHERE bucket = ? AND name >= ? AND name < ? ORDER BY name`),
-    upPut: sql.prepare(`INSERT INTO uploads (id, bucket, name, meta, data) VALUES (?, ?, ?, ?, ?)`),
-    upGet: sql.prepare(`SELECT * FROM uploads WHERE id = ?`),
-    upData: sql.prepare(`UPDATE uploads SET data = ? WHERE id = ?`),
-    upDel: sql.prepare(`DELETE FROM uploads WHERE id = ?`),
+    get: st(`SELECT meta FROM objects WHERE bucket = ? AND name = ?`),
+    put: st(`INSERT INTO objects (bucket, name, meta) VALUES (?, ?, ?) ON CONFLICT(bucket, name) DO UPDATE SET meta = excluded.meta`),
+    del: st(`DELETE FROM objects WHERE bucket = ? AND name = ?`),
+    list: st(`SELECT meta FROM objects WHERE bucket = ? AND name >= ? AND name < ? ORDER BY name`),
+    upPut: st(`INSERT INTO uploads (id, bucket, name, meta, data) VALUES (?, ?, ?, ?, ?)`),
+    upGet: st(`SELECT * FROM uploads WHERE id = ?`),
+    upData: st(`UPDATE uploads SET data = ? WHERE id = ?`),
+    upDel: st(`DELETE FROM uploads WHERE id = ?`),
   };
   const blobPath = (b: string, n: string) => join(blobDir, b, ...n.split('/'));
   const readBlob = (b: string, n: string) => (memory ? blobs.get(`${b}/${n}`) : readFileSync(blobPath(b, n)))!;
@@ -121,8 +127,8 @@ export function storageService(ctx: EmulatorContext): Service {
     }
   };
   const dropBlob = (b: string, n: string) => (memory ? blobs.delete(`${b}/${n}`) : rmSync(blobPath(b, n), { force: true }));
-  const getMeta = (b: string, n: string) => {
-    const r = q.get.get(b, n) as { meta: string } | undefined;
+  const getMeta = async (b: string, n: string) => {
+    const r = (await q.get.get(b, n)) as { meta: string } | undefined;
     return r ? (JSON.parse(r.meta) as Meta) : null;
   };
 
@@ -148,8 +154,8 @@ export function storageService(ctx: EmulatorContext): Service {
       auth: c.auth,
       resource: ruleRes(cur),
       requestResource: ruleRes(next),
-      get: (p) => {
-        const d = ctx.firestore.get(p.replace(/^\/databases\/[^/]+\/documents\//, ''));
+      load: async (p) => {
+        const d = await ctx.firestore.get(p.replace(/^\/databases\/[^/]+\/documents\//, ''));
         return d ? { data: d.data, id: d.id, path: p } : null;
       },
     });
@@ -164,7 +170,7 @@ export function storageService(ctx: EmulatorContext): Service {
   };
 
   const store = async (c: Caller, bucket: string, name: string, data: Buffer, given: Record<string, unknown>) => {
-    const cur = getMeta(bucket, name);
+    const cur = await getMeta(bucket, name);
     const now = new Date().toISOString();
     const contentType = String(given.contentType ?? 'application/octet-stream');
     const custom = (given.metadata ?? given.customMetadata ?? {}) as Record<string, string>;
@@ -189,7 +195,7 @@ export function storageService(ctx: EmulatorContext): Service {
     checkSchema(name, data.length, contentType);
     await allow(c, cur ? 'update' : 'create', bucket, name, cur, meta);
     writeBlob(bucket, name, data);
-    q.put.run(bucket, name, JSON.stringify(meta));
+    await q.put.run(bucket, name, JSON.stringify(meta));
     emit('finalized', meta);
     return meta;
   };
@@ -205,8 +211,8 @@ export function storageService(ctx: EmulatorContext): Service {
   const v0 = (m: Meta) => ({ name: m.name, bucket: m.bucket, generation: m.generation, metageneration: m.metageneration, contentType: m.contentType, timeCreated: m.timeCreated, updated: m.updated, storageClass: 'STANDARD', size: String(m.size), md5Hash: m.md5Hash, crc32c: m.crc32c, etag: m.md5Hash, contentEncoding: m.contentEncoding ?? 'identity', contentDisposition: m.contentDisposition ?? `inline; filename*=utf-8''${encodeURIComponent(m.name.split('/').pop()!)}`, ...(m.cacheControl ? { cacheControl: m.cacheControl } : {}), ...(m.contentLanguage ? { contentLanguage: m.contentLanguage } : {}), metadata: m.metadata, downloadTokens: m.downloadTokens });
   const v1 = (m: Meta) => ({ kind: 'storage#object', id: `${m.bucket}/${m.name}/${m.generation}`, selfLink: `${ctx.origin}/storage/v1/b/${m.bucket}/o/${encodeURIComponent(m.name)}`, mediaLink: `${ctx.origin}/download/storage/v1/b/${m.bucket}/o/${encodeURIComponent(m.name)}?generation=${m.generation}&alt=media`, name: m.name, bucket: m.bucket, generation: m.generation, metageneration: m.metageneration, contentType: m.contentType, storageClass: 'STANDARD', size: String(m.size), md5Hash: m.md5Hash, crc32c: m.crc32c, etag: m.md5Hash, timeCreated: m.timeCreated, updated: m.updated, metadata: { ...m.metadata, firebaseStorageDownloadTokens: m.downloadTokens }, ...(m.contentDisposition ? { contentDisposition: m.contentDisposition } : {}), ...(m.cacheControl ? { cacheControl: m.cacheControl } : {}) });
 
-  const list = (bucket: string, prefix: string, delimiter: string | null, max: number, after: string | null) => {
-    const rows = (q.list.all(bucket, prefix, `${prefix}￿`) as { meta: string }[]).map((r) => JSON.parse(r.meta) as Meta);
+  const list = async (bucket: string, prefix: string, delimiter: string | null, max: number, after: string | null) => {
+    const rows = (await q.list.all(bucket, prefix, `${prefix}￿`) as { meta: string }[]).map((r) => JSON.parse(r.meta) as Meta);
     const items: Meta[] = [];
     const prefixes = new Set<string>();
     for (const m of rows) {
@@ -301,7 +307,7 @@ export function storageService(ctx: EmulatorContext): Service {
         const admin = { admin: true, auth: null };
         if (action === 'read') {
           if (req.method !== 'GET' && req.method !== 'HEAD') return json({ error: { code: 405, message: 'a read URL takes GET' } }, 405);
-          const cur = getMeta(bucket, name);
+          const cur = await getMeta(bucket, name);
           return cur ? media(cur, req) : notFound(name);
         }
         if (req.method !== 'PUT') return json({ error: { code: 405, message: 'a write URL takes PUT' } }, 405);
@@ -317,7 +323,7 @@ export function storageService(ctx: EmulatorContext): Service {
         if (!m[2] && req.method === 'GET') {
           const prefix = url.searchParams.get('prefix') ?? '';
           await allow(caller, 'list', bucket, `${prefix}`, null, null);
-          const r = list(bucket, prefix, url.searchParams.get('delimiter'), Number(url.searchParams.get('maxResults') ?? 1000), url.searchParams.get('pageToken'));
+          const r = await list(bucket, prefix, url.searchParams.get('delimiter'), Number(url.searchParams.get('maxResults') ?? 1000), url.searchParams.get('pageToken'));
           return json({ prefixes: r.prefixes, items: r.items.map((x) => ({ name: x.name, bucket })), ...(r.next ? { nextPageToken: r.next } : {}) });
         }
         if (req.method === 'POST' && !m[2]) {
@@ -330,33 +336,33 @@ export function storageService(ctx: EmulatorContext): Service {
           if (proto === 'resumable' && command === 'start') {
             const meta = (await req.json().catch(() => ({}))) as Record<string, unknown>;
             const id = randomUUID();
-            q.upPut.run(id, bucket, String(meta.name ?? name), JSON.stringify(meta), Buffer.alloc(0));
+            await q.upPut.run(id, bucket, String(meta.name ?? name), JSON.stringify(meta), Buffer.alloc(0));
             const uploadUrl = `${callerOrigin(req, ctx.origin)}/v0/b/${encodeURIComponent(bucket)}/o?name=${encodeURIComponent(String(meta.name ?? name))}&upload_id=${id}&upload_protocol=resumable`;
             return new Response(null, { status: 200, headers: { 'x-goog-upload-url': uploadUrl, 'x-goog-upload-status': 'active', 'x-goog-upload-chunk-granularity': '262144' } });
           }
           const uploadId = url.searchParams.get('upload_id');
           if (uploadId) {
-            const up = q.upGet.get(uploadId) as { bucket: string; name: string; meta: string; data: Uint8Array } | undefined;
+            const up = await q.upGet.get(uploadId) as { bucket: string; name: string; meta: string; data: Uint8Array } | undefined;
             if (!up) return json({ error: { code: 404, message: 'upload not found' } }, 404);
             if (command.includes('query')) return new Response(null, { headers: { 'x-goog-upload-status': 'active', 'x-goog-upload-size-received': String(up.data.length) } });
             if (command.includes('cancel')) {
-              q.upDel.run(uploadId);
+              await q.upDel.run(uploadId);
               return new Response(null, { headers: { 'x-goog-upload-status': 'cancelled' } });
             }
             const chunk = Buffer.from(await req.arrayBuffer());
             const data = Buffer.concat([Buffer.from(up.data), chunk]);
             if (!command.includes('finalize')) {
-              q.upData.run(data, uploadId);
+              await q.upData.run(data, uploadId);
               return new Response(null, { headers: { 'x-goog-upload-status': 'active', 'x-goog-upload-size-received': String(data.length) } });
             }
-            q.upDel.run(uploadId);
+            await q.upDel.run(uploadId);
             const meta = await store(caller, up.bucket, up.name, data, JSON.parse(up.meta) as Record<string, unknown>);
             return json(v0(meta), 200, { 'x-goog-upload-status': 'final' });
           }
           // A simple upload (raw body).
           return json(v0(await store(caller, bucket, name, Buffer.from(await req.arrayBuffer()), { contentType: req.headers.get('content-type') ?? undefined })));
         }
-        const cur = getMeta(bucket, name);
+        const cur = await getMeta(bucket, name);
         if (req.method === 'GET') {
           if (!cur) return notFound(name);
           await allow(caller, 'get', bucket, name, cur, null);
@@ -374,14 +380,14 @@ export function storageService(ctx: EmulatorContext): Service {
           if ('metadata' in patch) next.metadata = Object.fromEntries(Object.entries((patch.metadata ?? {}) as Record<string, string | null>).filter(([, v]) => v !== null)) as Record<string, string>;
           checkSchema(name, next.size, next.contentType);
           await allow(caller, 'update', bucket, name, cur, next);
-          q.put.run(bucket, name, JSON.stringify(next));
+          await q.put.run(bucket, name, JSON.stringify(next));
           emit('metadataUpdated', next);
           return json(v0(next));
         }
         if (req.method === 'DELETE') {
           if (!cur) return notFound(name);
           await allow(caller, 'delete', bucket, name, cur, null);
-          q.del.run(bucket, name);
+          await q.del.run(bucket, name);
           emit('deleted', cur);
           dropBlob(bucket, name);
           return new Response(null, { status: 204 });
@@ -412,10 +418,10 @@ export function storageService(ctx: EmulatorContext): Service {
             if (!id) {
               const meta = (await req.json().catch(() => ({}))) as Record<string, unknown>;
               const nid = randomUUID();
-              q.upPut.run(nid, bucket, String(meta.name ?? name), JSON.stringify(meta), Buffer.alloc(0));
+              await q.upPut.run(nid, bucket, String(meta.name ?? name), JSON.stringify(meta), Buffer.alloc(0));
               return new Response(null, { status: 200, headers: { location: `${callerOrigin(req, ctx.origin)}/upload/storage/v1/b/${encodeURIComponent(bucket)}/o?uploadType=resumable&name=${encodeURIComponent(String(meta.name ?? name))}&upload_id=${nid}` } });
             }
-            const up = q.upGet.get(id) as { bucket: string; name: string; meta: string; data: Uint8Array } | undefined;
+            const up = await q.upGet.get(id) as { bucket: string; name: string; meta: string; data: Uint8Array } | undefined;
             if (!up) return json({ error: { code: 404, message: 'upload not found' } }, 404);
             const data = Buffer.concat([Buffer.from(up.data), Buffer.from(await req.arrayBuffer())]);
             // 'bytes 0-*/*': one request streams it all (done when it ends); 'bytes 0-262143/*' is one
@@ -425,11 +431,11 @@ export function storageService(ctx: EmulatorContext): Service {
             const total = range ? range[2] : String(data.length);
             const more = total === '*' ? end !== undefined && end !== '*' : Number(total) > data.length;
             if (more) {
-              q.upData.run(data, id);
+              await q.upData.run(data, id);
               // Nothing received yet: a 308 without a range (GCS's answer to a status check).
               return new Response(null, { status: 308, headers: data.length ? { range: `bytes=0-${data.length - 1}` } : {} });
             }
-            q.upDel.run(id);
+            await q.upDel.run(id);
             return json(v1(await store(caller, up.bucket, up.name, data, JSON.parse(up.meta) as Record<string, unknown>)));
           }
           return json(v1(await store(caller, bucket, name, Buffer.from(await req.arrayBuffer()), { contentType: req.headers.get('content-type') ?? undefined })));
@@ -440,7 +446,7 @@ export function storageService(ctx: EmulatorContext): Service {
           const srcName = decodeURIComponent(cp[1]!);
           const dstBucket = decodeURIComponent(cp[3]!);
           const dstName = decodeURIComponent(cp[4]!);
-          const src = getMeta(bucket, srcName);
+          const src = await getMeta(bucket, srcName);
           if (!src) return notFound(srcName);
           const patch = (await req.json().catch(() => ({}))) as { contentType?: string; metadata?: Record<string, string> };
           const meta = await store(caller, dstBucket, dstName, readBlob(bucket, srcName), { contentType: patch.contentType ?? src.contentType, metadata: { ...src.metadata, ...(patch.metadata ?? {}) }, ...(src.cacheControl ? { cacheControl: src.cacheControl } : {}), ...(src.contentDisposition ? { contentDisposition: src.contentDisposition } : {}) });
@@ -448,11 +454,11 @@ export function storageService(ctx: EmulatorContext): Service {
           return json({ kind: 'storage#rewriteResponse', totalBytesRewritten: String(meta.size), objectSize: String(meta.size), done: true, resource: v1(meta) });
         }
         if (!m[3] && req.method === 'GET' && path.includes('/o')) {
-          const r = list(bucket, url.searchParams.get('prefix') ?? '', url.searchParams.get('delimiter'), Number(url.searchParams.get('maxResults') ?? 1000), url.searchParams.get('pageToken'));
+          const r = await list(bucket, url.searchParams.get('prefix') ?? '', url.searchParams.get('delimiter'), Number(url.searchParams.get('maxResults') ?? 1000), url.searchParams.get('pageToken'));
           return json({ kind: 'storage#objects', items: r.items.map(v1), prefixes: r.prefixes, ...(r.next ? { nextPageToken: r.next } : {}) });
         }
         if (!m[3] && !path.includes('/o')) return json({ kind: 'storage#bucket', name: bucket, id: bucket });
-        const cur = getMeta(bucket, name);
+        const cur = await getMeta(bucket, name);
         if (req.method === 'GET') {
           if (!cur) return notFound(name);
           if (m[1] === 'download/' || url.searchParams.get('alt') === 'media') return media(cur, req);
@@ -468,13 +474,13 @@ export function storageService(ctx: EmulatorContext): Service {
             delete meta.firebaseStorageDownloadTokens;
             next.metadata = Object.fromEntries(Object.entries({ ...cur.metadata, ...meta }).filter(([, v]) => v !== null)) as Record<string, string>;
           }
-          q.put.run(bucket, name, JSON.stringify(next));
+          await q.put.run(bucket, name, JSON.stringify(next));
           emit('metadataUpdated', next);
           return json(v1(next));
         }
         if (req.method === 'DELETE') {
           if (!cur) return notFound(name);
-          q.del.run(bucket, name);
+          await q.del.run(bucket, name);
           emit('deleted', cur);
           dropBlob(bucket, name);
           return new Response(null, { status: 204 });

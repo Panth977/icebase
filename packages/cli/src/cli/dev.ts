@@ -38,13 +38,13 @@ export async function dev(initial: AnyConfig, root: string, log: Log, opts: { en
       hosting = await startHosting({ config, root, port: config.emulator?.hostingPort ?? 5002, functionsOrigin: emu.url, projectId: emu.context.projectId, log });
     }
     const seed = config.emulator?.seed;
-    if (seed && emu.context.firestore.count() === 0) {
+    if (seed && (await emu.context.firestore.count()) === 0) {
       log(`seed: ${seed}`);
       process.env.ICEBASE_ENV = env;
       process.env.ICEBASE_EMULATOR_HOST = emu.url.replace(/^http:\/\//, '');
       const { importTs } = await import('./load.ts');
       await importTs(`${pathToFileURL(resolve(root, seed)).href}?v=${Date.now()}`);
-      log(`seed: done, ${emu.context.firestore.count()} documents`);
+      log(`seed: done, ${await emu.context.firestore.count()} documents`);
     }
     log(`\n  IceBase emulator  ${emu.url}\n${hosting ? `  Hosting           ${hosting.url}\n` : ''}  env               ${env}\n  data              ${relative(root, emu.context.dataDir) || emu.context.dataDir}\n`);
   };

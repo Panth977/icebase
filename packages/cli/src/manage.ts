@@ -20,9 +20,8 @@ export type { IndexesFile } from './internal/firebase-indexes.ts';
 
 function adminOnly(app: IceBaseApp, what: string, svc: Service): 'firebase' | 'emulator' {
   if (app.kind !== 'admin') throw new IceBaseError('invalid-argument', `${what} needs an admin app (initializeAdminApp from icebase/admin)`, { reason: 'config' });
-  const mode = app.modes[svc];
-  if (mode === 'vm') throw new IceBaseError('unimplemented', `${what}: vm mode is not built yet (phase 3)`, { reason: 'mode', service: svc });
-  return mode;
+  // vm services read 'emulator' on an app: the IceBase server either way.
+  return app.modes[svc] === 'firebase' ? 'firebase' : 'emulator';
 }
 
 /** emulator mode: the IceBase server's management API, POST /__/icebase/admin/manage/<service>/<op> with the admin token. */

@@ -11,7 +11,7 @@ import { firestoreConfig, firestoreSuite } from './suites/firestore.suite.js';
 const boot = async () => {
   const emu = await startEmulator({ config: firestoreConfig('emulator'), port: 0, dataDir: ':memory:', without: ['functions'], log: () => {} });
   const config = firestoreConfig('emulator', emu.port);
-  const rawSet = async (path: string, data: Record<string, unknown>) => void emu.context.firestore.commit([{ op: 'set', path, data: encode(data) as never }]);
+  const rawSet = async (path: string, data: Record<string, unknown>) => void (await emu.context.firestore.commit([{ op: 'set', path, data: encode(data) as never }]));
   return { emu, config, rawSet };
 };
 let shared: Promise<Awaited<ReturnType<typeof boot>>> | null = null;

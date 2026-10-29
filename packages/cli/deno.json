@@ -16,7 +16,8 @@
     "firebase-functions/": "npm:/firebase-functions@^7.4.0/",
     "ws": "npm:ws@^8.18.0",
     "tsx/esm/api": "npm:tsx@^4.20.0/esm/api",
-    "esbuild": "npm:esbuild@^0.25.0"
+    "esbuild": "npm:esbuild@^0.25.0",
+    "pg": "npm:pg@^8.23.1"
   },
   "publish": {
     "include": [

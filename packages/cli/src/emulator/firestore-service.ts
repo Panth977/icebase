@@ -64,8 +64,8 @@ function firestoreDatabase(ctx: EmulatorContext, dbId: string, engine: Firestore
       resource: resource ? { data: resource.data, id: resource.id, path: `${db}/${path}` } : null,
       requestResource: requestData ? { data: requestData, id: path.slice(path.lastIndexOf('/') + 1), path: `${db}/${path}` } : null,
       query: query ? { limit: query.limit?.n ?? null, orderBy: query.orders[0]?.field.join('.') ?? null } : null,
-      get: (p) => {
-        const d = engine.get(p.replace(/^\/databases\/[^/]+\/documents\//, ''));
+      load: async (p) => {
+        const d = await engine.get(p.replace(/^\/databases\/[^/]+\/documents\//, ''));
         return d ? { data: d.data, id: d.id, path: p } : null;
       },
     });
@@ -124,7 +124,7 @@ function firestoreDatabase(ctx: EmulatorContext, dbId: string, engine: Firestore
     if (!caller.admin && rules) {
       const preview = { s: 0, n: 0 };
       for (const w of writes) {
-        const cur = engine.get(w.path);
+        const cur = await engine.get(w.path);
         if (w.op === 'delete') await allow(caller, 'delete', w.path, cur, null);
         else {
           const base = structuredClone(w.op === 'set' && !w.merge ? {} : (cur?.data ?? {}));
@@ -145,17 +145,36 @@ function firestoreDatabase(ctx: EmulatorContext, dbId: string, engine: Firestore
     path?: string;
     spec?: QuerySpec;
     last: string | null;
+    /** A push in flight, and whether another change came while it ran. */
+    running?: Promise<void> | null;
+    again?: boolean;
   }
   const listeners = new Set<Listener>();
-  const push = async (l: Listener) => {
+  // One push at a time per listener, the last one after the last change: reads that answer out of
+  // order (Postgres connections) never leave an older snapshot as the latest.
+  const push = (l: Listener): Promise<void> => {
+    if (l.running) {
+      l.again = true;
+      return l.running;
+    }
+    l.running = (async () => {
+      do {
+        l.again = false;
+        await pushOnce(l);
+      } while (l.again && listeners.has(l));
+      l.running = null;
+    })();
+    return l.running;
+  };
+  const pushOnce = async (l: Listener) => {
     try {
       let docs: WireDoc[];
       if (l.kind === 'doc') {
-        const d = engine.get(l.path!);
+        const d = await engine.get(l.path!);
         await allow(l.live.caller, 'get', l.path!, d, null);
         docs = [toWire(l.path!, d)];
       } else {
-        const found = engine.query(l.spec!);
+        const found = await engine.query(l.spec!);
         await allowList(l.live.caller, l.spec!, found);
         docs = found.map((d) => toWire(d.path, d));
       }
@@ -190,29 +209,29 @@ function firestoreDatabase(ctx: EmulatorContext, dbId: string, engine: Firestore
       switch (name) {
         case 'get': {
           const paths = b.paths as string[];
-          const docs = engine.getAll(paths);
+          const docs = await engine.getAll(paths);
           for (let i = 0; i < paths.length; i++) await allow(caller, 'get', paths[i]!, docs[i]!, null);
           return json({ docs: paths.map((p, i) => toWire(p, docs[i]!)) });
         }
         case 'query': {
           const spec = b.spec as QuerySpec;
-          const docs = engine.query(spec);
+          const docs = await engine.query(spec);
           await allowList(caller, spec, docs);
           return json({ docs: docs.map((d) => toWire(d.path, d)) });
         }
         case 'aggregate': {
           const spec = b.spec as QuerySpec;
-          await allowList(caller, spec, engine.query(spec));
-          return json({ result: engine.aggregate(spec, b.aggs as Record<string, never>) });
+          await allowList(caller, spec, await engine.query(spec));
+          return json({ result: await engine.aggregate(spec, b.aggs as Record<string, never>) });
         }
         case 'commit':
           return json({ time: (await commit(caller, b.writes as Write[], (b.preconditions as Precondition[]) ?? [], b.unchecked === true)).time });
         case 'listCollections':
           if (!caller.admin) throw new IceBaseError('permission-denied', 'listCollections is admin only');
-          return json({ ids: engine.listCollections((b.path as string | null) ?? null) });
+          return json({ ids: await engine.listCollections((b.path as string | null) ?? null) });
         case 'recursiveDelete':
           if (!caller.admin) throw new IceBaseError('permission-denied', 'recursiveDelete is admin only');
-          return json({ deleted: engine.recursiveDelete(b.path as string) });
+          return json({ deleted: await engine.recursiveDelete(b.path as string) });
         case 'reloadRules':
           if (!caller.admin) throw new IceBaseError('permission-denied', 'admin only');
           reloadRules();
@@ -239,15 +258,18 @@ const DB_ID = /^[a-z][a-z0-9-]{2,61}[a-z0-9]$/;
 export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
   const memory = ctx.dataDir === ':memory:';
   const dbs = new Map<string, FirestoreDb>([['(default)', firestoreDatabase(ctx, '(default)', ctx.firestore)]]);
-  // Named databases (manageFirestore(app).createDb(id)) are kept in the data directory, one SQLite file each.
+  // Named databases (manageFirestore(app).createDb(id)): one store each (a SQLite file, a Postgres
+  // schema), listed in the data directory.
   const listFile = memory ? null : join(ctx.dataDir, 'firestore-databases.json');
   const named: string[] = listFile && existsSync(listFile) ? (JSON.parse(readFileSync(listFile, 'utf8')) as string[]) : [];
-  const open = (id: string): FirestoreDb => {
-    const d = firestoreDatabase(ctx, id, new FirestoreEngine({ file: memory ? ':memory:' : join(ctx.dataDir, `firestore-${id}.sqlite`), schema: ctx.config.schema }));
+  // The stores know them too (a migrated deployment, a new data directory on Postgres).
+  for (const s of await ctx.stores.list()) if (s.startsWith('firestore-') && !named.includes(s.slice(10))) named.push(s.slice(10));
+  const open = async (id: string): Promise<FirestoreDb> => {
+    const d = firestoreDatabase(ctx, id, await FirestoreEngine.open({ store: await ctx.stores.open(`firestore-${id}`), schema: ctx.config.schema }));
     dbs.set(id, d);
     return d;
   };
-  for (const id of named) open(id);
+  for (const id of named) await open(id);
   const dbOf = (b: Record<string, unknown>): FirestoreDb => {
     const id = typeof b.database === 'string' ? b.database : '(default)';
     const d = dbs.get(id);
@@ -286,14 +308,14 @@ export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
           return { databases: [...dbs.keys()].map(info) };
         case 'sqlIndexes':
           // What the IceBase server built from the declared indexes, and the document count, per database.
-          return { databases: [...dbs].map(([id, d]) => ({ id, documents: d.engine.count(), sqlIndexes: d.engine.sqlIndexes })) };
+          return { databases: await Promise.all([...dbs].map(async ([id, d]) => ({ id, documents: await d.engine.count(), sqlIndexes: d.engine.sqlIndexes }))) };
         case 'createDb': {
           const id = typeof b.id === 'string' ? b.id : '(default)';
           // The default database is always there on an IceBase server.
           if (id === '(default)') return info(id);
           if (!DB_ID.test(id)) throw new IceBaseError('invalid-argument', `createDb('${id}'): a database id is 4–63 characters of a-z, 0-9 and -, starting with a letter and not ending with -`);
           if (dbs.has(id)) throw new IceBaseError('already-exists', `Database '${id}' already exists`);
-          open(id);
+          await open(id);
           if (listFile) writeFileSync(listFile, JSON.stringify([...dbs.keys()].filter((k) => k !== '(default)')));
           return info(id);
         }
@@ -314,7 +336,7 @@ export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
             const after = firestoreIndexesJson(schema);
             // The server validates writes and plans queries with the schema it is given.
             (ctx as { config: EmulatorContext['config'] }).config = { ...ctx.config, schema };
-            for (const d of dbs.values()) d.engine.setSchema(schema);
+            for (const d of dbs.values()) await d.engine.setSchema(schema);
             return { ...diffIndexes(before, after), fieldOverrides: op === 'setSchema' ? after.fieldOverrides.length : 0 };
           }
           // An index file: the IceBase server plans queries from the schema, so every index in the
@@ -330,8 +352,8 @@ export async function firestoreService(ctx: EmulatorContext): Promise<Service> {
       }
       throw new IceBaseError('invalid-argument', `firestore: no management operation '${op}'`);
     },
-    close() {
-      for (const [id, d] of dbs) if (id !== '(default)') d.engine.close();
+    async close() {
+      for (const [id, d] of dbs) if (id !== '(default)') await d.engine.close();
     },
   };
 }

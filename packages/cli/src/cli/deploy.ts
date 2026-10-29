@@ -16,7 +16,11 @@ export function wiring(config: AnyConfig, env: string): { modes: Record<Service,
   const modes = resolveModes(config, env);
   const problems: string[] = [];
   const warnings: string[] = [];
-  for (const s of SERVICES) if (modes[s] === 'vm') problems.push(`${s}: vm mode is phase 3 and not built yet`);
+  // vm services run on your server (`icebase serve --env X` on the VM, Postgres from vm.databaseUrlEnv):
+  // icebase deploy ships only the firebase ones.
+  const vm = SERVICES.filter((s) => modes[s] === 'vm');
+  if (vm.length) warnings.push(`${vm.join(', ')}: vm mode — served by \`icebase serve --env ${env}\` on your server; icebase deploy does not push to a VM`);
+  if (vm.length && !config.vm?.databaseUrlEnv) problems.push('vm mode needs vm.databaseUrlEnv (the env var holding the Postgres connection string)');
   const fnRewrite = (config.hosting?.rewrites ?? []).some((r) => 'function' in r);
   if (fnRewrite && modes.hosting === 'firebase' && modes.functions !== 'firebase') problems.push('hosting rewrites to a function, but Firebase Hosting can only rewrite to Cloud Functions (functions are not in firebase mode)');
   if (modes.storage === 'firebase' && modes.firestore !== 'firebase' && config.rules?.storage && /firestore\.(get|exists)\(/.test(safeRead(config.rules.storage))) problems.push('storage.rules read Firestore, but Firestore is not on Firebase: Firebase Storage rules cannot read documents elsewhere');
@@ -131,6 +135,10 @@ export async function deploy(config: AnyConfig, env: string, root: string, only:
   const wantRules = (svc: Service) => (only === null || only.includes('rules') || only.includes(svc)) && modes[svc] === 'firebase';
   if (Object.values(modes).every((m) => m === 'emulator')) {
     log(`--env ${env} runs every service in emulator mode: nothing to deploy (use \`icebase dev\`)`);
+    return;
+  }
+  if (Object.values(modes).every((m) => m !== 'firebase')) {
+    log(`--env ${env} runs no service on Firebase: nothing to deploy (run \`icebase serve --env ${env}\` on your server)`);
     return;
   }
   const app = initializeAdminApp(config, env, { name: `icebase-deploy-${env}` });

@@ -1,18 +1,19 @@
 import { createHash } from 'node:crypto';
-// The emulator's document engine: Firestore semantics on SQLite (node:sqlite).
+// The server's document engine: Firestore semantics on SQL — SQLite (node:sqlite) or Postgres.
 //
 // One table holds every document (path, collection id, parent, data as tagged JSON). Every
 // field that a query filters or sorts on becomes an expression over that JSON, and IceBase
-// creates a SQLite index for each declared composite (IDX-5) — and for single fields the first
+// creates a SQL index for each declared composite (IDX-5) — and for single fields the first
 // time a query uses them. Queries the planner refuses (missing composite) never reach here.
 
-import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { IceBaseError } from '@panth977/icebase/errors';
 import { dnf, fullOrder, isName, planQuery, type FilterNode, type OrderSpec, type QuerySpec, type WhereOp } from '@panth977/icebase/internal';
 
 export { fullOrder } from '@panth977/icebase/internal';
 import { tsKey, type Tagged } from '@panth977/icebase/internal';
 import { fieldAt, matchCollectionPath, showPath, type AnyCollection, type Schema } from '@panth977/icebase/schema';
+import type { Sql, Store } from './store.ts';
+import { firestoreTables } from './tables.ts';
 
 export type Json = null | boolean | number | string | Json[] | { [k: string]: Json };
 
@@ -176,66 +177,54 @@ function cursorCmp(doc: StoredDoc, order: OrderSpec[], values: Json[]): number {
 // ─── the engine ────────────────────────────────────────────────────────────────
 
 export interface EngineOptions {
-  /** SQLite file, or ':memory:'. */
-  file: string;
+  /** The store the documents live in (a SQLite file, or a Postgres schema). */
+  store: Store;
   schema: Schema<Record<string, AnyCollection>, any, any>;
   /** Learning mode: report a missing index instead of refusing the query (never in production). */
   learn?: (missing: { collection: string; suggestion: string }) => void;
 }
 
+/** A field's sortable SQL expression; 'json' ones compare as JSON (Postgres: numbers, booleans). */
+type Expr = { sql: string; json: boolean };
+
 export class FirestoreEngine {
-  readonly db: DatabaseSync;
+  readonly store: Store;
+  private readonly pg: boolean;
   private readonly colls: AnyCollection[] = [];
   private readonly listeners = new Set<(changes: Change[]) => void>();
-  private readonly stmts: Record<string, StatementSync>;
-  /** The SQLite indexes built from the declared ones (IDX-5), for the console. */
+  /** The SQL indexes built from the declared ones (IDX-5), for the console. */
   readonly sqlIndexes: string[] = [];
-  private version: number;
+  private version = 0;
   private lastTime = 0;
 
   private readonly learn: EngineOptions['learn'];
-  constructor(opts: EngineOptions) {
+  private constructor(opts: EngineOptions) {
     this.learn = opts.learn;
-    this.db = new DatabaseSync(opts.file);
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = NORMAL;
-      PRAGMA busy_timeout = 10000;
-      CREATE TABLE IF NOT EXISTS docs (
-        path TEXT PRIMARY KEY,
-        coll TEXT NOT NULL,
-        parent TEXT NOT NULL,
-        id TEXT NOT NULL,
-        data TEXT NOT NULL,
-        ct_s INTEGER NOT NULL, ct_n INTEGER NOT NULL,
-        ut_s INTEGER NOT NULL, ut_n INTEGER NOT NULL,
-        version INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS docs_parent ON docs (parent, path);
-      CREATE INDEX IF NOT EXISTS docs_coll ON docs (coll, path);
-      CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
-    `);
-    this.version = Number((this.db.prepare(`SELECT MAX(version) v FROM docs`).get() as { v: number | null }).v ?? 0);
-    this.stmts = {
-      get: this.db.prepare(`SELECT * FROM docs WHERE path = ?`),
-      put: this.db.prepare(`INSERT INTO docs (path, coll, parent, id, data, ct_s, ct_n, ut_s, ut_n, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(path) DO UPDATE SET data = excluded.data, ut_s = excluded.ut_s, ut_n = excluded.ut_n, version = excluded.version`),
-      del: this.db.prepare(`DELETE FROM docs WHERE path = ?`),
-      count: this.db.prepare(`SELECT COUNT(*) n FROM docs`),
-    };
-    this.setSchema(opts.schema);
+    this.store = opts.store;
+    this.pg = opts.store.dialect === 'postgres';
+  }
+
+  static async open(opts: EngineOptions): Promise<FirestoreEngine> {
+    const e = new FirestoreEngine(opts);
+    await firestoreTables(e.store);
+    e.version = Number((await e.store.get<{ v: number | null }>(`SELECT MAX(version) v FROM docs`))?.v ?? 0);
+    await e.setSchema(opts.schema);
+    return e;
   }
 
   /** The schema the engine plans queries with: its declared indexes are built, earlier ones dropped. */
-  setSchema(schema: Schema<Record<string, AnyCollection>, any, any>): void {
+  async setSchema(schema: Schema<Record<string, AnyCollection>, any, any>): Promise<void> {
     this.colls.length = 0;
     this.colls.push(...Object.values(schema.collections));
     this.sqlIndexes.length = 0;
     const wanted = new Set<string>();
-    for (const c of this.colls) this.ensureIndexes(c, wanted);
+    for (const c of this.colls) await this.ensureIndexes(c, wanted);
     // Indexes from an earlier schema (an index removed or changed) go.
-    for (const r of this.db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'ix\\_%' ESCAPE '\\'`).all() as { name: string }[]) {
-      if (!wanted.has(r.name)) this.db.exec(`DROP INDEX IF EXISTS "${r.name}"`);
+    const existing = this.pg
+      ? await this.store.all<{ name: string }>(`SELECT indexname AS name FROM pg_indexes WHERE schemaname = current_schema() AND indexname LIKE 'ix\\_%'`)
+      : await this.store.all<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'ix\\_%' ESCAPE '\\'`);
+    for (const r of existing) {
+      if (!wanted.has(r.name)) await this.store.exec(`DROP INDEX IF EXISTS "${r.name}"`);
     }
   }
 
@@ -245,8 +234,8 @@ export class FirestoreEngine {
     return this.colls.find((c) => c.id === spec.collectionId && c.group) ?? this.colls.find((c) => c.id === spec.collectionId);
   }
 
-  close(): void {
-    this.db.close();
+  async close(): Promise<void> {
+    await this.store.close();
   }
 
   onChanges(cb: (changes: Change[]) => void): () => void {
@@ -254,35 +243,66 @@ export class FirestoreEngine {
     return () => this.listeners.delete(cb);
   }
 
-  count(): number {
-    return Number((this.stmts.count!.get() as { n: number }).n);
+  async count(): Promise<number> {
+    return Number((await this.store.get<{ n: number }>(`SELECT COUNT(*) n FROM docs`))!.n);
   }
 
   // ── SQL expressions ─────────────────────────────────────────────────────────
 
-  /** The JSON path of a key path: '$."a"."b"' (schema field names never contain quotes). */
+  /** The JSON path of a key path: SQLite '$."a"."b"', Postgres '{"a","b"}' (schema field names never contain quotes). */
   private jpath(path: readonly string[]): string {
+    if (this.pg) return `'{${path.map((k) => `"${k.replace(/[\\"]/g, '\\$&').replace(/'/g, "''")}"`).join(',')}}'`;
     return `'$${path.map((k) => `."${k}"`).join('')}'`;
   }
 
+  /** SQL: the field is present (null included). */
+  private present(path: readonly string[]): string {
+    return this.pg ? `(data #> ${this.jpath(path)}) IS NOT NULL` : `json_type(data, ${this.jpath(path)}) IS NOT NULL`;
+  }
+
+  /** SQL: the JSON type of the field ('null', …). */
+  private jsonType(path: readonly string[]): string {
+    return this.pg ? `json_typeof(data #> ${this.jpath(path)})` : `json_type(data, ${this.jpath(path)})`;
+  }
+
   /** The SQL expression for a field's sortable key, when its type allows one. */
-  private expr(coll: AnyCollection | undefined, path: readonly string[]): string | null {
-    if (isName(path)) return 'path';
+  private expr(coll: AnyCollection | undefined, path: readonly string[]): Expr | null {
+    if (isName(path)) return { sql: 'path', json: false };
     if (!coll) return null;
     const def = fieldAt(coll.fields, path, coll.rest);
     if (!def) return null;
+    const kind = def.def.kind;
+    if (this.pg) {
+      // Strings compare bytewise (COLLATE "C"), as Firestore orders them; numbers and booleans as JSON.
+      const text = (p: readonly string[]): Expr => ({ sql: `((data #>> ${this.jpath(p)}) COLLATE "C")`, json: false });
+      switch (kind) {
+        case 'string':
+        case 'enum':
+          return text(path);
+        case 'number':
+        case 'boolean':
+        case 'literal':
+          return { sql: `((data #> ${this.jpath(path)})::jsonb)`, json: true };
+        case 'timestamp':
+          return text([...path, 'k']);
+        case 'ref':
+          return text([...path, 'p']);
+        default:
+          return null;
+      }
+    }
     const p = this.jpath(path);
-    switch (def.def.kind) {
+    switch (kind) {
       case 'string':
       case 'number':
       case 'boolean':
       case 'enum':
       case 'literal':
-        return `json_extract(data, ${p})`;
+        return { sql: `json_extract(data, ${p})`, json: false };
       case 'timestamp':
-        return `json_extract(data, ${p.slice(0, -1)}.k')`;
+        return { sql: `json_extract(data, ${p.slice(0, -1)}.k')`, json: false };
       case 'ref':
-        return `json_extract(data, ${p.slice(0, -1)}.p')`;
+        return { sql: `json_extract(data, ${p.slice(0, -1)}.p')`, json: false };
       default:
         return null;
     }
@@ -299,35 +319,46 @@ export class FirestoreEngine {
     return v;
   }
 
-  /** IDX-5: one SQLite index per declared index — single-field and composite — and no others. */
-  private ensureIndexes(c: AnyCollection, wanted: Set<string>): void {
+  /** A placeholder for a value compared with `e`, its parameter pushed. */
+  private ph(e: Expr, v: unknown, params: unknown[]): string {
+    if (e.json) {
+      params.push(JSON.stringify(v));
+      return '?::jsonb';
+    }
+    params.push(this.param(v));
+    return '?';
+  }
+
+  /** IDX-5: one SQL index per declared index — single-field and composite — and no others. */
+  private async ensureIndexes(c: AnyCollection, wanted: Set<string>): Promise<void> {
     // A {rest=**} collection spans many collection ids: answered by scanning.
     if (c.glob) return;
-    c.indexes.forEach((ix) => {
+    for (const ix of c.indexes) {
       const cols = ix.fields.filter((f) => f.mode !== 'contains').map((f) => {
         const e = this.expr(c, f.path);
-        return e ? `${e} ${f.mode === 'desc' ? 'DESC' : 'ASC'}` : null;
+        return e ? `${this.pg ? `(${e.sql})` : e.sql} ${f.mode === 'desc' ? 'DESC' : 'ASC'}` : null;
       });
       // An index on an array (array-contains) or a map has no SQL column; it is answered by scanning the collection.
-      if (cols.some((x) => x === null) || cols.length === 0) return;
+      if (cols.some((x) => x === null) || cols.length === 0) continue;
       const coll = c.id.replace(/'/g, "''");
-      const make = (cols2: string) => {
+      const make = async (cols2: string) => {
         // Named after its definition, so a changed index is a new one (and the old one is dropped).
         const name = `ix_${createHash('sha1').update(`${coll}|${cols2}`).digest('hex').slice(0, 16)}`;
         wanted.add(name);
-        this.db.exec(`CREATE INDEX IF NOT EXISTS "${name}" ON docs (${cols2}, path) WHERE coll = '${coll}'`);
+        await this.store.exec(`CREATE INDEX IF NOT EXISTS "${name}" ON docs (${cols2}, path) WHERE coll = '${coll}'`);
       };
-      make(`parent, ${cols.join(', ')}`);
-      if (c.group) make(cols.join(', '));
+      await make(`parent, ${cols.join(', ')}`);
+      if (c.group) await make(cols.join(', '));
       this.sqlIndexes.push(`${c.path}: ${ix.fields.map((f) => `${showPath(f.path)} ${f.mode}`).join(', ')}`);
-    });
+    }
   }
 
   private rowToDoc(r: Record<string, unknown>): StoredDoc {
     return {
       path: r.path as string,
       id: r.id as string,
-      data: JSON.parse(r.data as string) as Record<string, Json>,
+      // Postgres hands JSON columns back parsed.
+      data: (typeof r.data === 'string' ? JSON.parse(r.data) : r.data) as Record<string, Json>,
       createTime: { s: Number(r.ct_s), n: Number(r.ct_n) },
       updateTime: { s: Number(r.ut_s), n: Number(r.ut_n) },
       version: Number(r.version),
@@ -336,17 +367,23 @@ export class FirestoreEngine {
 
   // ── reads ───────────────────────────────────────────────────────────────────
 
-  get(path: string): StoredDoc | null {
-    const r = this.stmts.get!.get(path) as Record<string, unknown> | undefined;
+  private async getOn(sql: Sql, path: string): Promise<StoredDoc | null> {
+    const r = await sql.get(`SELECT * FROM docs WHERE path = ?`, path);
     return r ? this.rowToDoc(r) : null;
   }
 
-  getAll(paths: string[]): (StoredDoc | null)[] {
-    return paths.map((p) => this.get(p));
+  get(path: string): Promise<StoredDoc | null> {
+    return this.getOn(this.store, path);
+  }
+
+  async getAll(paths: string[]): Promise<(StoredDoc | null)[]> {
+    const out: (StoredDoc | null)[] = [];
+    for (const p of paths) out.push(await this.get(p));
+    return out;
   }
 
   /** Run a query. `cursorStart`/`cursorEnd` values are aligned with fullOrder(spec). */
-  query(spec: QuerySpec, aggregated: string[][] = []): StoredDoc[] {
+  async query(spec: QuerySpec, aggregated: string[][] = []): Promise<StoredDoc[]> {
     const coll = this.collectionFor(spec);
     // The SDK checks before sending; the server checks again so no client can skip it.
     for (const c of spec.path === null ? this.colls.filter((x) => x.id === spec.collectionId && x.group) : coll ? [coll] : []) {
@@ -369,6 +406,7 @@ export class FirestoreEngine {
     let exact = true;
     const conjs = dnf(spec.filters);
     const sqlConj: string[] = [];
+    const TRUE = this.pg ? 'TRUE' : '1';
     for (const conj of conjs) {
       const parts: string[] = [];
       for (const f of conj) {
@@ -376,14 +414,14 @@ export class FirestoreEngine {
         if (s === null) exact = false;
         else parts.push(s);
       }
-      sqlConj.push(parts.length ? `(${parts.join(' AND ')})` : '1');
+      sqlConj.push(parts.length ? `(${parts.join(' AND ')})` : TRUE);
     }
     // A conjunction missing a filter SQL can't express is a superset; JS narrows it below.
-    if (conjs.length && !sqlConj.includes('1')) where.push(`(${sqlConj.join(' OR ')})`);
+    if (conjs.length && !sqlConj.includes(TRUE)) where.push(`(${sqlConj.join(' OR ')})`);
     // Documents without an ordered field are not in the result (Firestore semantics).
     for (const o of order) {
       if (isName(o.field)) continue;
-      where.push(`json_type(data, ${this.jpath(o.field)}) IS NOT NULL`);
+      where.push(this.present(o.field));
     }
     const orderSql: string[] = [];
     for (const o of order) {
@@ -392,19 +430,19 @@ export class FirestoreEngine {
         exact = false;
         break;
       }
-      orderSql.push(`${e} ${o.dir === 'asc' ? 'ASC' : 'DESC'}`);
+      orderSql.push(`${e.sql} ${o.dir === 'asc' ? 'ASC' : 'DESC'}`);
     }
     if (spec.start?.values.length || spec.end?.values.length) exact = false;
     const reverse = spec.limit?.last === true;
     let sql = `SELECT * FROM docs WHERE ${where.join(' AND ')}`;
     if (exact && orderSql.length === order.length) {
       sql += ` ORDER BY ${orderSql.map((s) => (reverse ? s.replace(/ ASC$/, ' __D').replace(/ DESC$/, ' ASC').replace(/ __D$/, ' DESC') : s)).join(', ')}`;
-      if (spec.limit) sql += ` LIMIT ${spec.limit.n}`;
-      const rows = (this.db.prepare(sql).all(...(params as never[])) as Record<string, unknown>[]).map((r) => this.rowToDoc(r));
+      if (spec.limit) sql += ` LIMIT ${Number(spec.limit.n)}`;
+      const rows = (await this.store.all(sql, ...params)).map((r) => this.rowToDoc(r));
       return reverse ? rows.reverse() : rows;
     }
     // Something SQL can't say exactly (maps, nested fields, cursors): finish in JS.
-    let docs = (this.db.prepare(sql).all(...(params as never[])) as Record<string, unknown>[]).map((r) => this.rowToDoc(r));
+    let docs = (await this.store.all(sql, ...params)).map((r) => this.rowToDoc(r));
     docs = docs.filter((d) => matchesFilters(d, spec.filters) && order.every((o) => isName(o.field) || valueAt(d, o.field) !== undefined));
     sortDocs(docs, order);
     if (spec.start?.values.length) docs = docs.filter((d) => (spec.start!.inclusive ? cursorCmp(d, order, spec.start!.values as Json[]) >= 0 : cursorCmp(d, order, spec.start!.values as Json[]) > 0));
@@ -419,20 +457,27 @@ export class FirestoreEngine {
     if (f.op === 'array-contains' || f.op === 'array-contains-any') {
       if (!def || def.def.kind !== 'array') return null;
       const el = def.def.of.def.kind;
+      const vals = f.op === 'array-contains' ? [f.value] : (f.value as unknown[]);
+      if (this.pg) {
+        const ve: Expr | null = el === 'timestamp' ? { sql: `(value #>> '{k}')`, json: false } : el === 'ref' ? { sql: `(value #>> '{p}')`, json: false } : ['string', 'enum'].includes(el) ? { sql: `(value #>> '{}')`, json: false } : ['number', 'boolean'].includes(el) ? { sql: 'value::jsonb', json: true } : null;
+        if (!ve) return null;
+        const arr = `data #> ${jp}`;
+        return `EXISTS (SELECT 1 FROM json_array_elements(CASE WHEN json_typeof(${arr}) = 'array' THEN ${arr} ELSE '[]'::json END) AS el(value) WHERE ${ve.sql} IN (${vals.map((v) => this.ph(ve, v, params)).join(', ')}))`;
+      }
       const valueExpr = el === 'timestamp' ? `json_extract(value, '$.k')` : el === 'ref' ? `json_extract(value, '$.p')` : ['string', 'number', 'boolean', 'enum'].includes(el) ? 'value' : null;
       if (!valueExpr) return null;
-      const vals = f.op === 'array-contains' ? [f.value] : (f.value as unknown[]);
       params.push(...vals.map((v) => this.param(v)));
       return `EXISTS (SELECT 1 FROM json_each(data, ${jp}) WHERE ${valueExpr} IN (${vals.map(() => '?').join(', ')}))`;
     }
     const e = this.expr(coll, f.field);
     if (!e) return null;
-    const present = isName(f.field) ? '1' : `json_type(data, ${jp}) IS NOT NULL`;
-    const notNull = isName(f.field) ? '1' : `json_type(data, ${jp}) NOT IN ('null')`;
+    const [T, F] = this.pg ? ['TRUE', 'FALSE'] : ['1', '0'];
+    const present = isName(f.field) ? T : this.present(f.field);
+    const notNull = isName(f.field) ? T : this.pg ? `${this.jsonType(f.field)} <> 'null'` : `${this.jsonType(f.field)} NOT IN ('null')`;
     if (f.value === null) {
-      if (f.op === '==') return `json_type(data, ${jp}) = 'null'`;
+      if (f.op === '==') return `${this.jsonType(f.field)} = 'null'`;
       if (f.op === '!=') return `(${present} AND ${notNull})`;
-      return '0';
+      return F;
     }
     switch (f.op) {
       case '==':
@@ -440,25 +485,22 @@ export class FirestoreEngine {
       case '<=':
       case '>':
       case '>=':
-        params.push(this.param(f.value));
-        return `(${present} AND ${e} ${f.op === '==' ? '=' : f.op} ?)`;
+        return `(${present} AND ${e.sql} ${f.op === '==' ? '=' : f.op} ${this.ph(e, f.value, params)})`;
       case '!=':
-        params.push(this.param(f.value));
-        return `(${present} AND ${notNull} AND ${e} <> ?)`;
+        return `(${present} AND ${notNull} AND ${e.sql} <> ${this.ph(e, f.value, params)})`;
       case 'in':
       case 'not-in': {
         const vals = f.value as unknown[];
         if (vals.some((v) => v === null)) return null;
-        params.push(...vals.map((v) => this.param(v)));
-        return `(${present} AND ${f.op === 'not-in' ? `${notNull} AND ` : ''}${e} ${f.op === 'in' ? 'IN' : 'NOT IN'} (${vals.map(() => '?').join(', ')}))`;
+        return `(${present} AND ${f.op === 'not-in' ? `${notNull} AND ` : ''}${e.sql} ${f.op === 'in' ? 'IN' : 'NOT IN'} (${vals.map((v) => this.ph(e, v, params)).join(', ')}))`;
       }
     }
     return null;
   }
 
-  aggregate(spec: QuerySpec, aggs: Record<string, { op: 'count' } | { op: 'sum' | 'avg'; field: string | string[] }>): Record<string, number | null> {
+  async aggregate(spec: QuerySpec, aggs: Record<string, { op: 'count' } | { op: 'sum' | 'avg'; field: string | string[] }>): Promise<Record<string, number | null>> {
     // sum() / average() fields are part of the index the query needs (as in Firestore).
-    const docs = this.query(spec, Object.values(aggs).flatMap((a) => (a.op === 'count' ? [] : [typeof a.field === 'string' ? [a.field] : a.field])));
+    const docs = await this.query(spec, Object.values(aggs).flatMap((a) => (a.op === 'count' ? [] : [typeof a.field === 'string' ? [a.field] : a.field])));
     const out: Record<string, number | null> = {};
     for (const [k, a] of Object.entries(aggs)) {
       if (a.op === 'count') out[k] = docs.length;
@@ -482,22 +524,22 @@ export class FirestoreEngine {
   }
 
   /** Apply writes atomically. Throws aborted when a precondition no longer holds. */
-  commit(writes: Write[], preconditions: Precondition[] = []): { time: { s: number; n: number }; changes: Change[] } {
-    const time = this.now();
-    const changes: Change[] = [];
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      // Another process may share the file: continue from the version it left (under the write lock).
-      const stored = this.db.prepare(`SELECT v FROM meta WHERE k = 'version'`).get() as { v: string } | undefined;
+  async commit(writes: Write[], preconditions: Precondition[] = []): Promise<{ time: { s: number; n: number }; changes: Change[] }> {
+    const out = await this.store.transaction(async (tx) => {
+      // Under the store's write lock: commit times and versions follow commit order.
+      const time = this.now();
+      const changes: Change[] = [];
+      // Another process may share the store: continue from the version it left.
+      const stored = await tx.get<{ v: string }>(`SELECT v FROM meta WHERE k = 'version'`);
       if (stored) this.version = Math.max(this.version, Number(stored.v));
       for (const p of preconditions) {
-        const cur = this.get(p.path);
+        const cur = await this.getOn(tx, p.path);
         if ((cur?.version ?? 0) !== p.version) throw new IceBaseError('aborted', `Transaction lost a race on ${p.path}; retrying`, {});
       }
       const pending = new Map<string, StoredDoc | null>();
-      const current = (path: string) => (pending.has(path) ? pending.get(path)! : this.get(path));
+      const current = async (path: string) => (pending.has(path) ? pending.get(path)! : await this.getOn(tx, path));
       for (const w of writes) {
-        const before = current(w.path);
+        const before = await current(w.path);
         let after: StoredDoc | null;
         if (w.op === 'delete') after = null;
         else {
@@ -511,35 +553,61 @@ export class FirestoreEngine {
         changes.push({ path: w.path, collectionId: collIdOf(w.path), parent: parentOf(w.path), before, after });
       }
       for (const [path, d] of pending) {
-        if (!d) this.stmts.del!.run(path);
-        else this.stmts.put!.run(path, collIdOf(path), parentOf(path), d.id, JSON.stringify(d.data), d.createTime.s, d.createTime.n, d.updateTime.s, d.updateTime.n, d.version);
+        if (!d) await tx.run(`DELETE FROM docs WHERE path = ?`, path);
+        else
+          await tx.run(
+            `INSERT INTO docs (path, coll, parent, id, data, ct_s, ct_n, ut_s, ut_n, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(path) DO UPDATE SET data = excluded.data, ut_s = excluded.ut_s, ut_n = excluded.ut_n, version = excluded.version`,
+            path, collIdOf(path), parentOf(path), d.id, JSON.stringify(d.data), d.createTime.s, d.createTime.n, d.updateTime.s, d.updateTime.n, d.version,
+          );
       }
-      this.db.prepare(`INSERT INTO meta (k, v) VALUES ('version', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`).run(String(this.version));
-      this.db.exec('COMMIT');
-    } catch (e) {
-      this.db.exec('ROLLBACK');
-      throw e;
-    }
-    if (changes.length) for (const l of this.listeners) l(changes);
-    return { time, changes };
+      await tx.run(`INSERT INTO meta (k, v) VALUES ('version', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`, String(this.version));
+      return { time, changes };
+    });
+    if (out.changes.length) for (const l of this.listeners) l(out.changes);
+    return out;
   }
 
-  listCollections(docPath: string | null): string[] {
-    const rows = this.db.prepare(docPath ? `SELECT DISTINCT coll, parent FROM docs WHERE parent LIKE ? ESCAPE '\\'` : `SELECT DISTINCT coll, parent FROM docs WHERE instr(parent, '/') = 0`).all(...((docPath ? [`${docPath.replace(/[\\%_]/g, '\\$&')}/%`] : []) as never[])) as { coll: string; parent: string }[];
+  async listCollections(docPath: string | null): Promise<string[]> {
+    const top = this.pg ? `strpos(parent, '/') = 0` : `instr(parent, '/') = 0`;
+    const rows = docPath
+      ? await this.store.all<{ coll: string; parent: string }>(`SELECT DISTINCT coll, parent FROM docs WHERE parent LIKE ? ESCAPE '\\'`, `${docPath.replace(/[\\%_]/g, '\\$&')}/%`)
+      : await this.store.all<{ coll: string; parent: string }>(`SELECT DISTINCT coll, parent FROM docs WHERE ${top}`);
     const want = docPath ? docPath.split('/').length + 1 : 1;
     return [...new Set(rows.filter((r) => r.parent.split('/').length === want).map((r) => r.coll))].sort();
   }
 
-  recursiveDelete(path: string): number {
+  async recursiveDelete(path: string): Promise<number> {
     const like = `${path.replace(/[\\%_]/g, '\\$&')}/%`;
-    const victims = (this.db.prepare(`SELECT path FROM docs WHERE path = ? OR path LIKE ? ESCAPE '\\'`).all(path, like) as { path: string }[]).map((r) => r.path);
-    if (victims.length) this.commit(victims.map((p) => ({ op: 'delete', path: p })));
+    const victims = (await this.store.all<{ path: string }>(`SELECT path FROM docs WHERE path = ? OR path LIKE ? ESCAPE '\\'`, path, like)).map((r) => r.path);
+    if (victims.length) await this.commit(victims.map((p) => ({ op: 'delete', path: p })));
     return victims.length;
   }
 
-  /** Every document (for export / the console). */
-  *scan(): Generator<StoredDoc> {
-    for (const r of this.db.prepare(`SELECT * FROM docs ORDER BY path`).iterate() as Iterable<Record<string, unknown>>) yield this.rowToDoc(r);
+  /** Every document in path order (export, migrate, the console), a page at a time. */
+  async *scan(): AsyncGenerator<StoredDoc> {
+    let after = '';
+    for (;;) {
+      const rows = await this.store.all(`SELECT * FROM docs WHERE path > ? ORDER BY path LIMIT 500`, after);
+      for (const r of rows) yield this.rowToDoc(r);
+      if (rows.length < 500) return;
+      after = rows[rows.length - 1]!.path as string;
+    }
+  }
+
+  /** Copy documents in as they are (versions and times kept): migrate. */
+  async load(docs: StoredDoc[]): Promise<void> {
+    await this.store.transaction(async (tx) => {
+      for (const d of docs) {
+        await tx.run(
+          `INSERT INTO docs (path, coll, parent, id, data, ct_s, ct_n, ut_s, ut_n, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(path) DO UPDATE SET data = excluded.data, ct_s = excluded.ct_s, ct_n = excluded.ct_n, ut_s = excluded.ut_s, ut_n = excluded.ut_n, version = excluded.version`,
+          d.path, collIdOf(d.path), parentOf(d.path), d.id, JSON.stringify(d.data), d.createTime.s, d.createTime.n, d.updateTime.s, d.updateTime.n, d.version,
+        );
+        this.version = Math.max(this.version, d.version);
+      }
+      await tx.run(`INSERT INTO meta (k, v) VALUES ('version', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`, String(this.version));
+    });
   }
 }
 

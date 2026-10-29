@@ -424,6 +424,11 @@ export interface RulesRequest {
   get?(path: string): RulesDoc | null;
   /** getAfter(): the state after this request's writes (defaults to get). */
   getAfter?(path: string): RulesDoc | null;
+  /**
+   * get()/exists() from a store that answers asynchronously (Postgres): allows() evaluates, loads
+   * the documents the rules asked for, and evaluates again until nothing new is asked for.
+   */
+  load?(path: string): Promise<RulesDoc | null>;
   time?: number;
 }
 
@@ -863,5 +868,24 @@ export function loadRules(source: string, expect: 'firestore' | 'storage'): Rule
     }
     return { allowed: false, matched, errors };
   };
-  return { service, allows: async (req) => explain(req).allowed, explain };
+  const allows = async (req: RulesRequest): Promise<boolean> => {
+    const load = req.load;
+    if (!load) return explain(req).allowed;
+    const seen = new Map<string, RulesDoc | null>();
+    // A rule reads at most a handful of documents; each round adds the ones it asked for.
+    for (let round = 0; round < 20; round++) {
+      const missing = new Set<string>();
+      const read = (p: string) => {
+        if (seen.has(p)) return seen.get(p)!;
+        missing.add(p);
+        return null;
+      };
+      const r = explain({ ...req, get: read });
+      // Decided on documents it had not read yet: not a decision.
+      if (!missing.size) return r.allowed;
+      for (const p of missing) seen.set(p, await load(p));
+    }
+    return false;
+  };
+  return { service, allows, explain };
 }

@@ -15,9 +15,14 @@ const HELP = `icebase <command>
   login [--reauth]              Sign in to Firebase (deploy and the management APIs use this login)
   dev [--env X]                 Start the emulator (SQLite) for every service in emulator mode, hosting, seed, reloads
   serve [--env X] [--port N] [--host H] [--data DIR]
-                                Production server on one port (PORT, default 8080): every service in emulator mode,
-                                the functions and hosting; signed ID tokens; admin token ICEBASE_ADMIN_TOKEN or
-                                one kept in DIR/admin-token
+                                Production server on one port (PORT, default 8080): every service in emulator or vm
+                                mode, the functions and hosting; signed ID tokens; admin token ICEBASE_ADMIN_TOKEN or
+                                one kept in DIR/admin-token. Data in SQLite files in DIR, or in Postgres when the
+                                environment uses vm mode (vm.databaseUrlEnv) or ICEBASE_DATABASE_URL is set
+  migrate --from SRC --to DST [--replace] [--prefix P]
+                                Copy the server's data between SQLite and Postgres, either way (server stopped).
+                                SRC/DST: sqlite:DIR, postgres://…, or env:NAME (an env var holding either);
+                                --prefix: the Postgres schema prefix (default ICEBASE_DATABASE_PREFIX, else icebase_)
   deploy --env X [--only a,b]   Deploy rules, indexes, auth providers, functions, hosting for environment X
                                 (--only: firestore, database, storage, auth, functions, hosting, rules, indexes)
   indexes check [--project tsconfig.json]
@@ -191,6 +196,28 @@ async function main(argv: string[]): Promise<number> {
       process.once('SIGTERM', stop);
       process.once('SIGINT', stop);
       await new Promise(() => {});
+      return 0;
+    }
+    case 'migrate': {
+      const from = str(f.from);
+      const to = str(f.to);
+      if (!from || !to) throw new Error('usage: icebase migrate --from sqlite:DIR|postgres://…|env:NAME --to … [--replace] [--prefix P]');
+      const { migrate, storesAt } = await import('../emulator/migrate.ts');
+      const { resolve } = await import('node:path');
+      const prefix = str(f['from-prefix']) ?? str(f.prefix) ?? process.env.ICEBASE_DATABASE_PREFIX;
+      const toPrefix = str(f['to-prefix']) ?? str(f.prefix) ?? process.env.ICEBASE_DATABASE_PREFIX;
+      // A directory is relative to here.
+      const at = (spec: string) => (/^(postgres(ql)?:\/\/|env:)/.test(spec) ? spec : `sqlite:${resolve(cwd, spec.replace(/^sqlite:/, ''))}`);
+      const src = storesAt(at(from), { env: process.env, ...(prefix ? { prefix } : {}) });
+      const dst = storesAt(at(to), { env: process.env, ...(toPrefix ? { prefix: toPrefix } : {}) });
+      try {
+        log(`migrate ${src.where} → ${dst.where}`);
+        const r = await migrate(src, dst, { replace: !!f.replace, log });
+        log(`done: ${r.stores.length} store(s). Stored files (blobs) stay in the data directory: copy its storage/ along if the server moves.`);
+      } finally {
+        await src.close();
+        await dst.close();
+      }
       return 0;
     }
     case undefined:

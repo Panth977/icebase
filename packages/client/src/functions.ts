@@ -22,7 +22,6 @@ export function getFunctions(app: IceBaseApp, regionOrCustomDomain?: string): Fu
   const region = regionOrCustomDomain ?? app.config.functions?.region ?? 'us-central1';
   return service(app, `functions:${region}`, () => {
     const mode = app.modes.functions;
-    if (mode === 'vm') throw new IceBaseError('unimplemented', 'functions in vm mode are not built yet (phase 3)', { reason: 'mode', service: 'functions' });
     const native = fn.getFunctions(nativeWebApp(app), region);
     if (mode === 'emulator') {
       const u = new URL(emulatorOrigin(app));

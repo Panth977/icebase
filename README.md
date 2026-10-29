@@ -27,7 +27,7 @@ const snap = await getDocs(q);           // snap.docs[0].data() is typed from th
 - **Firebase rules.** `firestore.rules`, `storage.rules` and `database.rules.json` in Firebase's
   own syntax: deployed unchanged to Firebase, enforced by IceBase in the emulator.
 - **Modes per service.** `firebase` (the real Firebase), `emulator` (the IceBase server on
-  SQLite, for development and CI), and later `vm` (the same server on Postgres, self-hosted).
+  SQLite, for development and CI), and `vm` (the same server on Postgres, self-hosted).
 - **No auth lock-in.** Custom email, phone and Google sign-in with your own SMTP / WhatsApp /
   SMS / OAuth client, even in firebase mode — the session afterwards is a normal Firebase one.
 - **Set a project up from code.** `@panth977/icebase-cli/manage` creates databases and buckets, deploys
@@ -193,12 +193,48 @@ config, and `configureIceBase({ socketPath: '/live' })` in the web app.
 Debugging: `ICEBASE_LOG_ERRORS=1` logs every refused or failed request and listener;
 `ICEBASE_LOG_REQUESTS=1` logs every request.
 
+## vm mode: the IceBase server on Postgres
+
+The same server keeps its data in Postgres instead of SQLite files: one schema per store
+(`icebase_firestore`, `icebase_auth`, `icebase_storage`, `icebase_tasks`, `icebase_database`,
+and one per named Firestore database or RTDB instance) in one database. The protocol is the
+emulator's, so an environment in `vm` mode reaches the server at `vm.url` exactly as emulator
+mode reaches `icebase dev`, and services mix with `firebase` per service.
+
+```ts
+export default defineConfig({
+  // …
+  vm: { url: 'https://app.example.com', databaseUrlEnv: 'DATABASE_URL', blobs: { kind: 'disk', dir: '/data/blobs' } },
+  environments: { prod: { mode: 'vm' }, local: { mode: 'emulator' } },
+});
+```
+
+- **Serving:** `icebase serve --env prod` on the VM reads the connection string from the env var
+  `vm.databaseUrlEnv` names (it refuses to start without it). Any server also takes
+  `ICEBASE_DATABASE_URL` (or `startEmulator({ databaseUrl })`); `ICEBASE_DATABASE_PREFIX` changes the
+  schema prefix (default `icebase_`) so several deployments can share a database.
+- **The data directory stays:** the signing key, the admin token, hosting releases and, with
+  `blobs: { kind: 'disk' }` (the default is `DATA/storage`), the stored files. `blobs: { kind: 's3' }`
+  is not built yet.
+- **Semantics:** a Firestore commit takes a per-store advisory lock, as SQLite's write lock:
+  transactions, batches, versions and the realtime feed behave the same. Strings order by code point
+  (`COLLATE "C"`), as Firestore's do. One server process per database (listeners are in-process).
+- **Migrating:** `icebase migrate --from sqlite:.icebase --to env:DATABASE_URL` copies every store
+  (documents with their versions and times, users with their password hashes, RTDB trees, storage
+  metadata, queued tasks); `--from env:DATABASE_URL --to sqlite:DIR` goes back. Stop the server first;
+  the target must be empty unless `--replace`. Stored files are not copied: keep the data directory.
+- **Tests:** `npm run test:pg` runs every IceBase-server suite on Postgres (`ICEBASE_PG_URL`, default
+  `postgres://postgres:pg@127.0.0.1:55432/postgres`, e.g.
+  `docker run -d --name icebase-pg-test -e POSTGRES_PASSWORD=pg -p 55432:5432 postgres:16`).
+  The `pg` package is imported only when a Postgres URL is given.
+
 ## CLI
 
 | Command | What it does |
 | --- | --- |
 | `icebase init [--import DIR] [--project ID --sample N]` | Create the project structure; import an existing Firebase project's rules and indexes, and draft a schema from sampled documents |
-| `icebase serve [--port N] [--data DIR]` | Production server on one port: every service, the functions and hosting; signed tokens; locked down |
+| `icebase serve [--env X] [--port N] [--data DIR]` | Production server on one port: every service, the functions and hosting; signed tokens; locked down. SQLite in DIR, or Postgres for a vm environment |
+| `icebase migrate --from SRC --to DST [--replace]` | Copy the server's data between SQLite (`sqlite:DIR`) and Postgres (`postgres://…`, `env:NAME`), either way |
 | `icebase dev [--env X]` | The IceBase emulator (Firestore, Auth, Realtime Database, Storage, Functions, custom auth) on one port, hosting on another, the seed script on an empty database, reloads on change |
 | `icebase deploy --env X [--only …]` | Firestore indexes/TTL/exemptions from the schema, rules, auth providers, functions (bundled, with the custom-auth endpoint), hosting |
 | `icebase indexes check` | Every query that needs an undeclared composite index, with file:line (exit 1 if any) |
@@ -244,7 +280,10 @@ blocks and sign-ins, cleaned daily by `icebaseAuthCleanup`.
 Phase 1 (firebase + emulator mode, and the console) for the services in
 [`docs/prd/phase1-api-cut.html`](docs/prd/phase1-api-cut.html) is complete. The conformance suites
 run against Firebase's emulators, the IceBase server and a live project
-(`ICEBASE_LIVE_PROJECT=icebase-test-… npx vitest run live/` in `packages/tests`). vm mode (Postgres) is phase 3. See [`docs/prd/icebase-prd.html`](docs/prd/icebase-prd.html).
+(`ICEBASE_LIVE_PROJECT=icebase-test-… npx vitest run live/` in `packages/tests`). Phase 3, vm mode:
+the IceBase server on Postgres, `icebase migrate` both ways and vm mode in the SDK are built, and every
+IceBase-server suite passes on Postgres (`npm run test:pg`); the Docker image, login / deploy to a VM,
+backups and S3 blobs are not yet. See [`docs/prd/icebase-prd.html`](docs/prd/icebase-prd.html).
 
 ## License
 

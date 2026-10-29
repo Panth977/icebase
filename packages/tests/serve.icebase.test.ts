@@ -82,7 +82,7 @@ describe('icebase serve', () => {
       fetch(`${url}/identitytoolkit.googleapis.com/v1/accounts:${op}?key=x`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
     const mailOf = async (id: string) => {
       for (let i = 0; i < 50; i++) {
-        const d = s.context.firestore.get(`seen/${id}`) as { data?: { detail?: { link?: string } } } | null;
+        const d = (await s.context.firestore.get(`seen/${id}`)) as { data?: { detail?: { link?: string } } } | null;
         if (d?.data?.detail?.link) return d.data.detail.link;
         await new Promise((ok) => setTimeout(ok, 50));
       }

@@ -29,7 +29,8 @@ GitHub: <https://github.com/Panth977/icebase> (public). License: Apache-2.0.
 - Each service also gets IceBase's management APIs (`createDb`, `setSchema`, `setIndexes`,
   `setRules`, `createBucket`, `createSite`, `deploy`, `setDNS`, `setProviders`) so a project
   can be set up from code instead of the Firebase console.
-- Modes in phase 1: **firebase and emulator** (SQLite). vm mode is phase 3.
+- Modes in phase 1: **firebase and emulator** (SQLite). vm mode is phase 3 — started 2026-10-29
+  (branch `phase3-postgres`): the server on Postgres, `icebase migrate`, vm mode in the SDK; see below.
 - Console GUI comes after the SDK and CLI. Done 2026-10-28 (v1): `packages/cli/src/console/` —
   `api.ts` (operations over the admin APIs), `page.ts` (plain DOM, strict CSP), served by the
   server at `/__/icebase/console` and by `icebase console --env X`. Not yet: logs tail, usage/cost,
@@ -93,6 +94,20 @@ Three packages, published to JSR (and built to `dist/` for Node):
   IceBase server, services publish events through `ctx.hooks` and functions-service dispatches
   them. Tasks are stored in `tasks.sqlite`.
 
+- Storage engine (phase 3): the services speak SQL through the async `Store` in
+  `cli/src/emulator/store.ts` — SQLite (`node:sqlite`, one `<name>.sqlite` per store in the data
+  directory) or Postgres (`pg`, imported lazily; one schema `<prefix><name>` per store, named in a
+  schema comment). The tables are in `tables.ts`; SQL the two dialects disagree on (JSON, collation,
+  catalogs) branches on `store.dialect` (mostly in `firestore-engine.ts`). A transaction is the
+  store's only writer (SQLite `BEGIN IMMEDIATE` + an in-process gate; Postgres an advisory lock per
+  schema). Rules' `get()` reads documents through `RulesRequest.load` (async, re-evaluated until no
+  new document is asked for). Postgres when `ICEBASE_DATABASE_URL` / `startEmulator({ databaseUrl })`
+  is set, or `serve --env` of a vm environment (`vm.databaseUrlEnv`); a ':memory:' server on Postgres
+  gets throwaway schemas. `icebase migrate` (`migrate.ts`) copies stores either way. `npm run test:pg`
+  (`ICEBASE_PG_URL`) runs every suite on Postgres; `postgres.icebase.test.ts` covers ordering,
+  concurrent commits, migrate and vm mode. Not built: Docker image, deploy to a VM, backups, S3 blobs,
+  cross-process listeners (LISTEN/NOTIFY).
+
 Rules the code keeps: every index a query uses is declared with `index(…)` (single-field ones
 too); fields are key paths (`['address', 'city']`) and strings are never split on dots.
 
@@ -106,6 +121,8 @@ suite and publishes the three packages to JSR (linked to this repository, OIDC, 
 
 - `npm run typecheck` — 0 errors.
 - `npm test` — unit + IceBase emulator suites (no Java).
+- `npm run test:pg` — the same on Postgres (Docker: `docker run -d --name icebase-pg-test -e
+  POSTGRES_PASSWORD=pg -p 55432:5432 postgres:16`; `colima start` first if `docker info` fails).
 - `npm run test:firebase` and `npm run test:functions` — the same suites on Firebase's
   emulators (need Java 21+; `scripts/emu.sh` finds `/opt/homebrew/opt/openjdk@21`).
 - `cd example-app && node ../packages/cli/dist/cli/index.js dev` (or `deno run -A
@@ -126,7 +143,8 @@ suite and publishes the three packages to JSR (linked to this repository, OIDC, 
 
 - Node 22+ or Deno 2, TypeScript strict, ESM, `.ts` import extensions (tsc rewrites them for
   `dist`). Runtime dependencies stay minimal: the Firebase SDKs (peers), `ws` (emulator socket),
-  `tsx` + `esbuild` (CLI on Node: load TS config, bundle functions). SQLite is `node:sqlite`.
+  `tsx` + `esbuild` (CLI on Node: load TS config, bundle functions), `pg` (vm mode only, imported
+  when used). SQLite is `node:sqlite`.
 - JSR rules: explicit return types on exported functions (`deno publish --dry-run` checks).
 - Every change ships with tests, in the shared suites when the behaviour exists in Firebase too.
 - Firebase test project: `icebase-test-p977` (created 2026-10-24 for IceBase e2e). Never

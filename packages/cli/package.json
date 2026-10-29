@@ -49,9 +49,10 @@
   "dependencies": {
     "@panth977/icebase": "0.5.8",
     "@panth977/icebase-server": "0.5.8",
-    "ws": "^8.18.0",
+    "esbuild": "^0.25.0",
+    "pg": "^8.23.1",
     "tsx": "^4.20.0",
-    "esbuild": "^0.25.0"
+    "ws": "^8.18.0"
   },
   "peerDependencies": {
     "firebase": "^13.1.0",

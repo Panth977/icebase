@@ -5,3 +5,4 @@
 export * from './emulator/rules.ts';
 export * from './internal/firebase-indexes.ts';
 export { loadDatabaseRules } from './emulator/database-service.ts';
+export { FirestoreEngine, type StoredDoc } from './emulator/firestore-engine.ts';

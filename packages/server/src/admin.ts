@@ -71,7 +71,6 @@ export function getAdminAuth<Cfg extends AnyConfig>(app: IceBaseApp<Cfg>): Admin
   if (app.kind !== 'admin') throw new IceBaseError('invalid-argument', 'getAdminAuth(app) needs an app from initializeAdminApp(config, env)', { reason: 'config' });
   return service(app, 'auth', () => {
     const mode = app.modes.auth;
-    if (mode === 'vm') throw new IceBaseError('unimplemented', 'auth in vm mode is not built yet (phase 3)', { reason: 'mode', service: 'auth' });
     if (mode === 'emulator') {
       // firebase-admin reads this at call time; the IceBase server speaks the same API.
       // One process talks to one emulator: the latest admin app's wins.
@@ -172,7 +171,6 @@ export function getAdminStorage(app: IceBaseApp): NativeAdminStorage {
   if (app.kind !== 'admin') throw new IceBaseError('invalid-argument', 'getAdminStorage(app) needs an app from initializeAdminApp(config, env)', { reason: 'config' });
   return service(app, 'storage', () => {
     const mode = app.modes.storage;
-    if (mode === 'vm') throw new IceBaseError('unimplemented', 'storage in vm mode is not built yet (phase 3)', { reason: 'mode', service: 'storage' });
     if (mode === 'emulator') {
       const env = (globalThis as { process?: { env: Record<string, string | undefined> } }).process?.env;
       if (env) env.FIREBASE_STORAGE_EMULATOR_HOST = emulatorOrigin(app).replace(/^https?:\/\//, '');
@@ -253,7 +251,6 @@ export function taskQueue<T = unknown>(app: IceBaseApp, functionName: string, op
       },
     };
   }
-  if (mode === 'vm') throw new IceBaseError('unimplemented', 'task queues in vm mode are not built yet', { reason: 'mode', service: 'functions' });
   return {
     async enqueue(data, o = {}) {
       const { getFunctions } = await import('firebase-admin/functions');

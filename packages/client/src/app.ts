@@ -23,7 +23,14 @@ export interface IceBaseApp<Cfg extends AnyConfig = AnyConfig> {
   /** 'client' from initializeApp, 'admin' from icebase/admin's initializeAdminApp. */
   readonly kind: 'client' | 'admin';
   readonly config: Cfg;
+  /**
+   * How each service is reached. 'vm' services are the IceBase server on Postgres, reached
+   * exactly as in emulator mode (same protocol), so they read 'emulator' here; `declaredModes`
+   * keeps the config's own.
+   */
   readonly modes: Readonly<Record<Service, Mode>>;
+  /** The modes as config.environments[env] declares them ('vm' kept). */
+  readonly declaredModes: Readonly<Record<Service, Mode>>;
   readonly options: IceBaseAppOptions;
   /** @internal per-service singletons (getFirestore(app) returns the same instance). */
   readonly _services: Map<string, unknown>;
@@ -46,7 +53,9 @@ export function createApp(config: AnyConfig, env: string, kind: 'client' | 'admi
     if (existing.config === config && existing.env === env) return existing;
     throw new IceBaseError('already-exists', `IceBase app '${name}' already exists with a different config or environment; give the second one another name`, { reason: 'config' });
   }
-  const app: IceBaseApp = { name, env, kind, config, modes: resolveModes(config, env), options, _services: new Map(), _onDelete: [], _deleted: false };
+  const declaredModes = resolveModes(config, env);
+  const modes = Object.fromEntries(Object.entries(declaredModes).map(([s, m]) => [s, m === 'vm' ? 'emulator' : m])) as Record<Service, Mode>;
+  const app: IceBaseApp = { name, env, kind, config, modes, declaredModes, options, _services: new Map(), _onDelete: [], _deleted: false };
   apps.set(key(kind, name), app);
   return app;
 }
@@ -118,6 +127,8 @@ export function emulatorOrigin(app: IceBaseApp): string {
   // Set by the IceBase server for the functions it runs, like FIREBASE_*_EMULATOR_HOST.
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.ICEBASE_EMULATOR_HOST;
   if (env && !app.options.emulator) return `http://${env.replace(/^https?:\/\//, '')}`;
+  // vm mode: the deployment's server (config.vm.url), unless the app names a host and port.
+  if (app.config.vm?.url && !app.options.emulator?.host && !app.options.emulator?.port && Object.values(app.declaredModes).includes('vm')) return app.config.vm.url.replace(/\/+$/, '');
   const host = app.options.emulator?.host ?? app.config.emulator?.host ?? '127.0.0.1';
   const port = app.options.emulator?.port ?? app.config.emulator?.port ?? 4400;
   return `http://${host}:${port}`;

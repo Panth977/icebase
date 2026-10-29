@@ -16,12 +16,16 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
-import type { AnyConfig } from '@panth977/icebase/config';
+import { resolveModes, type AnyConfig } from '@panth977/icebase/config';
 import { IceBaseError } from '@panth977/icebase/errors';
 import { registerEmbedded } from '@panth977/icebase/app';
 import { nodeListener } from '@panth977/icebase-server/internal';
 import { initializeAdminApp } from '@panth977/icebase-server/admin';
 import { FirestoreEngine } from './firestore-engine.ts';
+import { openStores, type Stores } from './store.ts';
+
+export { dropPostgresSchemas, openStores, postgresStores, sqliteStores, type Store, type Stores } from './store.ts';
+export { migrate, storesAt, type MigrateOptions, type MigrateResult } from './migrate.ts';
 
 /** Who is calling: the owner (admin SDKs, the console) or a signed-in user (or nobody). */
 export interface Caller {
@@ -61,6 +65,10 @@ export interface EmulatorContext {
   /** Resolve an Authorization header (filled in by the auth service). */
   verify(token: string | null): Promise<Caller>;
   services: Map<string, Service>;
+  /** Where the services keep their data: SQLite files in dataDir, or a Postgres database. */
+  stores: Stores;
+  /** Where stored files live when not in dataDir/storage (vm.blobs { kind: 'disk', dir }). */
+  blobsDir?: string;
   firestore: FirestoreEngine;
   /** The functions source's exports, once loaded (custom auth's 'handler' senders live there). */
   functionExports: Record<string, unknown>;
@@ -104,6 +112,18 @@ export interface EmulatorOptions {
   host?: string;
   /** ':memory:' keeps nothing on disk (tests). Default: config.emulator.dataDir or .icebase */
   dataDir?: string;
+  /**
+   * Keep the data in Postgres instead of SQLite files (vm mode): a connection string
+   * (postgres://user:password@host:5432/db). Default ICEBASE_DATABASE_URL. The data directory still
+   * holds the signing key, the admin token, hosting releases and (blobs: 'disk') stored files.
+   * With dataDir ':memory:' the server gets schemas of its own, dropped when it closes.
+   * null: SQLite, whatever ICEBASE_DATABASE_URL says.
+   */
+  databaseUrl?: string | null;
+  /** Postgres schema names are `<prefix><store>`; default ICEBASE_DATABASE_PREFIX, else 'icebase_'. */
+  databasePrefix?: string;
+  /** Stored files (Storage) in this directory instead of <dataDir>/storage. */
+  blobsDir?: string;
   /** Services to leave out (all on by default). */
   without?: string[];
   log?: (line: string) => void;
@@ -189,7 +209,15 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
   const projectId = config.firebase?.projectId ?? `demo-${config.name}`;
   const adminToken = opts.adminToken ?? (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.ICEBASE_ADMIN_TOKEN ?? 'owner';
 
-  const firestore = new FirestoreEngine({ file: memory ? ':memory:' : join(dataDir, 'firestore.sqlite'), schema: config.schema, ...(opts.learnIndexes ? { learn: opts.learnIndexes } : {}) });
+  const penv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+  const stores = openStores({ dataDir, databaseUrl: opts.databaseUrl === null ? undefined : (opts.databaseUrl ?? penv.ICEBASE_DATABASE_URL), databasePrefix: opts.databasePrefix ?? penv.ICEBASE_DATABASE_PREFIX });
+  let firestore: FirestoreEngine;
+  try {
+    firestore = await FirestoreEngine.open({ store: await stores.open('firestore'), schema: config.schema, ...(opts.learnIndexes ? { learn: opts.learnIndexes } : {}) });
+  } catch (e) {
+    await stores.close();
+    throw e;
+  }
   const services = new Map<string, Service>();
   const ctx: EmulatorContext = {
     config,
@@ -199,6 +227,8 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
     env: opts.env,
     origin: '',
     services,
+    stores,
+    ...(opts.blobsDir ? { blobsDir: resolve(root, opts.blobsDir) } : {}),
     firestore,
     functionExports: {},
     adminToken,
@@ -286,7 +316,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
             if (!s?.manage) throw new IceBaseError('not-found', `no ${svc} service on this server`);
             return s.manage(op, body);
           },
-          health: () => ({ ok: true, project: projectId, services: [...services.keys()], documents: firestore.count() }),
+          health: async () => ({ ok: true, project: projectId, services: [...services.keys()], documents: await firestore.count() }),
           rules: (svc) => {
             if (svc === 'firestore') return ctx.deployedRules.get('firestore:(default)') ?? (config.rules?.firestore ? readFileSync(resolve(root, config.rules.firestore), 'utf8') : null);
             if (svc === 'storage') return ctx.deployedRules.get(`storage:${config.firebase?.storageBucket ?? `${projectId}.appspot.com`}`) ?? (config.rules?.storage ? readFileSync(resolve(root, config.rules.storage), 'utf8') : null);
@@ -321,7 +351,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
     if (req.method === 'OPTIONS' && (!hosting || SERVICE_PATH.test(new URL(req.url).pathname))) return new Response(null, { status: 204, headers: CORS });
     const url = new URL(req.url);
     try {
-      if (url.pathname === '/__/icebase/health') return json({ ok: true, project: projectId, services: [...services.keys()], documents: firestore.count() });
+      if (url.pathname === '/__/icebase/health') return json({ ok: true, project: projectId, services: [...services.keys()], documents: await firestore.count() });
       const authz = req.headers.get('authorization');
       const caller = await ctx.verify(authz ? authz.replace(/^(Bearer|Firebase)\s+/i, '') : null);
       const mg = /^\/__\/icebase\/admin\/manage\/([a-zA-Z]+)\/([a-zA-Z]+)$/.exec(url.pathname);
@@ -356,7 +386,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
     ctx.origin = `http://embedded.icebase/${encodeURIComponent(name)}`;
     registerEmbedded(name, handler);
     for (const s of services.values()) s.started?.();
-    log(`IceBase server embedded as '${name}' · ${[...services.keys()].join(', ')} · data ${memory ? 'in memory' : dataDir}`);
+    log(`IceBase server embedded as '${name}' · ${[...services.keys()].join(', ')} · data ${stores.where}`);
     return {
       url: ctx.origin,
       port: 0,
@@ -365,7 +395,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
       async close() {
         registerEmbedded(name, null);
         for (const s of services.values()) await s.close?.();
-        firestore.close();
+        await stores.close();
       },
     };
   }
@@ -421,7 +451,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
   const port = (server.address() as AddressInfo).port;
   ctx.origin = `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`;
   for (const s of services.values()) s.started?.();
-  log(`IceBase emulator on ${ctx.origin} · ${[...services.keys()].join(', ')} · data ${memory ? 'in memory' : dataDir}`);
+  log(`IceBase emulator on ${ctx.origin} · ${[...services.keys()].join(', ')} · data ${stores.where}`);
   return {
     url: ctx.origin,
     port,
@@ -432,7 +462,7 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
       wss.close();
       await new Promise<void>((r) => server.close(() => r()));
       for (const s of services.values()) await s.close?.();
-      firestore.close();
+      await stores.close();
     },
   };
 }
@@ -469,11 +499,26 @@ export async function serve(opts: ServeOptions): Promise<RunningEmulator> {
   }
   if (adminToken === 'owner') throw new IceBaseError('failed-precondition', "serve: the admin token 'owner' is the emulator's well-known one; set ICEBASE_ADMIN_TOKEN to a secret");
   env.ICEBASE_ADMIN_TOKEN = adminToken;
+  // vm mode: the environment's services run here on Postgres (vm.databaseUrlEnv names the env var).
+  const vm = opts.config.vm;
+  const usesVm = !!opts.env && opts.env in opts.config.environments && Object.values(resolveModes(opts.config, opts.env)).includes('vm');
+  let databaseUrl = opts.databaseUrl;
+  if (!databaseUrl && usesVm) {
+    databaseUrl = vm?.databaseUrlEnv ? env[vm.databaseUrlEnv] : undefined;
+    if (!databaseUrl) throw new IceBaseError('failed-precondition', `serve --env ${opts.env}: the environment uses vm mode, so the env var ${vm?.databaseUrlEnv ?? '(vm.databaseUrlEnv)'} must hold the Postgres connection string`, { reason: 'config' });
+  }
+  let blobsDir = opts.blobsDir;
+  if (!blobsDir && usesVm && vm?.blobs) {
+    if (vm.blobs.kind === 's3') throw new IceBaseError('unimplemented', "serve: vm.blobs { kind: 's3' } is not built yet; use { kind: 'disk', dir } (or leave blobs out: the data directory)", { reason: 'config' });
+    blobsDir = vm.blobs.dir;
+  }
   return startEmulator({
     ...opts,
     root,
     dataDir,
     adminToken,
+    ...(databaseUrl ? { databaseUrl } : {}),
+    ...(blobsDir ? { blobsDir } : {}),
     signTokens: true,
     hosting: opts.config.hosting ? 'production' : false,
     port: opts.port ?? (env.PORT ? Number(env.PORT) : 8080),
