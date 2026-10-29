@@ -375,9 +375,11 @@ export async function functionsService(ctx: EmulatorContext, log: (l: string) =>
       }
       if (r.kind !== 'call') return null;
       if (req.method !== 'POST') return json({ error: { status: 'INVALID_ARGUMENT', message: 'Request has invalid method. GET' } }, 400);
+      // App Check: callables only, as on Firebase (config.appCheck.enforce or onCall({ enforceAppCheck: true })).
+      if (!caller.admin && !caller.appCheck && (ctx.config.appCheck?.enforce?.includes('functions') || r.enforceAppCheck)) return json({ error: { status: 'UNAUTHENTICATED', message: 'Unauthenticated (App Check)' } }, 401);
       const body = (await req.json().catch(() => ({}))) as { data?: unknown };
       try {
-        const result = await r.handler({ data: body.data ?? null, ...(caller.auth ? { auth: { uid: caller.auth.uid, token: caller.auth.token as never, rawToken: '' } } : {}), rawRequest: req as never, acceptsStreaming: false } as never);
+        const result = await r.handler({ data: body.data ?? null, ...(caller.auth ? { auth: { uid: caller.auth.uid, token: caller.auth.token as never, rawToken: '' } } : {}), ...(caller.appCheck ? { app: { appId: caller.appCheck.appId, token: { app_id: caller.appCheck.appId, sub: caller.appCheck.appId }, alreadyConsumed: false } } : {}), rawRequest: req as never, acceptsStreaming: false } as never);
         return json({ result: result === undefined ? null : result });
       } catch (e) {
         const err = e as { code?: string; message?: string; details?: unknown; httpErrorCode?: { status: number } };

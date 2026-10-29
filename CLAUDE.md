@@ -34,7 +34,7 @@ GitHub: <https://github.com/Panth977/icebase> (public). License: Apache-2.0.
 - Console GUI comes after the SDK and CLI. Done 2026-10-28 (v1): `packages/cli/src/console/` —
   `api.ts` (operations over the admin APIs), `page.ts` (plain DOM, strict CSP), served by the
   server at `/__/icebase/console` and by `icebase console --env X`. Not yet: logs tail, usage/cost,
-  rules playground, import/export, Remote Config / FCM / App Check screens (not phase-1 services).
+  rules playground, import/export. Remote Config / Messaging / App Check pages came with phase 4.
 - Firebase names and call shapes exactly. No new query language. Typed from the schema.
 
 ## Build order (worked on ORCH-26, no separate board)
@@ -107,6 +107,20 @@ Three packages, published to JSR (and built to `dist/` for Node):
   (`ICEBASE_PG_URL`) runs every suite on Postgres; `postgres.icebase.test.ts` covers ordering,
   concurrent commits, migrate and vm mode. Not built: Docker image, deploy to a VM, backups, S3 blobs,
   cross-process listeners (LISTEN/NOTIFY).
+
+- Phase 4 (branch `phase4-services`, 2026-10-29): Remote Config, Cloud Messaging, App Check. Services
+  `remoteConfig`, `messaging`, `appCheck` in `config.SERVICES` (own mode per environment; gen-dart leaves
+  them out). Declarations: `remoteConfig.parameters` (`param.*` in config.ts), `messaging.messages`
+  (kind → FieldMap), `appCheck.enforce`; `IceBaseConfig` gained generics R, M (`ParamsOf`, `MessageKindsOf`).
+  Shared logic in `client/src/internal/remote-config-shared.ts` (template checks, `syncTemplate` used by
+  deploy) and `messaging-shared.ts` (typed data ⇄ FCM strings, kind in `icebaseKind`, topic conditions).
+  Server: `remote-config-service.ts` (store 'remoteconfig', versions; refuses conditions),
+  `messaging-service.ts` (store 'messaging': tokens, topics, outbox, inbox; socket `{ s: 'fcm' }`),
+  `appcheck-service.ts` (store 'appcheck': HS256 tokens, debug tokens; `ctx.appCheck.verify`). Enforcement
+  is in server.ts (`appCheckServiceOf`, socket auth carries `appCheck`) and functions-service (callables
+  only). The client's `post()` and the realtime socket send the App Check token; in emulator mode
+  `initializeAppCheck` also registers a CustomProvider on the native web app so the Firebase SDKs IceBase
+  drives (storage, functions, auth) attach it. FCM tokens the server never issued are refused (as on FCM).
 
 Rules the code keeps: every index a query uses is declared with `index(…)` (single-field ones
 too); fields are key paths (`['address', 'city']`) and strings are never split on dots.

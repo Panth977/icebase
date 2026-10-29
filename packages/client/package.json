@@ -65,6 +65,18 @@
       "types": "./src/functions.ts",
       "default": "./dist/functions.js"
     },
+    "./remote-config": {
+      "types": "./src/remote-config.ts",
+      "default": "./dist/remote-config.js"
+    },
+    "./messaging": {
+      "types": "./src/messaging.ts",
+      "default": "./dist/messaging.js"
+    },
+    "./app-check": {
+      "types": "./src/app-check.ts",
+      "default": "./dist/app-check.js"
+    },
     "./errors": {
       "types": "./src/errors.ts",
       "default": "./dist/errors.js"

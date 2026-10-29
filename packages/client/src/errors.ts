@@ -27,7 +27,8 @@ export type IceBaseErrorReason =
   | 'config'
   | 'mode'
   | 'not-in-scope'
-  | 'management';
+  | 'management'
+  | 'app-check';
 
 export class IceBaseError extends Error {
   override readonly name = 'IceBaseError';

@@ -9,12 +9,13 @@ import { Database } from '@panth977/icebase/database';
 import { adminDatabaseDriver } from './drivers/database-admin.ts';
 import { emulatorDatabaseDriver } from '@panth977/icebase/internal';
 import { createApp, emulatorOrigin, service, type IceBaseApp, type IceBaseAppOptions } from '@panth977/icebase/app';
-import type { AnyConfig, ClaimsOf, EnvOf, IceBaseConfig } from '@panth977/icebase/config';
+import type { AnyConfig, ClaimsOf, EnvOf, IceBaseConfig, MessageKinds, MessageKindsOf, RemoteConfigParams } from '@panth977/icebase/config';
+import { checkMessage, checkTemplate, encodeMessageData, type RemoteConfigTemplate, type RemoteConfigVersion } from '@panth977/icebase/internal';
 import { createAdminDriver } from './drivers/firestore-admin.ts';
 import { IceBaseError } from '@panth977/icebase/errors';
 import { Firestore, firestoreDriverId, registerFirestoreDriver, type DocumentSnapshot } from '@panth977/icebase/firestore';
 import { nativeAdminApp } from './internal/firebase-admin-app.ts';
-import { collection as schemaCollection, validateWrite, type FieldMap } from '@panth977/icebase/schema';
+import { collection as schemaCollection, validateWrite, type FieldMap, type Infer } from '@panth977/icebase/schema';
 
 export { cert, applicationDefault, refreshToken } from 'firebase-admin/app';
 export { deleteApp } from '@panth977/icebase/app';
@@ -265,47 +266,224 @@ export function taskQueue<T = unknown>(app: IceBaseApp, functionName: string, op
   };
 }
 
+// ─── the IceBase server's admin endpoints ───────────────────────────────────────
+
+async function onServer<T>(app: IceBaseApp, path: string, body: unknown, service: string): Promise<T> {
+  const { emulatorFetch } = await import('@panth977/icebase/app');
+  const { callerToken } = await import('@panth977/icebase/internal');
+  const token = await callerToken(app);
+  const res = await emulatorFetch(`${emulatorOrigin(app)}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
+  const j = (await res.json().catch(() => ({}))) as T & { error?: { code: string; message: string } };
+  if (!res.ok || j.error) throw new IceBaseError((j.error?.code ?? 'internal') as IceBaseError['code'], j.error?.message ?? `${service} ${res.status}`, { service });
+  return j;
+}
+const manageOp = <T>(app: IceBaseApp, svc: string, op: string, body: Record<string, unknown> = {}): Promise<T> => onServer<T>(app, `/__/icebase/admin/manage/${svc}/${op}`, body, svc);
+
 // ─── messaging ─────────────────────────────────────────────────────────────────
 
 /** firebase-admin's Message (token / topic / condition + notification, data, webpush …). */
 export type Message = import('firebase-admin/messaging').Message;
-
-export interface AdminMessaging {
-  /** Send one message; resolves to its message id. */
-  send(message: Message): Promise<string>;
-  sendEach(messages: Message[]): Promise<{ successCount: number; failureCount: number; responses: { success: boolean; messageId?: string; error?: Error }[] }>;
+export type MulticastMessage = import('firebase-admin/messaging').MulticastMessage;
+export interface SendResponse {
+  success: boolean;
+  messageId?: string;
+  error?: Error;
+}
+export interface BatchResponse {
+  successCount: number;
+  failureCount: number;
+  responses: SendResponse[];
+}
+export interface MessagingTopicManagementResponse {
+  successCount: number;
+  failureCount: number;
+  errors: { index: number; error: { code: string; message: string } }[];
 }
 
-/** Push messages (Firebase Cloud Messaging). On the IceBase server they land in an outbox
- * (GET /__/icebase/messaging/outbox) — and are delivered by web push when config.messaging.webPush is set. */
-export function getAdminMessaging(app: IceBaseApp): AdminMessaging {
+type DistOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+type Kinds<Cfg> = MessageKindsOf<Cfg>;
+/** A message's data: one declared kind with its typed data, or (no kinds declared) FCM's string map. */
+export type MessageData<Cfg> = [keyof Kinds<Cfg>] extends [never]
+  ? { kind?: undefined; data?: Record<string, string> }
+  : { [K in keyof Kinds<Cfg> & string]: { kind: K; data: Kinds<Cfg>[K] extends FieldMap ? Infer<Kinds<Cfg>[K]> : never } }[keyof Kinds<Cfg> & string] | { kind?: undefined; data?: undefined };
+/** firebase-admin's Message with `kind` + typed `data` (config.messaging.messages). */
+export type TypedMessage<Cfg = AnyConfig> = DistOmit<Message, 'data'> & MessageData<Cfg>;
+export type TypedMulticastMessage<Cfg = AnyConfig> = Omit<MulticastMessage, 'data'> & MessageData<Cfg>;
+
+export interface AdminMessaging<Cfg = AnyConfig> {
+  /** Send one message; resolves to its message id (projects/<p>/messages/<id>). */
+  send(message: TypedMessage<Cfg>, dryRun?: boolean): Promise<string>;
+  sendEach(messages: TypedMessage<Cfg>[], dryRun?: boolean): Promise<BatchResponse>;
+  sendEachForMulticast(message: TypedMulticastMessage<Cfg>, dryRun?: boolean): Promise<BatchResponse>;
+  subscribeToTopic(tokens: string | string[], topic: string): Promise<MessagingTopicManagementResponse>;
+  unsubscribeFromTopic(tokens: string | string[], topic: string): Promise<MessagingTopicManagementResponse>;
+}
+
+/** A typed message as FCM's (kind folded into data), checked against config.messaging.messages. */
+export function messageToWire(config: AnyConfig, m: { kind?: string; data?: unknown } & Record<string, unknown>, opts: { multicast?: boolean } = {}): Record<string, unknown> {
+  const kinds = (config.messaging?.messages ?? {}) as MessageKinds;
+  const { kind, ...rest } = m;
+  const wire: Record<string, unknown> = kind !== undefined ? { ...rest, data: encodeMessageData(kinds, kind, m.data) } : rest;
+  checkMessage(kinds, wire, opts);
+  return wire;
+}
+
+/**
+ * Push messages (Firebase Cloud Messaging), typed by config.messaging.messages. firebase mode:
+ * firebase-admin. On the IceBase server: delivered to the apps listening (icebase/messaging
+ * onMessage) and kept in an outbox (GET /__/icebase/messaging/outbox, the console).
+ */
+export function getAdminMessaging<Cfg extends AnyConfig>(app: IceBaseApp<Cfg>): AdminMessaging<Cfg> {
   if (app.kind !== 'admin') throw new IceBaseError('invalid-argument', 'getAdminMessaging(app) needs an app from initializeAdminApp(config, env)', { reason: 'config' });
-  return service(app, 'messaging', (): AdminMessaging => {
-    if (app.modes.functions !== 'emulator') {
+  return service(app, 'messaging', (): AdminMessaging<Cfg> => {
+    const wire = (m: unknown, multicast = false) => messageToWire(app.config, m as Record<string, unknown>, { multicast });
+    const list = (t: string | string[]) => (Array.isArray(t) ? t : [t]);
+    const batch = (responses: SendResponse[]): BatchResponse => ({ successCount: responses.filter((r) => r.success).length, failureCount: responses.filter((r) => !r.success).length, responses });
+    if (app.modes.messaging === 'firebase') {
       const native = async () => (await import('firebase-admin/messaging')).getMessaging(nativeAdminApp(app));
+      const fromNative = (r: { responses: { success: boolean; messageId?: string; error?: unknown }[] }) => batch(r.responses.map((x) => ({ success: x.success, ...(x.messageId ? { messageId: x.messageId } : {}), ...(x.error ? { error: x.error as Error } : {}) })));
+      const topics = (r: { successCount: number; failureCount: number; errors: { index: number; error: { code: string; message: string } }[] }): MessagingTopicManagementResponse => ({ successCount: r.successCount, failureCount: r.failureCount, errors: r.errors.map((e) => ({ index: e.index, error: { code: e.error.code, message: e.error.message } })) });
       return {
-        send: async (m) => (await native()).send(m),
-        sendEach: async (ms) => {
-          const r = await (await native()).sendEach(ms);
-          return { successCount: r.successCount, failureCount: r.failureCount, responses: r.responses.map((x) => ({ success: x.success, ...(x.messageId ? { messageId: x.messageId } : {}), ...(x.error ? { error: x.error as Error } : {}) })) };
+        // Checked before firebase-admin is reached.
+        send: async (m, dryRun) => {
+          const w = wire(m) as unknown as Message;
+          return (await native()).send(w, dryRun);
         },
+        sendEach: async (ms, dryRun) => {
+          const w = ms.map((m) => wire(m) as unknown as Message);
+          return fromNative(await (await native()).sendEach(w, dryRun));
+        },
+        sendEachForMulticast: async (m, dryRun) => {
+          const w = wire(m, true) as unknown as MulticastMessage;
+          return fromNative(await (await native()).sendEachForMulticast(w, dryRun));
+        },
+        subscribeToTopic: async (t, topic) => topics(await (await native()).subscribeToTopic(list(t), topic)),
+        unsubscribeFromTopic: async (t, topic) => topics(await (await native()).unsubscribeFromTopic(list(t), topic)),
       };
     }
-    const post = async (m: Message) => {
-      const { emulatorFetch } = await import('@panth977/icebase/app');
-      const { callerToken } = await import('@panth977/icebase/internal');
-      const token = await callerToken(app);
-      const res = await emulatorFetch(`${emulatorOrigin(app)}/__/icebase/messaging/send`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ message: m }) });
-      const j = (await res.json()) as { name?: string; error?: { code: string; message: string } };
-      if (!res.ok || j.error) throw new IceBaseError((j.error?.code ?? 'internal') as IceBaseError['code'], j.error?.message ?? `messaging ${res.status}`, { service: 'messaging' });
-      return j.name!;
-    };
+    const post = async (m: Record<string, unknown>, dryRun?: boolean) => (await onServer<{ name: string }>(app, '/__/icebase/messaging/send', { message: m, ...(dryRun ? { dryRun } : {}) }, 'messaging')).name;
+    const each = (ms: Record<string, unknown>[], dryRun?: boolean) => Promise.all(ms.map((m) => post(m, dryRun).then((messageId): SendResponse => ({ success: true, messageId }), (error: Error): SendResponse => ({ success: false, error })))).then(batch);
     return {
-      send: post,
-      sendEach: async (ms) => {
-        const responses = await Promise.all(ms.map((m) => post(m).then((messageId) => ({ success: true, messageId }), (error: Error) => ({ success: false, error }))));
-        return { successCount: responses.filter((r) => r.success).length, failureCount: responses.filter((r) => !r.success).length, responses };
+      send: async (m, dryRun) => post(wire(m), dryRun),
+      sendEach: async (ms, dryRun) => {
+        // Like firebase-admin: a malformed message fails the whole call, before anything is sent.
+        const w = ms.map((m) => wire(m));
+        return each(w, dryRun);
       },
+      sendEachForMulticast: async (m, dryRun) => {
+        const { tokens, ...rest } = wire(m, true) as { tokens: string[] } & Record<string, unknown>;
+        return each(tokens.map((token) => ({ ...rest, token })), dryRun);
+      },
+      subscribeToTopic: (t, topic) => manageOp(app, 'messaging', 'subscribe', { tokens: list(t), topic }),
+      unsubscribeFromTopic: (t, topic) => manageOp(app, 'messaging', 'unsubscribe', { tokens: list(t), topic }),
+    };
+  });
+}
+
+// ─── Remote Config ─────────────────────────────────────────────────────────────
+
+export type { RemoteConfigTemplate, RemoteConfigTemplateParameter, RemoteConfigParameterValue, RemoteConfigCondition, RemoteConfigVersion } from '@panth977/icebase/internal';
+
+export interface AdminRemoteConfig {
+  getTemplate(): Promise<RemoteConfigTemplate>;
+  getTemplateAtVersion(versionNumber: number | string): Promise<RemoteConfigTemplate>;
+  /** Checks the template against config.remoteConfig.parameters (and, on Firebase, with Firebase). */
+  validateTemplate(template: RemoteConfigTemplate): Promise<RemoteConfigTemplate>;
+  /** Publishes it (checked against the declarations first). Fails when the template changed since its etag, unless force. */
+  publishTemplate(template: RemoteConfigTemplate, options?: { force: boolean }): Promise<RemoteConfigTemplate>;
+  rollback(versionNumber: number | string): Promise<RemoteConfigTemplate>;
+  listVersions(options?: { pageSize?: number }): Promise<{ versions: RemoteConfigVersion[] }>;
+  createTemplateFromJSON(json: string): RemoteConfigTemplate;
+}
+
+/**
+ * Remote Config templates (firebase-admin's API), checked against config.remoteConfig.parameters:
+ * a parameter that is not declared, or a value that is not of its declared type, is refused.
+ * firebase mode: firebase-admin. On the IceBase server: kept with its versions (no conditions).
+ */
+export function getAdminRemoteConfig(app: IceBaseApp): AdminRemoteConfig {
+  if (app.kind !== 'admin') throw new IceBaseError('invalid-argument', 'getAdminRemoteConfig(app) needs an app from initializeAdminApp(config, env)', { reason: 'config' });
+  return service(app, 'remoteConfig', (): AdminRemoteConfig => {
+    const params = (app.config.remoteConfig?.parameters ?? {}) as RemoteConfigParams;
+    const createTemplateFromJSON = (json: string): RemoteConfigTemplate => {
+      let t: RemoteConfigTemplate;
+      try {
+        t = JSON.parse(json) as RemoteConfigTemplate;
+      } catch {
+        throw new IceBaseError('invalid-argument', 'createTemplateFromJSON: not JSON', { service: 'remoteConfig' });
+      }
+      return { conditions: t.conditions ?? [], parameters: t.parameters ?? {}, parameterGroups: t.parameterGroups ?? {}, etag: t.etag, ...(t.version ? { version: t.version } : {}) };
+    };
+    if (app.modes.remoteConfig === 'firebase') {
+      const native = async () => (await import('firebase-admin/remote-config')).getRemoteConfig(nativeAdminApp(app));
+      const plain = (t: unknown) => JSON.parse(JSON.stringify(t)) as RemoteConfigTemplate;
+      return {
+        getTemplate: async () => plain(await (await native()).getTemplate()),
+        getTemplateAtVersion: async (v) => plain(await (await native()).getTemplateAtVersion(v)),
+        async validateTemplate(t) {
+          checkTemplate(params, t);
+          return plain(await (await native()).validateTemplate(t as never));
+        },
+        async publishTemplate(t, o) {
+          checkTemplate(params, t);
+          return plain(await (await native()).publishTemplate(t as never, o));
+        },
+        rollback: async (v) => plain(await (await native()).rollback(v)),
+        listVersions: async (o) => plain(await (await native()).listVersions(o)) as unknown as { versions: RemoteConfigVersion[] },
+        createTemplateFromJSON,
+      };
+    }
+    const op = <T>(name: string, body: Record<string, unknown> = {}) => manageOp<T>(app, 'remoteConfig', name, body);
+    return {
+      getTemplate: () => op('getTemplate'),
+      getTemplateAtVersion: (v) => op('getTemplateAtVersion', { versionNumber: String(v) }),
+      async validateTemplate(t) {
+        checkTemplate(params, t, { conditions: false });
+        return op('validateTemplate', { template: t });
+      },
+      async publishTemplate(t, o) {
+        checkTemplate(params, t, { conditions: false });
+        return op('publishTemplate', { template: t, force: !!o?.force });
+      },
+      rollback: (v) => op('rollback', { versionNumber: String(v) }),
+      listVersions: (o) => op('listVersions', { ...(o?.pageSize ? { pageSize: o.pageSize } : {}) }),
+      createTemplateFromJSON,
+    };
+  });
+}
+
+// ─── App Check ─────────────────────────────────────────────────────────────────
+
+export interface AppCheckToken {
+  token: string;
+  ttlMillis: number;
+}
+export interface VerifyAppCheckTokenResponse {
+  appId: string;
+  token: { sub: string; app_id?: string; aud: string[]; iss: string; exp: number; iat: number; [k: string]: unknown };
+  alreadyConsumed?: boolean;
+}
+export interface AdminAppCheck {
+  /** An App Check token for an app (e.g. for a custom provider's backend). */
+  createToken(appId: string, options?: { ttlMillis?: number }): Promise<AppCheckToken>;
+  /** Verify a token from X-Firebase-AppCheck: resolves to its app, rejects when it is invalid or expired. */
+  verifyToken(appCheckToken: string, options?: { consume?: boolean }): Promise<VerifyAppCheckTokenResponse>;
+}
+
+/** App Check's admin API (firebase-admin's). On the IceBase server: the tokens it issues. */
+export function getAdminAppCheck(app: IceBaseApp): AdminAppCheck {
+  if (app.kind !== 'admin') throw new IceBaseError('invalid-argument', 'getAdminAppCheck(app) needs an app from initializeAdminApp(config, env)', { reason: 'config' });
+  return service(app, 'appCheck', (): AdminAppCheck => {
+    if (app.modes.appCheck === 'firebase') {
+      const native = async () => (await import('firebase-admin/app-check')).getAppCheck(nativeAdminApp(app));
+      return {
+        createToken: async (appId, o) => (await native()).createToken(appId, o),
+        verifyToken: async (t, o) => (await (await native()).verifyToken(t, o)) as unknown as VerifyAppCheckTokenResponse,
+      };
+    }
+    return {
+      createToken: (appId, o) => manageOp(app, 'appCheck', 'createToken', { appId, ...(o?.ttlMillis !== undefined ? { ttlMillis: o.ttlMillis } : {}) }),
+      verifyToken: (token) => manageOp(app, 'appCheck', 'verifyToken', { token }),
     };
   });
 }

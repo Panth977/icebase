@@ -6,7 +6,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { initializeAdminApp } from '@panth977/icebase-server/admin';
 import { readEnv, resolveModes, SERVICES, type AnyConfig, type Mode, type Service } from '@panth977/icebase/config';
-import { manageAuth, manageDatabase, manageFirestore, manageHosting, manageStorage } from '../manage.ts';
+import { manageAppCheck, manageAuth, manageDatabase, manageFirestore, manageHosting, manageRemoteConfig, manageStorage } from '../manage.ts';
 
 export type Target = Service | 'rules' | 'indexes';
 type Log = (line: string) => void;
@@ -31,6 +31,7 @@ export function wiring(config: AnyConfig, env: string): { modes: Record<Service,
     for (const name of customAuthEnv(config)) if (!readEnv(name)) problems.push(`custom auth: env var ${name} is not set (config.auth.custom needs it at run time)`);
   }
   if (config.auth?.custom && modes.database !== 'firebase' && modes.auth === 'firebase') warnings.push('custom auth keeps its security store in the Realtime Database, which is not in firebase mode here');
+  if (config.appCheck?.enforce?.includes('functions') && modes.functions === 'firebase') warnings.push('appCheck.enforce lists functions: on Firebase, callables enforce App Check with onCall({ enforceAppCheck: true })');
   if (modes.firestore !== modes.auth) warnings.push(`auth is in ${modes.auth} mode and Firestore in ${modes.firestore} mode: rules see the tokens of the auth side only`);
   return { modes, problems, warnings };
 }
@@ -171,6 +172,8 @@ export async function deploy(config: AnyConfig, env: string, root: string, only:
       await run(bin, ['deploy', '--only', 'functions', '--project', config.firebase!.projectId, '--config', fb, '--non-interactive'], dirname(dir), log);
     }
   }
+  if (want('remoteConfig', 'remoteConfig') && config.remoteConfig) await step('remote config: template from the declared parameters', () => manageRemoteConfig(app).setParameters());
+  if (want('appCheck', 'appCheck') && config.appCheck?.enforce?.length) await step('app check: enforcement (Firestore, Realtime Database, Storage)', () => manageAppCheck(app).setEnforcement());
   if (want('hosting', 'hosting') && config.hosting) await step('hosting: upload + release', () => manageHosting(app).deploy({ dir: at(config.hosting!.public), message: `icebase deploy --env ${env}` }));
   log('done');
 }

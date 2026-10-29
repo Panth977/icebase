@@ -60,6 +60,35 @@ export async function treeTables(s: Store): Promise<void> {
   await s.exec(`CREATE TABLE IF NOT EXISTS tree (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL)`);
 }
 
+/** Remote Config ('remoteconfig'): every published template, newest last. */
+export async function remoteConfigTables(s: Store): Promise<void> {
+  const { int: I } = s.types;
+  await s.exec(`CREATE TABLE IF NOT EXISTS versions (version ${I} PRIMARY KEY, template TEXT NOT NULL, at ${I} NOT NULL)`);
+}
+
+/** Cloud Messaging ('messaging'): registration tokens, topic subscriptions, what was sent (outbox) and what waits for a device (inbox). */
+export async function messagingTables(s: Store): Promise<void> {
+  const { text: T, int: I } = s.types;
+  await s.exec(`
+    CREATE TABLE IF NOT EXISTS tokens (token ${T} PRIMARY KEY, uid TEXT, at ${I} NOT NULL);
+    CREATE TABLE IF NOT EXISTS topics (topic ${T} NOT NULL, token ${T} NOT NULL, PRIMARY KEY (topic, token));
+    CREATE INDEX IF NOT EXISTS topics_token ON topics (token, topic);
+    CREATE TABLE IF NOT EXISTS outbox (id ${T} PRIMARY KEY, at ${I} NOT NULL, message TEXT NOT NULL, delivered ${I} NOT NULL);
+    CREATE INDEX IF NOT EXISTS outbox_at ON outbox (at);
+    CREATE TABLE IF NOT EXISTS inbox (id ${T} PRIMARY KEY, token ${T} NOT NULL, at ${I} NOT NULL, payload TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS inbox_token ON inbox (token, at);
+  `);
+}
+
+/** App Check ('appcheck'): registered debug tokens and the key tokens are signed with. */
+export async function appCheckTables(s: Store): Promise<void> {
+  const { text: T, int: I } = s.types;
+  await s.exec(`
+    CREATE TABLE IF NOT EXISTS debug_tokens (token ${T} PRIMARY KEY, name TEXT NOT NULL, at ${I} NOT NULL);
+    CREATE TABLE IF NOT EXISTS meta (k ${T} PRIMARY KEY, v TEXT);
+  `);
+}
+
 /** A store's tables by its name, and each table's key (the order rows are copied in). */
 export function storeKind(name: string): { create(s: Store): Promise<void>; tables: Record<string, string[]> } | null {
   if (name === 'firestore' || name.startsWith('firestore-')) return { create: firestoreTables, tables: { docs: ['path'], meta: ['k'] } };
@@ -67,5 +96,8 @@ export function storeKind(name: string): { create(s: Store): Promise<void>; tabl
   if (name === 'storage') return { create: storageTables, tables: { objects: ['bucket', 'name'], uploads: ['id'] } };
   if (name === 'tasks') return { create: taskTables, tables: { tasks: ['id'] } };
   if (name === 'database' || name.startsWith('database-')) return { create: treeTables, tables: { tree: ['id'] } };
+  if (name === 'remoteconfig') return { create: remoteConfigTables, tables: { versions: ['version'] } };
+  if (name === 'messaging') return { create: messagingTables, tables: { tokens: ['token'], topics: ['topic', 'token'], outbox: ['id'], inbox: ['id'] } };
+  if (name === 'appcheck') return { create: appCheckTables, tables: { debug_tokens: ['token'], meta: ['k'] } };
   return null;
 }

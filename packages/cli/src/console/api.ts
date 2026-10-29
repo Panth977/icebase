@@ -9,12 +9,14 @@ import { describe, openApi } from '@panth977/icebase/describe';
 import { schemaTypeScript } from './typescript.ts';
 import { IceBaseError } from '@panth977/icebase/errors';
 import { matchCollectionPath } from '@panth977/icebase/schema';
-import { getAdminAuth, getAdminDatabase, getAdminStorage } from '@panth977/icebase-server/admin';
+import { getAdminAuth, getAdminDatabase, getAdminMessaging, getAdminRemoteConfig, getAdminStorage } from '@panth977/icebase-server/admin';
+import { allParameters, paramToString, templateValueType } from '@panth977/icebase/internal';
+import type { RemoteConfigParams } from '@panth977/icebase/config';
 import { getAuthSecurity } from '@panth977/icebase-server/auth';
 import { getFirestore, GeoPoint, Timestamp, type Firestore } from '@panth977/icebase-server/compat';
 import { Buffer } from 'node:buffer';
 import { firestoreIndexesJson } from '../internal/firebase-indexes.ts';
-import { manageAuth, manageFirestore, manageHosting, manageStorage } from '../manage.ts';
+import { manageAppCheck, manageAuth, manageFirestore, manageHosting, manageRemoteConfig, manageStorage } from '../manage.ts';
 
 export interface ConsoleOptions {
   config: AnyConfig;
@@ -272,6 +274,73 @@ export function consoleApi(o: ConsoleOptions): (op: string, b: Record<string, un
     'hosting.sites': async () => ({ sites: await manageHosting(app).listSites() }),
     'hosting.createSite': (b) => manageHosting(app).createSite(str(b.siteId, 'siteId')),
     'hosting.setDNS': (b) => manageHosting(app).setDNS(str(b.domain, 'domain'), typeof b.site === 'string' ? { site: b.site } : {}),
+
+    // ── Remote Config ──
+    async 'rc.get'() {
+      const declared = (config.remoteConfig?.parameters ?? {}) as RemoteConfigParams;
+      const rc = getAdminRemoteConfig(app);
+      const t = await rc.getTemplate();
+      const live = allParameters(t);
+      const names = [...new Set([...Object.keys(declared), ...Object.keys(live)])];
+      const versions = await rc.listVersions({ pageSize: 20 }).then((r) => r.versions).catch(() => []);
+      return {
+        version: t.version?.versionNumber ?? '0',
+        conditions: t.conditions.map((c) => c.name),
+        versions,
+        parameters: names.map((name) => {
+          const p = declared[name];
+          const v = live[name]?.defaultValue;
+          return {
+            name,
+            declared: !!p,
+            valueType: p ? templateValueType(p) : (live[name]?.valueType ?? 'STRING'),
+            defaultValue: p ? paramToString(p, p.defaultValue) : null,
+            description: p?.description ?? live[name]?.description ?? null,
+            value: v && 'value' in v ? v.value : null,
+            useInAppDefault: !!(v && 'useInAppDefault' in v),
+            conditional: Object.keys(live[name]?.conditionalValues ?? {}),
+          };
+        }),
+      };
+    },
+    async 'rc.publish'(b) {
+      // New values for some parameters ({ name: string | null }; null = the in-app default), on the current template.
+      const rc = getAdminRemoteConfig(app);
+      const t = await rc.getTemplate();
+      const values = (b.values ?? {}) as Record<string, string | null>;
+      for (const [k, v] of Object.entries(values)) {
+        const cur = t.parameters[k] ?? {};
+        t.parameters[k] = { ...cur, defaultValue: v === null ? { useInAppDefault: true } : { value: String(v) } };
+      }
+      const out = await rc.publishTemplate(t);
+      return { version: out.version?.versionNumber ?? null };
+    },
+    'rc.rollback': async (b) => ({ version: (await getAdminRemoteConfig(app).rollback(str(String(b.version ?? ''), 'version'))).version?.versionNumber ?? null }),
+    'rc.sync': () => manageRemoteConfig(app).setParameters(),
+
+    // ── Cloud Messaging (the outbox, topics and tokens are the IceBase server's) ──
+    async 'fcm.state'() {
+      const kinds = Object.entries(config.messaging?.messages ?? {}).map(([kind, fields]) => ({ kind, fields: Object.entries(fields as Record<string, { def: { kind: string }; optional: boolean }>).map(([k, fd]) => ({ name: k, type: fd.def.kind, optional: fd.optional })) }));
+      if (!o.server) return { server: false, kinds, outbox: [], topics: [], tokens: [] };
+      const [outbox, topics, tokens] = await Promise.all([o.server.manage('messaging', 'outbox', { limit: 100 }), o.server.manage('messaging', 'topics', {}), o.server.manage('messaging', 'tokens', { limit: 100 })]);
+      return { server: true, kinds, ...(outbox as object), ...(topics as object), ...(tokens as object) };
+    },
+    async 'fcm.send'(b) {
+      const target = typeof b.token === 'string' && b.token ? { token: b.token } : { topic: str(b.topic, 'token or topic') };
+      const title = typeof b.title === 'string' && b.title ? b.title : undefined;
+      const body = typeof b.body === 'string' && b.body ? b.body : undefined;
+      const kind = typeof b.kind === 'string' && b.kind ? b.kind : undefined;
+      const message = { ...target, ...(title || body ? { notification: { ...(title ? { title } : {}), ...(body ? { body } : {}) } } : {}), ...(kind ? { kind, data: (b.data ?? {}) as never } : {}) };
+      return { name: await getAdminMessaging(app).send(message as never) };
+    },
+
+    // ── App Check ──
+    async 'ac.get'() {
+      const tokens = await manageAppCheck(app).listDebugTokens().catch((e: Error) => ({ error: e.message }));
+      return { enforce: config.appCheck?.enforce ?? [], mode: modes.appCheck, tokens };
+    },
+    'ac.createDebugToken': (b) => manageAppCheck(app).createDebugToken(str(b.name, 'name'), typeof b.token === 'string' && b.token ? b.token : undefined),
+    'ac.deleteDebugToken': async (b) => (await manageAppCheck(app).deleteDebugToken(str(b.token, 'token')), { ok: true }),
 
     // ── Rules ──
     async rules(b) {

@@ -28,7 +28,7 @@ export { setGlobalOptions } from 'firebase-functions/v2';
 
 /** How the IceBase emulator finds and runs a function. */
 export type IceBaseFunctionRecord =
-  | { kind: 'call'; handler: (req: https.CallableRequest<unknown>) => unknown; input?: Field<unknown>; output?: Field<unknown>; region?: string; endpoint?: AnyEndpoint }
+  | { kind: 'call'; handler: (req: https.CallableRequest<unknown>) => unknown; input?: Field<unknown>; output?: Field<unknown>; region?: string; endpoint?: AnyEndpoint; /** onCall({ enforceAppCheck: true }): the IceBase server refuses callers without App Check too. */ enforceAppCheck?: boolean }
   | { kind: 'request'; handler: (req: Request) => Response | Promise<Response>; express?: ExpressHandler; region?: string; endpoint?: AnyEndpoint }
   | { kind: 'document'; event: 'created' | 'updated' | 'deleted' | 'written'; collection: AnyCollection; handler: (e: unknown) => unknown }
   | { kind: 'document'; event: 'created' | 'updated' | 'deleted' | 'written'; pattern: string; collection?: undefined; handler: (e: unknown) => unknown }
@@ -85,7 +85,7 @@ export function onCall(a: unknown, b?: unknown, c?: unknown) {
     if (output) validateValue(output, res, 'the result');
     return res;
   };
-  return tag(https.onCall(native, run), { kind: 'call', handler: run, ...(input ? { input } : {}), ...(output ? { output } : {}) });
+  return tag(https.onCall(native, run), { kind: 'call', handler: run, ...(input ? { input } : {}), ...(output ? { output } : {}), ...(native.enforceAppCheck ? { enforceAppCheck: true } : {}) });
 }
 
 const isEndpoint = (x: unknown): x is AnyEndpoint => !!x && typeof x === 'object' && (x as { kind?: unknown }).kind === 'endpoint';
@@ -109,7 +109,7 @@ function endpointCall(e: AnyEndpoint, opts: https.CallableOptions, handler: (req
       throw new https.HttpsError('internal', (err as Error).message);
     }
   };
-  return tag(https.onCall(opts, run), { kind: 'call', handler: run, input: e.input, output: e.output, endpoint: e });
+  return tag(https.onCall(opts, run), { kind: 'call', handler: run, input: e.input, output: e.output, endpoint: e, ...(opts.enforceAppCheck ? { enforceAppCheck: true } : {}) });
 }
 
 const HTTP_STATUS: Record<string, number> = { 'invalid-argument': 400, 'failed-precondition': 400, 'out-of-range': 400, unauthenticated: 401, 'permission-denied': 403, 'not-found': 404, 'already-exists': 409, aborted: 409, 'resource-exhausted': 429, cancelled: 499, unimplemented: 501, unavailable: 503, 'deadline-exceeded': 504 };

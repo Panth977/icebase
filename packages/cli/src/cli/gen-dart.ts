@@ -228,7 +228,8 @@ export function genDart(config: AnyConfig, opts: { package?: string } = {}): str
   }
   const envs = Object.keys(config.environments).map((e) => {
     const m = resolveModes(config, e);
-    return `    ${str(e)}: {${SERVICES.map((s) => `${str(s)}: ${str(m[s])}`).join(', ')}},`;
+    // The Dart SDK has the phase-1 services (no Remote Config / Messaging / App Check yet).
+    return `    ${str(e)}: {${SERVICES.filter((s) => s !== 'remoteConfig' && s !== 'messaging' && s !== 'appCheck').map((s) => `${str(s)}: ${str(m[s])}`).join(', ')}},`;
   });
   const custom = config.auth?.custom;
   const customExpr = custom

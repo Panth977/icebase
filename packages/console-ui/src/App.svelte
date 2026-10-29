@@ -15,6 +15,9 @@
   import Storage from './pages/Storage.svelte';
   import Functions from './pages/Functions.svelte';
   import Hosting from './pages/Hosting.svelte';
+  import RemoteConfig from './pages/RemoteConfig.svelte';
+  import Messaging from './pages/Messaging.svelte';
+  import AppCheck from './pages/AppCheck.svelte';
 
   const NAV = [
     { group: '', items: [{ id: 'overview', label: 'Overview', icon: 'overview' }] },
@@ -22,8 +25,9 @@
     { group: 'Users', items: [{ id: 'auth', label: 'Authentication', icon: 'users' }] },
     { group: 'Definition', items: [{ id: 'schema', label: 'Schema', icon: 'schema' }, { id: 'indexes', label: 'Indexes', icon: 'index' }, { id: 'rules', label: 'Rules', icon: 'rules' }] },
     { group: 'Backend', items: [{ id: 'apis', label: 'APIs', icon: 'api' }, { id: 'functions', label: 'Functions', icon: 'functions' }, { id: 'hosting', label: 'Hosting', icon: 'hosting' }] },
+    { group: 'Engage', items: [{ id: 'remote-config', label: 'Remote Config', icon: 'config' }, { id: 'messaging', label: 'Messaging', icon: 'message' }, { id: 'app-check', label: 'App Check', icon: 'shield' }] },
   ];
-  const PAGES: Record<string, any> = { overview: Overview, apis: Apis, firestore: Firestore, database: Database, schema: Schema, indexes: Indexes, rules: Rules, auth: Auth, storage: Storage, functions: Functions, hosting: Hosting };
+  const PAGES: Record<string, any> = { overview: Overview, apis: Apis, firestore: Firestore, database: Database, schema: Schema, indexes: Indexes, rules: Rules, auth: Auth, storage: Storage, functions: Functions, hosting: Hosting, 'remote-config': RemoteConfig, messaging: Messaging, 'app-check': AppCheck };
   const label = $derived(NAV.flatMap((g) => g.items).find((i) => i.id === route.page)?.label ?? 'Overview');
   const Page = $derived(PAGES[route.page] ?? Overview);
 

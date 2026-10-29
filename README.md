@@ -13,7 +13,8 @@ const snap = await getDocs(q);           // snap.docs[0].data() is typed from th
 ```
 
 - **Same API as Firebase.** `@panth977/icebase/firestore`, `@panth977/icebase/auth`, `@panth977/icebase/database`,
-  `@panth977/icebase/storage`, `@panth977/icebase/functions` and `@panth977/icebase-server/functions` keep Firebase's function
+  `@panth977/icebase/storage`, `@panth977/icebase/functions`, `@panth977/icebase/remote-config`,
+  `@panth977/icebase/messaging`, `@panth977/icebase/app-check` and `@panth977/icebase-server/functions` keep Firebase's function
   names and call shapes. `@panth977/icebase-server/admin` is firebase-admin's counterpart.
 - **Schema.** Every collection, Realtime Database path and storage path is declared once.
   Writes are type-checked at compile time and validated at runtime in every mode; reads are typed.
@@ -253,8 +254,61 @@ Firestore browser and editor (writes go through the schema), a query runner that
 declared indexes allow, schema and indexes (build state on Firebase, SQL indexes on the IceBase
 server), the Realtime Database tree, users and sign-in methods with custom auth's security view
 (attempts, blocks, limits), a Storage browser, functions (run a schedule now, the task queue),
-Hosting sites and domains, and the rules in force. It opens with `ICEBASE_CONSOLE_TOKEN` (set it in the
+Hosting sites and domains, the rules in force, Remote Config (parameters with their declared type and
+default, edit and publish values, versions and rollback), Cloud Messaging (send, the outbox, topics and
+tokens) and App Check (enforcement, debug tokens). It opens with `ICEBASE_CONSOLE_TOKEN` (set it in the
 server's environment; the console-only token reaches no data service) or the admin token.
+
+## Remote Config, Cloud Messaging and App Check
+
+Declared in `icebase.config.ts`, typed from the declaration, in every mode:
+
+```ts
+export default defineConfig({
+  // …
+  remoteConfig: {
+    parameters: {
+      welcome: param.string('Hello', { description: 'Home banner' }),
+      maxItems: param.number(10, { int: true, min: 1 }),
+      newCheckout: param.boolean(false),
+      plan: param.enum(['free', 'pro'], 'free'),
+      theme: param.json(f.map({ color: f.string(), dark: f.boolean() }), { color: 'blue', dark: false }),
+    },
+  },
+  messaging: { messages: { orderShipped: { orderId: f.string(), eta: f.optional(f.number()) } }, vapidKey: '…' },
+  appCheck: { enforce: ['firestore', 'storage', 'functions'] },
+});
+```
+
+- **Remote Config** (`@panth977/icebase/remote-config`): `getRemoteConfig`, `fetchConfig`, `activate`,
+  `fetchAndActivate`, `getValue`, `getString`, `getNumber`, `getBoolean`, `getAll`, `onConfigUpdate`, and
+  `getParameter(rc, 'theme')` — the value in its declared type. Keys are typed (`getNumber` takes number
+  parameters only); the declared defaults are the in-app defaults; a remote value that does not fit its
+  type is ignored. Admin: `getAdminRemoteConfig(app)` (`getTemplate`, `publishTemplate`, `validateTemplate`,
+  `listVersions`, `rollback` — firebase-admin's) refuses undeclared parameters and wrong values;
+  `manageRemoteConfig(app).setParameters()` makes the template follow the declarations, and
+  `icebase deploy` runs it. On the IceBase server the template and its versions live in the store, the
+  declarations until one is published; a publish reaches `onConfigUpdate` over the realtime socket.
+  Conditions are firebase mode only.
+- **Cloud Messaging** (`@panth977/icebase/messaging`): `getMessaging`, `getToken`, `deleteToken`,
+  `onMessage`, `isSupported`. A message of a declared kind arrives as `{ kind, data }` with `data` typed
+  (`rawData` keeps FCM's strings). Admin: `getAdminMessaging(app)` — `send`, `sendEach`,
+  `sendEachForMulticast`, `subscribeToTopic`, `unsubscribeFromTopic` — takes `{ kind, data }` and checks
+  it against the declaration (data travels as FCM strings: strings as they are, the rest as JSON, the
+  kind in `icebaseKind`). On the IceBase server: the server issues tokens, keeps topics, conditions
+  (`"'a' in topics && !('b' in topics)"`), an outbox, and delivers to apps listening on the realtime
+  socket; a device that is not listening gets its messages when it does. Web Push, background
+  notifications and service workers are firebase mode's.
+- **App Check** (`@panth977/icebase/app-check`): `initializeAppCheck(app, { provider })`, `getToken`,
+  `getLimitedUseToken`, `onTokenChanged`, `setTokenAutoRefreshEnabled`, and Firebase's providers plus
+  `DebugProvider(token?)`. firebase mode is Firebase's SDK (`DebugProvider` = its debug mode). On the
+  IceBase server App Check tokens are exchanged for debug tokens — any on a developer's emulator, only
+  registered ones (`manageAppCheck(app).createDebugToken`) on a server that signs its tokens — and the
+  services in `appCheck.enforce` refuse requests without a valid one (Firestore, the Realtime Database,
+  Storage, callables, Remote Config, Messaging; admins exempt; callables also honour
+  `onCall({ enforceAppCheck: true })` and get `request.app`). Admin: `getAdminAppCheck(app)`
+  (`createToken`, `verifyToken`). `icebase deploy` turns enforcement on for Firestore, the Realtime
+  Database and Storage on Firebase. Call `initializeAppCheck` before using the other services.
 
 ## Indexes, as Firestore really checks them
 
@@ -283,7 +337,8 @@ run against Firebase's emulators, the IceBase server and a live project
 (`ICEBASE_LIVE_PROJECT=icebase-test-… npx vitest run live/` in `packages/tests`). Phase 3, vm mode:
 the IceBase server on Postgres, `icebase migrate` both ways and vm mode in the SDK are built, and every
 IceBase-server suite passes on Postgres (`npm run test:pg`); the Docker image, login / deploy to a VM,
-backups and S3 blobs are not yet. See [`docs/prd/icebase-prd.html`](docs/prd/icebase-prd.html).
+backups and S3 blobs are not yet. Phase 4: Remote Config, Cloud Messaging and App Check in every mode
+(firebase mode is covered by unit tests: Firebase has no emulator for them). See [`docs/prd/icebase-prd.html`](docs/prd/icebase-prd.html).
 
 ## License
 

@@ -141,7 +141,7 @@ describe('icebase migrate', () => {
     const r = await migrate(src, dst);
     await src.close();
     await dst.close();
-    expect(r.stores.map((x) => x.name)).toEqual(['auth', 'database', 'firestore', 'firestore-archive', 'storage']);
+    expect(r.stores.map((x) => x.name)).toEqual(['appcheck', 'auth', 'database', 'firestore', 'firestore-archive', 'messaging', 'remoteconfig', 'storage']);
     expect(r.stores.find((x) => x.name === 'firestore')!.rows.docs).toBe(2);
 
     // A second run into data is refused unless replace.

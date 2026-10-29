@@ -1,15 +1,18 @@
 // icebase/config — the one config file (icebase.config.ts).
 
 import { configError } from './errors.ts';
-import type { AnyCollection, FieldMap, Infer, Schema } from './schema.ts';
+import { validateValue, type AnyCollection, type Field, type FieldMap, type Infer, type Schema } from './schema.ts';
 
 /** Where a service runs.
  * firebase — the real Firebase product (default).
  * emulator — local IceBase server, SQLite + disk; for development and CI.
  * vm — self-hosted IceBase server (one Docker image) on Postgres. Not in phase 1. */
 export type Mode = 'firebase' | 'emulator' | 'vm';
-export type Service = 'firestore' | 'auth' | 'database' | 'storage' | 'functions' | 'hosting';
-export const SERVICES: readonly Service[] = ['firestore', 'auth', 'database', 'storage', 'functions', 'hosting'];
+export type Service = 'firestore' | 'auth' | 'database' | 'storage' | 'functions' | 'hosting' | 'remoteConfig' | 'messaging' | 'appCheck';
+export const SERVICES: readonly Service[] = ['firestore', 'auth', 'database', 'storage', 'functions', 'hosting', 'remoteConfig', 'messaging', 'appCheck'];
+/** The services App Check can guard (config.appCheck.enforce). */
+export type AppCheckService = 'firestore' | 'database' | 'storage' | 'functions' | 'remoteConfig' | 'messaging';
+export const APP_CHECK_SERVICES: readonly AppCheckService[] = ['firestore', 'database', 'storage', 'functions', 'remoteConfig', 'messaging'];
 
 export interface Environment {
   /** Mode for every service in this environment… */
@@ -77,7 +80,45 @@ export interface CustomAuthConfig {
   };
 }
 
-export interface IceBaseConfig<C extends Record<string, AnyCollection>, E extends string, K extends FieldMap = FieldMap> {
+// ─── Remote Config parameters, message kinds ───────────────────────────────────
+
+export type RemoteConfigValueType = 'string' | 'number' | 'boolean' | 'json';
+
+/** One Remote Config parameter as declared (param.string('Hi') …): its type, default and description. */
+export interface RemoteConfigParam<T, V extends RemoteConfigValueType = RemoteConfigValueType> {
+  readonly kind: 'remoteConfigParam';
+  readonly valueType: V;
+  readonly defaultValue: T;
+  readonly description?: string;
+  /** The value's schema (numbers' bounds, a JSON parameter's shape): every value is checked against it. */
+  readonly schema: Field<T>;
+}
+export type RemoteConfigParams = Record<string, RemoteConfigParam<any>>;
+/** A parameter's TypeScript type. */
+export type ParamValue<P> = P extends RemoteConfigParam<infer T, any> ? T : never;
+
+/** Data payload fields per message kind (config.messaging.messages): kind → its fields. */
+export type MessageKinds = Record<string, FieldMap>;
+
+/** Remote Config parameters, declared in icebase.config (remoteConfig.parameters): typed getValue / getParameter. */
+export const param = {
+  string: (defaultValue: string, opts: { description?: string; min?: number; max?: number } = {}): RemoteConfigParam<string, 'string'> => mkParam('string', defaultValue, { kind: 'string', optional: false, def: { kind: 'string', ...(opts.min !== undefined ? { min: opts.min } : {}), ...(opts.max !== undefined ? { max: opts.max } : {}) } }, opts.description),
+  /** One of a few strings. */
+  enum: <const E extends readonly string[]>(values: E, defaultValue: E[number], opts: { description?: string } = {}): RemoteConfigParam<E[number], 'string'> => mkParam('string', defaultValue, { kind: 'enum', optional: false, def: { kind: 'enum', values } }, opts.description),
+  number: (defaultValue: number, opts: { description?: string; int?: boolean; min?: number; max?: number } = {}): RemoteConfigParam<number, 'number'> => {
+    const { description, ...n } = opts;
+    return mkParam('number', defaultValue, { kind: 'number', optional: false, def: { kind: 'number', ...n } }, description);
+  },
+  boolean: (defaultValue: boolean, opts: { description?: string } = {}): RemoteConfigParam<boolean, 'boolean'> => mkParam('boolean', defaultValue, { kind: 'boolean', optional: false, def: { kind: 'boolean' } }, opts.description),
+  /** A JSON value of the given shape (f.map(…), f.array(…) …). */
+  json: <T>(schema: Field<T>, defaultValue: T, opts: { description?: string } = {}): RemoteConfigParam<T, 'json'> => mkParam('json', defaultValue, schema, opts.description),
+};
+
+function mkParam<T, V extends RemoteConfigValueType>(valueType: V, defaultValue: T, schema: Field<T>, description?: string): RemoteConfigParam<T, V> {
+  return { kind: 'remoteConfigParam', valueType, defaultValue, schema, ...(description ? { description } : {}) };
+}
+
+export interface IceBaseConfig<C extends Record<string, AnyCollection>, E extends string, K extends FieldMap = FieldMap, R extends RemoteConfigParams = {}, M extends MessageKinds = {}> {
   name: string;
   schema: Schema<C, any, any>;
   /** Firebase rules syntax, used by every mode. Paths relative to the project root. */
@@ -103,6 +144,20 @@ export interface IceBaseConfig<C extends Record<string, AnyCollection>, E extend
     custom?: CustomAuthConfig;
   };
   storage?: { maxUploadMb?: number };
+  /** Remote Config: every parameter the app reads, with its type and in-app default (param.string('Hi') …). */
+  remoteConfig?: { parameters: R };
+  /** Cloud Messaging. `messages`: the data payload of each kind of message (kind → fields), checked on send and typed in onMessage. */
+  messaging?: {
+    messages?: M;
+    /** The Web Push certificate's public key (Firebase console → Cloud Messaging), for getToken in firebase mode. Public. */
+    vapidKey?: string;
+  };
+  /**
+   * App Check. `enforce`: the services that refuse requests without a valid App Check token — on
+   * the IceBase server (emulator / vm) here; on Firebase, `icebase deploy` turns enforcement on for
+   * Firestore, the Realtime Database and Storage (callables: onCall({ enforceAppCheck: true })).
+   */
+  appCheck?: { enforce?: readonly AppCheckService[]; /** How long an App Check token from the IceBase server lives (default 60 minutes). */ ttlMinutes?: number };
   /** The API's schema (icebase/api defineApi): every callable and HTTP endpoint, its input and output. */
   api?: import('./api.ts').Api;
 
@@ -133,14 +188,18 @@ export interface IceBaseConfig<C extends Record<string, AnyCollection>, E extend
   environments: Record<E, Environment>;
 }
 
-export type AnyConfig = IceBaseConfig<Record<string, AnyCollection>, string, any>;
-export type EnvOf<Cfg> = Cfg extends IceBaseConfig<any, infer E> ? E : never;
+export type AnyConfig = IceBaseConfig<Record<string, AnyCollection>, string, any, any, any>;
+export type EnvOf<Cfg> = Cfg extends IceBaseConfig<any, infer E, any, any, any> ? E : never;
 /** The custom claims declared in config.auth.claims (all optional: a user may have none yet). */
-export type ClaimsOf<Cfg> = Cfg extends IceBaseConfig<any, any, infer K> ? (FieldMap extends K ? Record<string, unknown> : Partial<Infer<K>>) : Record<string, unknown>;
+export type ClaimsOf<Cfg> = Cfg extends IceBaseConfig<any, any, infer K, any, any> ? (FieldMap extends K ? Record<string, unknown> : Partial<Infer<K>>) : Record<string, unknown>;
+/** The Remote Config parameters declared in config.remoteConfig.parameters. */
+export type ParamsOf<Cfg> = Cfg extends IceBaseConfig<any, any, any, infer R, any> ? R : {};
+/** The message kinds declared in config.messaging.messages. */
+export type MessageKindsOf<Cfg> = Cfg extends IceBaseConfig<any, any, any, any, infer M> ? M : {};
 
 const MODES: readonly Mode[] = ['firebase', 'emulator', 'vm'];
 
-export function defineConfig<const C extends Record<string, AnyCollection>, const E extends string, const K extends FieldMap = {}>(c: IceBaseConfig<C, E, K>): IceBaseConfig<C, E, K> {
+export function defineConfig<const C extends Record<string, AnyCollection>, const E extends string, const K extends FieldMap = {}, const R extends RemoteConfigParams = {}, const M extends MessageKinds = {}>(c: IceBaseConfig<C, E, K, R, M>): IceBaseConfig<C, E, K, R, M> {
   if (!c || typeof c.name !== 'string' || !c.name) throw configError('defineConfig: `name` is required');
   if (!c.schema || typeof c.schema !== 'object' || !('collections' in c.schema)) throw configError('defineConfig: `schema` must come from defineSchema(…)');
   const envs = Object.entries(c.environments ?? {}) as [string, Environment][];
@@ -155,7 +214,34 @@ export function defineConfig<const C extends Record<string, AnyCollection>, cons
   const uses = (m: Mode) => envs.some(([, e]) => e.mode === m || Object.values(e.services ?? {}).includes(m));
   if (uses('firebase') && !c.firebase?.projectId) throw configError('defineConfig: an environment uses mode "firebase", so `firebase.projectId` is required');
   if (uses('vm') && !c.vm?.url) throw configError('defineConfig: an environment uses mode "vm", so `vm.url` is required');
+  checkServiceConfig(c as unknown as AnyConfig);
   return c;
+}
+
+/** The data key that carries a typed message's kind (config.messaging.messages). */
+export const MESSAGE_KIND_KEY = 'icebaseKind';
+const MESSAGE_FIELD_KINDS = new Set(['string', 'number', 'boolean', 'enum', 'array', 'map', 'record', 'union', 'literal', 'any']);
+
+/** Remote Config parameters, message kinds and App Check, as declared. */
+function checkServiceConfig(c: AnyConfig): void {
+  for (const [name, p] of Object.entries((c.remoteConfig?.parameters ?? {}) as RemoteConfigParams)) {
+    // Firebase: letters, digits and underscores, not starting with a digit, at most 256.
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,255}$/.test(name)) throw configError(`defineConfig: remoteConfig.parameters.${name}: a parameter name is letters, digits and underscores, not starting with a digit`);
+    if (!p || p.kind !== 'remoteConfigParam') throw configError(`defineConfig: remoteConfig.parameters.${name} must come from param.string(…), param.number(…), param.boolean(…), param.enum(…) or param.json(…)`);
+    try {
+      validateValue(p.schema, p.defaultValue, `remoteConfig.parameters.${name} default`);
+    } catch (e) {
+      throw configError(`defineConfig: ${(e as Error).message}`);
+    }
+  }
+  for (const [kind, fields] of Object.entries((c.messaging?.messages ?? {}) as MessageKinds)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(kind)) throw configError(`defineConfig: messaging.messages.${kind}: a message kind is letters, digits, '_', '.', '-'`);
+    for (const [k, fd] of Object.entries(fields)) {
+      if (k === MESSAGE_KIND_KEY || k === 'from' || k === 'notification' || k === 'message_type' || /^(google|gcm)/i.test(k)) throw configError(`defineConfig: messaging.messages.${kind}.${k}: '${k}' is a reserved data key in Cloud Messaging`);
+      if (!MESSAGE_FIELD_KINDS.has(fd.def.kind)) throw configError(`defineConfig: messaging.messages.${kind}.${k}: ${fd.def.kind} fields cannot travel in a message's data (strings, numbers, booleans, enums, maps, arrays only)`);
+    }
+  }
+  for (const s of c.appCheck?.enforce ?? []) if (!APP_CHECK_SERVICES.includes(s)) throw configError(`defineConfig: appCheck.enforce: '${s}' is not one of ${APP_CHECK_SERVICES.join(', ')}`);
 }
 
 /** The mode of every service in one environment. */

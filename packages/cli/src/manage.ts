@@ -8,7 +8,9 @@
 // the config's until the server restarts; a hosting release is served by `icebase serve`.
 
 import type { IceBaseApp } from '@panth977/icebase/app';
-import type { Service } from '@panth977/icebase/config';
+import type { AppCheckService, RemoteConfigParams, Service } from '@panth977/icebase/config';
+import { syncTemplate, type RemoteConfigTemplate } from '@panth977/icebase/internal';
+import { getAdminRemoteConfig } from '@panth977/icebase-server/admin';
 import { IceBaseError } from '@panth977/icebase/errors';
 import { collectionIndexes, collectionOverrides, firestoreIndexesJson, indexKey, type IndexesFile, type IndexJson } from './internal/firebase-indexes.ts';
 import { googleClient, type GoogleClient } from './internal/google-rest.ts';
@@ -459,6 +461,126 @@ export function manageStorage(app: IceBaseApp): StorageManager {
       const src = source ?? (app.config.rules?.storage ? { file: app.config.rules.storage } : undefined);
       if (!src) throw new IceBaseError('invalid-argument', 'setRules(): no rules given and config.rules.storage is not set');
       return releaseRules(g, `firebase.storage/${opts.bucket ?? defaultBucket()}`, 'storage.rules', await loadRules(src));
+    },
+  };
+}
+
+// ─── Remote Config ─────────────────────────────────────────────────────────────
+
+export interface RemoteConfigSync {
+  added: string[];
+  removed: string[];
+  /** Values reset to the declared default (they no longer fit their type). */
+  reset: string[];
+  kept: string[];
+  /** The published version, or null when the template already matched. */
+  version: string | null;
+}
+
+export interface RemoteConfigManager {
+  /**
+   * Make the template match config.remoteConfig.parameters (what `icebase deploy` does): new
+   * parameters at their declared defaults, types and descriptions from the declarations, values that
+   * still fit kept, others reset, parameters no longer declared removed. Publishes only on a change.
+   */
+  setParameters(): Promise<RemoteConfigSync>;
+  /** The current template (firebase-admin's shape). */
+  getTemplate(): Promise<RemoteConfigTemplate>;
+}
+
+export function manageRemoteConfig(app: IceBaseApp): RemoteConfigManager {
+  adminOnly(app, 'manageRemoteConfig', 'remoteConfig');
+  const rc = getAdminRemoteConfig(app);
+  return {
+    getTemplate: () => rc.getTemplate(),
+    async setParameters() {
+      const params = (app.config.remoteConfig?.parameters ?? {}) as RemoteConfigParams;
+      const current = await rc.getTemplate();
+      const sync = syncTemplate(params, current);
+      const out: RemoteConfigSync = { added: sync.added, removed: sync.removed, reset: sync.reset, kept: sync.kept, version: null };
+      if (!sync.changed) return out;
+      const published = await rc.publishTemplate(sync.template);
+      out.version = published.version?.versionNumber ?? null;
+      return out;
+    },
+  };
+}
+
+// ─── App Check ─────────────────────────────────────────────────────────────────
+
+const APPCHECK = 'https://firebaseappcheck.googleapis.com/v1';
+/** The services whose enforcement Firebase App Check sets per project (callables enforce in code). */
+const APPCHECK_SERVICE_IDS: Partial<Record<AppCheckService, string>> = { firestore: 'firestore.googleapis.com', database: 'firebasedatabase.googleapis.com', storage: 'firebasestorage.googleapis.com' };
+
+export interface AppCheckDebugToken {
+  name: string;
+  token: string;
+}
+
+export interface AppCheckManager {
+  /** Register a debug token (made up when not given); returns it. firebase mode: for the web app (webConfig.appId or opts.appId). */
+  createDebugToken(name: string, token?: string, opts?: { appId?: string }): Promise<AppCheckDebugToken>;
+  listDebugTokens(opts?: { appId?: string }): Promise<AppCheckDebugToken[]>;
+  deleteDebugToken(token: string, opts?: { appId?: string }): Promise<void>;
+  /**
+   * Turn enforcement on for config.appCheck.enforce (or `services`). firebase mode: Firestore, the
+   * Realtime Database and Storage (functions enforce per callable); `prune` turns the others off.
+   * The IceBase server reads config.appCheck.enforce itself, so there this reports what it enforces.
+   */
+  setEnforcement(services?: readonly AppCheckService[], opts?: { prune?: boolean }): Promise<{ enforced: string[]; unenforced: string[] }>;
+}
+
+export function manageAppCheck(app: IceBaseApp): AppCheckManager {
+  const mode = adminOnly(app, 'manageAppCheck', 'appCheck');
+  const wanted = (services?: readonly AppCheckService[]) => [...(services ?? app.config.appCheck?.enforce ?? [])];
+  if (mode === 'emulator') {
+    return {
+      createDebugToken: (name, token) => onServer(app, 'appCheck', 'createDebugToken', { name, ...(token ? { token } : {}) }),
+      listDebugTokens: async () => (await onServer<{ tokens: AppCheckDebugToken[] }>(app, 'appCheck', 'listDebugTokens')).tokens.map((t) => ({ name: t.name, token: t.token })),
+      deleteDebugToken: async (token) => void (await onServer(app, 'appCheck', 'deleteDebugToken', { token })),
+      async setEnforcement(services) {
+        const w = wanted(services);
+        const configured = app.config.appCheck?.enforce ?? [];
+        if (services && JSON.stringify([...services].sort()) !== JSON.stringify([...configured].sort())) throw new IceBaseError('failed-precondition', 'the IceBase server enforces config.appCheck.enforce: change it there', { reason: 'config', service: 'appCheck' });
+        return { enforced: w, unenforced: [] };
+      },
+    };
+  }
+  const g = googleClient(app, 'appCheck');
+  const appIdOf = (o?: { appId?: string }) => {
+    const id = o?.appId ?? app.config.firebase?.webConfig?.appId;
+    if (!id) throw new IceBaseError('invalid-argument', 'App Check debug tokens belong to an app: pass { appId } or set firebase.webConfig.appId', { reason: 'config', service: 'appCheck' });
+    return `${APPCHECK}/projects/${g.projectId}/apps/${id}/debugTokens`;
+  };
+  type Listed = { name: string; displayName: string; token?: string };
+  return {
+    async createDebugToken(name, token, o) {
+      const t = token ?? crypto.randomUUID();
+      await g.call<Listed>('POST', appIdOf(o), { displayName: name, token: t });
+      return { name, token: t };
+    },
+    async listDebugTokens(o) {
+      const r = await g.call<{ debugTokens?: Listed[] }>('GET', appIdOf(o));
+      // Firebase never returns a token's value once registered.
+      return (r.debugTokens ?? []).map((d) => ({ name: d.displayName, token: d.token ?? d.name.split('/').pop()! }));
+    },
+    async deleteDebugToken(token, o) {
+      const r = await g.call<{ debugTokens?: Listed[] }>('GET', appIdOf(o));
+      const found = (r.debugTokens ?? []).find((d) => d.token === token || d.name.endsWith(`/${token}`));
+      if (!found) throw new IceBaseError('not-found', 'no such debug token', { service: 'appCheck' });
+      await g.call('DELETE', `${APPCHECK}/${found.name}`);
+    },
+    async setEnforcement(services, opts = {}) {
+      const w = new Set(wanted(services));
+      const enforced: string[] = [];
+      const unenforced: string[] = [];
+      for (const [svc, id] of Object.entries(APPCHECK_SERVICE_IDS) as [AppCheckService, string][]) {
+        if (!w.has(svc) && !opts.prune) continue;
+        const mode = w.has(svc) ? 'ENFORCED' : 'UNENFORCED';
+        await g.call('PATCH', `${APPCHECK}/projects/${g.projectId}/services/${id}?updateMask=enforcementMode`, { enforcementMode: mode });
+        (mode === 'ENFORCED' ? enforced : unenforced).push(svc);
+      }
+      return { enforced, unenforced };
     },
   };
 }

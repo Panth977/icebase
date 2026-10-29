@@ -7,6 +7,7 @@
 //   /v0/b/…, /storage/v1/…, /upload/storage/v1/…       Storage (Firebase + GCS REST APIs)
 //   /<project>/<region>/<fn>    Functions (callable + HTTP)
 //   /__/icebase/auth/*          custom auth
+//   /v1/rc/*, /v1/fcm/*, /v1/appcheck/*   Remote Config, Cloud Messaging, App Check
 //   /__/icebase/health          health
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -32,6 +33,8 @@ export interface Caller {
   admin: boolean;
   /** Decoded ID token claims, for rules' request.auth. */
   auth: { uid: string; token: Record<string, unknown> } | null;
+  /** A valid App Check token's app (X-Firebase-AppCheck), when one came. */
+  appCheck?: { appId: string; token: string } | null;
 }
 
 export interface Service {
@@ -85,7 +88,20 @@ export interface EmulatorContext {
    * they replace the config's rules files until the server restarts.
    */
   deployedRules: Map<string, string>;
+  /** App Check tokens (set by the appCheck service): the claims of a valid one, else null. */
+  appCheck?: { verify(token: string | null): Promise<{ sub: string } | null> };
 }
+
+/** The service a request is for, for App Check enforcement (functions check their callables themselves). */
+function appCheckServiceOf(path: string): string | null {
+  if (path.startsWith('/v1/fs/')) return 'firestore';
+  if (path.startsWith('/v1/db/')) return 'database';
+  if (path.startsWith('/v0/b/') || path.startsWith('/upload/storage/v1/') || path.startsWith('/storage/v1/')) return 'storage';
+  if (path === '/v1/rc/fetch') return 'remoteConfig';
+  if (path.startsWith('/v1/fcm/')) return 'messaging';
+  return null;
+}
+const SOCKET_SERVICE: Record<string, string> = { fs: 'firestore', db: 'database', rc: 'remoteConfig', fcm: 'messaging' };
 
 /** A stored object as Cloud Functions' storage events carry it. */
 export type StorageObjectEvent = Record<string, unknown> & { name: string; bucket: string };
@@ -250,6 +266,8 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
     ['functions', async () => (await import('./functions-service.ts')).functionsService(ctx, log)],
     ['customAuth', async () => (await import('./custom-auth-service.ts')).customAuthService(ctx)],
     ['messaging', async () => (await import('./messaging-service.ts')).messagingService(ctx)],
+    ['remoteConfig', async () => (await import('./remote-config-service.ts')).remoteConfigService(ctx)],
+    ['appCheck', async () => (await import('./appcheck-service.ts')).appCheckService(ctx)],
   ];
   for (const [name, make] of optional) {
     if (without.has(name)) continue;
@@ -336,6 +354,15 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
     },
   );
 
+  const enforced = new Set<string>(config.appCheck?.enforce ?? []);
+  if (enforced.size && without.has('appCheck')) throw new IceBaseError('failed-precondition', 'config.appCheck.enforce needs the appCheck service (it is left out)');
+  /** The caller's App Check: a valid token's app, else null. */
+  const appCheckOf = async (token: string | null | undefined): Promise<Caller['appCheck']> => {
+    const c = token && ctx.appCheck ? await ctx.appCheck.verify(token) : null;
+    return c && token ? { appId: c.sub, token } : null;
+  };
+  const appCheckRefused = (svc: string) => new IceBaseError('unauthenticated', `App Check: ${svc} needs a valid App Check token (config.appCheck.enforce)`, { service: svc, reason: 'app-check' });
+
   const handler = async (req: Request): Promise<Response> => {
     // The console (/__/icebase/console): the page for anyone, its API for the admin. Same origin
     // only: a console manages the deployment serving it and knows of no other (no CORS).
@@ -354,6 +381,10 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
       if (url.pathname === '/__/icebase/health') return json({ ok: true, project: projectId, services: [...services.keys()], documents: await firestore.count() });
       const authz = req.headers.get('authorization');
       const caller = await ctx.verify(authz ? authz.replace(/^(Bearer|Firebase)\s+/i, '') : null);
+      const acHeader = req.headers.get('x-firebase-appcheck');
+      if (acHeader) caller.appCheck = await appCheckOf(acHeader);
+      const acSvc = enforced.size ? appCheckServiceOf(url.pathname) : null;
+      if (acSvc && enforced.has(acSvc) && !caller.admin && !caller.appCheck) throw appCheckRefused(acSvc);
       const mg = /^\/__\/icebase\/admin\/manage\/([a-zA-Z]+)\/([a-zA-Z]+)$/.exec(url.pathname);
       if (mg && req.method === 'POST') {
         if (!caller.admin) throw new IceBaseError('permission-denied', 'the management API is the admin\'s');
@@ -426,11 +457,14 @@ export async function startEmulator(opts: EmulatorOptions): Promise<RunningEmula
         }
         try {
           if (msg.t === 'auth') {
-            live.caller = await ctx.verify((msg.token as string | null) ?? null);
+            live.caller = { ...(await ctx.verify((msg.token as string | null) ?? null)) };
+            live.caller.appCheck = await appCheckOf(typeof msg.appCheck === 'string' ? msg.appCheck : null);
             live.send({ t: 'authed', id: msg.id ?? null });
             return;
           }
-          const svc = services.get(({ fs: 'firestore', db: 'database' } as Record<string, string>)[String(msg.s)] ?? String(msg.s));
+          const svcName = SOCKET_SERVICE[String(msg.s)] ?? String(msg.s);
+          if (enforced.has(svcName) && !live.caller.admin && !live.caller.appCheck) throw appCheckRefused(svcName);
+          const svc = services.get(svcName);
           if (!svc?.socket) throw new IceBaseError('not-found', `no realtime service '${String(msg.s)}'`);
           await svc.socket(live, msg);
         } catch (e) {

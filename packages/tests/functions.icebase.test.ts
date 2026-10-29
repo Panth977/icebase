@@ -137,12 +137,16 @@ describe('functions · emulator mode', () => {
     await until(async () => (await seenDoc(`user-${c.user.uid}`)).exists());
   });
 
-  it('messaging: admin send lands in the outbox', async () => {
+  it('messaging: admin send from a function lands in the outbox', async () => {
+    const { getMessaging, getToken } = await import('@panth977/icebase/messaging');
+    const token = await getToken(getMessaging(app));
     const notify = httpsCallable<{ token: string }, { id: string }>(getFunctions(app), 'notify');
-    const r = await notify({ token: 'device-1' });
+    const r = await notify({ token });
     expect(r.data.id).toMatch(/^projects\/demo-icebase\/messages\//);
     const out = (await (await fetch(`${emu.url}/__/icebase/messaging/outbox`, { headers: { authorization: 'Bearer owner' } })).json()) as { messages: { message: { token: string } }[] };
-    expect(out.messages.at(-1)?.message.token).toBe('device-1');
+    expect(out.messages.at(-1)?.message.token).toBe(token);
+    // Like FCM: a token this server never issued is refused.
+    await expect(notify({ token: 'device-1' })).rejects.toMatchObject({ code: 'functions/not-found' });
   });
 
   it('declared endpoints: callable and HTTP, input and output checked on both sides', async () => {

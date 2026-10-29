@@ -23,8 +23,10 @@ const HELP = `icebase <command>
                                 Copy the server's data between SQLite and Postgres, either way (server stopped).
                                 SRC/DST: sqlite:DIR, postgres://…, or env:NAME (an env var holding either);
                                 --prefix: the Postgres schema prefix (default ICEBASE_DATABASE_PREFIX, else icebase_)
-  deploy --env X [--only a,b]   Deploy rules, indexes, auth providers, functions, hosting for environment X
-                                (--only: firestore, database, storage, auth, functions, hosting, rules, indexes)
+  deploy --env X [--only a,b]   Deploy rules, indexes, auth providers, functions, hosting, Remote Config
+                                parameters and App Check enforcement for environment X
+                                (--only: firestore, database, storage, auth, functions, hosting, remoteConfig,
+                                appCheck, rules, indexes)
   indexes check [--project tsconfig.json]
                                 Type-check and list queries whose composite index is not declared (exit 1 if any)
   gen dart [--out FILE]         Write the Dart types, schema and config (models, Fields, enums) for the Dart SDK
@@ -87,7 +89,7 @@ async function main(argv: string[]): Promise<number> {
       if (!env) throw new Error('drivers needs --env');
       const { config } = await loadConfig(cwd);
       const w = wiring(config, env);
-      for (const s of SERVICES) log(`${s.padEnd(10)} ${w.modes[s]}`);
+      for (const s of SERVICES) log(`${s.padEnd(13)} ${w.modes[s]}`);
       for (const p of w.problems) log(`error: ${p}`);
       for (const x of w.warnings) log(`warn:  ${x}`);
       return w.problems.length ? 1 : 0;

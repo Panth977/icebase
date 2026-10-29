@@ -14,3 +14,5 @@ export * from './internal/firebase-web-app.ts';
 export * from './drivers/firestore-emulator.ts';
 export * from './drivers/database-emulator.ts';
 export * from './values.ts';
+export * from './internal/remote-config-shared.ts';
+export * from './internal/messaging-shared.ts';

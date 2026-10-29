@@ -25,9 +25,19 @@ export async function callerToken(app: IceBaseApp): Promise<string | null> {
   return auth?.currentUser ? auth.currentUser.getIdToken() : null;
 }
 
+/** The client app's App Check token (initializeAppCheck), for the IceBase server; null without App Check. */
+export async function appCheckToken(app: IceBaseApp): Promise<string | null> {
+  if (app.kind === 'admin') return null;
+  const ac = app._services.get('appCheck') as { _icebaseToken?: (() => Promise<string | null>) | null } | undefined;
+  return ac?._icebaseToken ? ac._icebaseToken().catch(() => null) : null;
+}
+
 export function realtimeOf(app: IceBaseApp): RealtimeClient {
   return service(app, 'emulator:rt', () => {
-    const rt = new RealtimeClient(`${emulatorOrigin(app).replace(/^http/, 'ws')}${app.options.emulator?.socketPath ?? '/v1/rt'}`, () => callerToken(app));
+    const rt = new RealtimeClient(`${emulatorOrigin(app).replace(/^http/, 'ws')}${app.options.emulator?.socketPath ?? '/v1/rt'}`, () => callerToken(app), async () => {
+      const t = await appCheckToken(app);
+      return t ? { appCheck: t } : {};
+    });
     app._onDelete.push(() => rt.close());
     return rt;
   });
@@ -35,9 +45,10 @@ export function realtimeOf(app: IceBaseApp): RealtimeClient {
 
 export async function post<T>(app: IceBaseApp, path: string, body: unknown): Promise<T> {
   const token = await callerToken(app);
+  const appCheck = await appCheckToken(app);
   let res: Response;
   try {
-    res = await emulatorFetch(`${emulatorOrigin(app)}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
+    res = await emulatorFetch(`${emulatorOrigin(app)}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}), ...(appCheck ? { 'x-firebase-appcheck': appCheck } : {}) }, body: JSON.stringify(body) });
   } catch (e) {
     throw new IceBaseError('unavailable', `cannot reach the IceBase emulator at ${emulatorOrigin(app)} (is \`icebase dev\` running?): ${(e as Error).message}`);
   }

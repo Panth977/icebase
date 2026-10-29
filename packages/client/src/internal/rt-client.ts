@@ -16,7 +16,13 @@ export class RealtimeClient {
   constructor(
     private readonly url: string,
     private readonly getToken: () => Promise<string | null>,
+    /** More for the { t: 'auth' } message (the App Check token). */
+    private readonly authExtra: () => Promise<Record<string, unknown>> = async () => ({}),
   ) {}
+
+  private async authMsg(token: string | null): Promise<string> {
+    return JSON.stringify({ t: 'auth', token, ...(await this.authExtra()) });
+  }
 
   private key(s: string, id: string) {
     return `${s}:${id}`;
@@ -32,7 +38,7 @@ export class RealtimeClient {
       ws.onopen = async () => {
         this.retry = 250;
         this.token = await this.getToken();
-        ws.send(JSON.stringify({ t: 'auth', token: this.token }));
+        ws.send(await this.authMsg(this.token));
         for (const h of this.subs.values()) ws.send(JSON.stringify(h.subscribe));
         resolve();
       };
@@ -70,7 +76,7 @@ export class RealtimeClient {
         const t = await this.getToken();
         if (t !== this.token) {
           this.token = t;
-          this.ws?.send(JSON.stringify({ t: 'auth', token: t }));
+          this.ws?.send(await this.authMsg(t));
         }
         if (wasOpen && this.subs.get(this.key(s, id)) === h) this.ws?.send(JSON.stringify(h.subscribe));
       } catch (e) {
@@ -119,7 +125,9 @@ export class RealtimeClient {
       if (t === this.token) return;
       this.token = t;
       if (this.ws?.readyState === 1) {
-        this.ws.send(JSON.stringify({ t: 'auth', token: t }));
+        const msg = await this.authMsg(t);
+        if (this.ws?.readyState !== 1) return;
+        this.ws.send(msg);
         // Listeners resubscribe so the server answers them as the new caller.
         for (const h of this.subs.values()) {
           if (h.subscribe.t !== 'listen') continue;
