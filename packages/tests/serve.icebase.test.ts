@@ -147,6 +147,21 @@ describe('icebase serve', () => {
     const db = await fetch(`${url}/v1/db/get`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: 'rooms', query: null }) });
     expect(db.status).toBe(403);
   });
+  it('a download URL\'s token stands in for the rules (an <img> sends no Authorization)', async () => {
+    const admin = { authorization: `Bearer ${process.env.ICEBASE_ADMIN_TOKEN}` };
+    const o = `${url}/v0/b/demo-icebase.appspot.com/o/${encodeURIComponent('pics/a.txt')}`;
+    expect((await fetch(`${url}/v0/b/demo-icebase.appspot.com/o?name=pics%2Fa.txt`, { method: 'POST', headers: { ...admin, 'content-type': 'text/plain' }, body: 'pixels' })).status).toBe(200);
+    const { downloadTokens } = (await (await fetch(o, { headers: admin })).json()) as { downloadTokens: string };
+    expect(downloadTokens).toBeTruthy();
+    // No rules file: without the token nobody but the admin reads it …
+    expect((await fetch(`${o}?alt=media`)).status).toBe(403);
+    expect((await fetch(`${o}?alt=media&token=wrong`)).status).toBe(403);
+    expect((await fetch(o)).status).toBe(403);
+    // … with it, anyone holding the URL does, as on Firebase.
+    const img = await fetch(`${o}?alt=media&token=${downloadTokens}`);
+    expect(img.status).toBe(200);
+    expect(await img.text()).toBe('pixels');
+  });
   it('a resumable upload behind a proxy continues at the address the caller used, not the server\'s own', async () => {
     const start = (headers: Record<string, string>) =>
       fetch(`${url}/v0/b/demo-icebase.appspot.com/o?name=up%2Fa.txt`, {

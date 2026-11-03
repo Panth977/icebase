@@ -365,11 +365,15 @@ export async function storageService(ctx: EmulatorContext): Promise<Service> {
         const cur = await getMeta(bucket, name);
         if (req.method === 'GET') {
           if (!cur) return notFound(name);
-          await allow(caller, 'get', bucket, name, cur, null);
           if (url.searchParams.get('alt') === 'media') {
-            // A download URL's token stands in for rules, as in Firebase.
+            // A download URL's token stands in for rules, as in Firebase: an <img src> carries no
+            // Authorization header, so with a matching token the rules are not asked at all.
+            const token = url.searchParams.get('token');
+            const tokens = cur.downloadTokens ? cur.downloadTokens.split(',') : [];
+            if (!(token && tokens.includes(token))) await allow(caller, 'get', bucket, name, cur, null);
             return media(cur, req);
           }
+          await allow(caller, 'get', bucket, name, cur, null);
           return json(v0(cur));
         }
         if (req.method === 'PATCH') {
