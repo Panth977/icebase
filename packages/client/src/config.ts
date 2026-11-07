@@ -63,6 +63,23 @@ export interface CustomAuthConfig {
   };
   phone?: { sender: PhoneSender | 'handler'; codeLength?: number };
   google?: { clientIdEnv: string; clientSecretEnv: string };
+  /**
+   * The look of IceBase's sign-in emails and pages (approval, reset, verify): logo (an https PNG —
+   * email drops SVG), colours, fonts. Unset: IceBase's plain default.
+   */
+  brand?: {
+    logoUrl?: string;
+    logoHeight?: number;
+    accent?: string;
+    onAccent?: string;
+    background?: string;
+    card?: string;
+    ink?: string;
+    muted?: string;
+    font?: string;
+    headingFont?: string;
+    fontCssUrl?: string;
+  };
   security?: {
     /** Realtime Database instance + root path for challenges, counters, blocks. */
     store?: { database?: string; path?: string };

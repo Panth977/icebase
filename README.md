@@ -31,6 +31,8 @@ const snap = await getDocs(q);           // snap.docs[0].data() is typed from th
   SQLite, for development and CI), and `vm` (the same server on Postgres, self-hosted).
 - **No auth lock-in.** Custom email, phone and Google sign-in with your own SMTP / WhatsApp /
   SMS / OAuth client, even in firebase mode — the session afterwards is a normal Firebase one.
+  `auth.custom.brand` (logo, colours, fonts) puts its emails and its approval / reset pages in your
+  app's look.
 - **Set a project up from code.** `@panth977/icebase-cli/manage` creates databases and buckets, deploys
   indexes and rules, enables sign-in providers, deploys hosting and connects domains.
 

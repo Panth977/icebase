@@ -15,14 +15,14 @@ import { readEnv, type AnyConfig, type CustomAuthConfig } from '@panth977/icebas
 import { emailSender, phoneSender, type EmailMessage, type EmailSendFn, type PhoneSendFn } from './internal/custom-auth/senders.ts';
 import { authEndpoint, STORE_DEFAULT_PATH, type AuthErrorCode } from '@panth977/icebase/internal';
 import { memoryStore, rtdbStore, type Store } from './internal/custom-auth/store.ts';
-import { defaultTemplates, esc, page, type Templates } from './internal/custom-auth/templates.ts';
+import { esc, page as basePage, templatesFor, type Templates } from './internal/custom-auth/templates.ts';
 import { Buffer } from 'node:buffer';
 
 export { outbox } from './internal/custom-auth/senders.ts';
 export type { EmailMessage, PhoneMessage, EmailSendFn, PhoneSendFn } from './internal/custom-auth/senders.ts';
 export type { Store } from './internal/custom-auth/store.ts';
 export { memoryStore } from './internal/custom-auth/store.ts';
-export type { Templates, TemplateVars } from './internal/custom-auth/templates.ts';
+export type { Brand, Templates, TemplateVars } from './internal/custom-auth/templates.ts';
 export { authEndpoint } from '@panth977/icebase/internal';
 
 /** Your own email sender (config: email.sender = 'handler'). */
@@ -136,7 +136,9 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
   const blockMs = (sec.blockMinutes ?? 5) * 60_000;
   const site = custom.site ?? config.name;
   const now = opts.now ?? Date.now;
-  const T: Templates = { ...defaultTemplates, ...opts.templates };
+  // config.auth.custom.brand: the default messages and IceBase's own pages in the app's look.
+  const T: Templates = { ...templatesFor(custom.brand), ...opts.templates };
+  const page = (title: string, body: string, script = '') => basePage(title, body, script, custom.brand);
   const endpoint = authEndpoint(config, env, opts.app);
   const selfOrigin = (() => {
     try {
