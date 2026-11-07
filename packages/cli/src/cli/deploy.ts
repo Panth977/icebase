@@ -111,7 +111,12 @@ export async function buildFunctions(config: AnyConfig, env: string, root: strin
   const srcPkg = sourceDir && existsSync(join(sourceDir, 'package.json')) ? (JSON.parse(readFileSync(join(sourceDir, 'package.json'), 'utf8')) as { main?: string; dependencies?: Record<string, string> }) : {};
   const entryFile = sourceDir ? resolve(sourceDir, srcPkg.main ?? 'src/index.ts') : null;
   const configFile = ['icebase.config.ts', 'icebase.config.mts', 'icebase.config.js'].map((f) => resolve(root, f)).find(existsSync)!;
+  // config.functions.region for every function, set before any of them is defined: a module of its
+  // own, imported first (ES modules evaluate their imports in order).
+  const region = fnCfg?.region;
+  if (region) writeFileSync(join(out, '_region.ts'), `import { setGlobalOptions } from 'firebase-functions/v2';\nsetGlobalOptions({ region: ${JSON.stringify(region)} });\n`);
   const lines = [
+    ...(region ? [`import './_region.ts';`] : []),
     ...(entryFile ? [`export * from ${JSON.stringify(entryFile)};`] : []),
     ...(custom
       ? [

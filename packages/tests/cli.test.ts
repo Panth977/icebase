@@ -177,6 +177,21 @@ describe('deploy helpers', () => {
     }
   }, 120_000);
 
+  it('the bundle puts every function in config.functions.region, set before any function is defined', async () => {
+    const dir = mkdtempSync(join(TMP, 'region-'));
+    mkdirSync(join(dir, 'fns', 'src'), { recursive: true });
+    writeFileSync(join(dir, 'fns', 'src', 'index.ts'), "import { onRequest } from 'firebase-functions/v2/https';\nexport const hello = onRequest((_q, r) => { r.send('hi'); });\n");
+    writeFileSync(join(dir, 'icebase.config.ts'), "export default {};\n");
+    const cfg = defineConfig({ name: 'r', schema: defineSchema({}), functions: { source: 'fns', region: 'asia-south1' }, firebase: { projectId: 'demo-r' }, environments: { prod: { mode: 'firebase' } } });
+    const out = await buildFunctions(cfg, 'prod', dir, () => {});
+    const index = readFileSync(join(out!, 'index.js'), 'utf8');
+    const set = index.indexOf('setGlobalOptions({ region: "asia-south1" })');
+    expect(set).toBeGreaterThan(-1);
+    expect(set).toBeLessThan(index.indexOf('onRequest('));
+    const { hello } = (await import(join(out!, 'index.js'))) as { hello: { __endpoint: { region: string[] } } };
+    expect(hello.__endpoint.region).toEqual(['asia-south1']);
+  }, 120_000);
+
   it('functionsDeps: the project\'s SDK versions, else the CLI\'s peers, else its dependencies (JSR), else a default; IceBase never installed', () => {
     const src = { nodemailer: '^6', '@panth977/icebase': '0.6.2', '@jsr/panth977__icebase-server': '0.6.2' };
     // Installed from JSR: no peerDependencies at all.
