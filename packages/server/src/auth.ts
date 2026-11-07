@@ -138,6 +138,13 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
   const now = opts.now ?? Date.now;
   const T: Templates = { ...defaultTemplates, ...opts.templates };
   const endpoint = authEndpoint(config, env, opts.app);
+  const selfOrigin = (() => {
+    try {
+      return new URL(endpoint).origin;
+    } catch {
+      return null;
+    }
+  })();
   const actionUrl = custom.email?.actionUrl ?? `${endpoint}/action`;
 
   // Lazily, so a handler can be built at import time in a functions bundle.
@@ -656,7 +663,10 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
       }
       const fn = routes[`${req.method} ${route}`];
       if (!fn) return json({ error: { code: 'auth/argument-error', message: `No route ${req.method} ${route}` } }, 404);
-      if (origin && !cors['access-control-allow-origin']) throw new Fail('auth/unauthorized-domain', `Origin ${origin} is not an authorized domain (config.auth.authorizedDomains).`, 403);
+      // The endpoint's own pages (the approval page, the action page) post back to it from its own
+      // origin — e.g. https://<region>-<project>.cloudfunctions.net — which is never in the app's list.
+      const own = origin === selfOrigin || origin === url.origin;
+      if (origin && !own && !cors['access-control-allow-origin']) throw new Fail('auth/unauthorized-domain', `Origin ${origin} is not an authorized domain (config.auth.authorizedDomains).`, 403);
       const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
       const ip = (req.headers.get('x-forwarded-for') ?? '').split(',')[0]!.trim() || null;
       const ua = req.headers.get('user-agent') ?? '';

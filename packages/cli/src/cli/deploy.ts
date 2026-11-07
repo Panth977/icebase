@@ -141,8 +141,10 @@ export async function buildFunctions(config: AnyConfig, env: string, root: strin
   const entry = join(out, '_entry.ts');
   writeFileSync(entry, lines.join('\n') + '\n');
   // The custom-auth secrets go with the functions (firebase-tools loads .env at deploy).
+  // ICEBASE_ENV too: functions that initialize an app with process.env.ICEBASE_ENV get this
+  // environment on Cloud Functions, as they do under `icebase dev`.
   const secrets = [...(custom ? customAuthEnv(config) : []), ...(hostedConsole ? [consoleTokenEnv(config)] : [])].filter((n) => readEnv(n) !== undefined);
-  if (secrets.length) writeFileSync(join(out, '.env'), secrets.map((n) => `${n}=${JSON.stringify(readEnv(n))}`).join('\n') + '\n', { mode: 0o600 });
+  writeFileSync(join(out, '.env'), [`ICEBASE_ENV=${JSON.stringify(env)}`, ...secrets.map((n) => `${n}=${JSON.stringify(readEnv(n))}`)].join('\n') + '\n', { mode: 0o600 });
   const ownPkg = JSON.parse(readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url).href), 'utf8')) as PkgDeps;
   const projectPkgFile = join(root, 'package.json');
   const projectPkg = existsSync(projectPkgFile) ? (JSON.parse(readFileSync(projectPkgFile, 'utf8')) as PkgDeps) : {};

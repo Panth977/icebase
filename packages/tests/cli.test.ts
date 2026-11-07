@@ -168,6 +168,8 @@ describe('deploy helpers', () => {
       const out = await buildFunctions(custom, 'prod', dir, () => {});
       const env = readFileSync(join(out!, '.env'), 'utf8');
       expect(env).toContain('CLI_RESEND_KEY="k1"');
+      // The environment goes too: functions reading process.env.ICEBASE_ENV get 'prod' on Cloud Functions.
+      expect(env).toContain('ICEBASE_ENV="prod"');
       expect(env).toContain('CLI_G_SECRET="gs"');
       expect(statSync(join(out!, '.env')).mode & 0o777).toBe(0o600);
       const index = readFileSync(join(out!, 'index.js'), 'utf8');
