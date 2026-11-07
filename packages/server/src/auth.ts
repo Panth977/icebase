@@ -306,9 +306,17 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
   };
   const code = (len: number) => String(randomInt(0, 10 ** len)).padStart(len, '0');
   const minutes = Math.round(ttlMs / 60_000);
+  // Where a sign-in may hand its result: https on an authorized domain, http on this machine only,
+  // or an app's own scheme listed in auth.authorizedSchemes (a native app's callback). The scheme is
+  // checked, not only the host: `evil-app://localhost` must not receive a token.
   const allowedOrigin = (origin: string): boolean => {
     try {
-      const host = new URL(origin).hostname;
+      const u = new URL(origin);
+      const scheme = u.protocol.replace(/:$/, '').toLowerCase();
+      if ((config.auth?.authorizedSchemes ?? []).some((x) => x.toLowerCase() === scheme)) return true;
+      const host = u.hostname;
+      const local = host === 'localhost' || host === '127.0.0.1';
+      if (!(scheme === 'https' || (scheme === 'http' && local))) return false;
       const pid = config.firebase?.projectId;
       const ok = ['localhost', '127.0.0.1', ...(pid ? [`${pid}.web.app`, `${pid}.firebaseapp.com`] : []), ...(config.auth?.authorizedDomains ?? [])];
       return ok.some((d) => host === d || host.endsWith(`.${d}`));

@@ -167,6 +167,8 @@ every service, the functions and `config.hosting`. Function rewrites run in the 
 - **Hosting:** files are cached and compressed (brotli / gzip) with ETags. Hashed assets get
   long cache headers. Rewrites use firebase.json's form, including `{ functionId, region }` and
   `!` globs.
+- **Sign-in return URLs:** Google's `return` (and a `continueUrl`) must be https on an authorized
+  domain, http on localhost, or a scheme listed in `auth.authorizedSchemes` (a native app's callback).
 - **Auth emails:** a `sendAuthEmail({ kind, to, link })` export in the functions source mails
   sign-in, reset, verify and change-email links. The links go straight to the app's
   `continueUrl`.
@@ -258,6 +260,12 @@ Hosting sites and domains, the rules in force, Remote Config (parameters with th
 default, edit and publish values, versions and rollback), Cloud Messaging (send, the outbox, topics and
 tokens) and App Check (enforcement, debug tokens). It opens with `ICEBASE_CONSOLE_TOKEN` (set it in the
 server's environment; the console-only token reaches no data service) or the admin token.
+
+On a Firebase project, `console: { hosted: true }` makes `icebase deploy` add the console too: the
+`icebaseConsole` function behind Hosting's `/__/icebase/console`, acting with the function's service
+account and opened with the same `ICEBASE_CONSOLE_TOKEN` (deployed with the functions; at least 32
+characters, or deploy refuses). Without it, `icebase console --env X` runs it on your machine with
+your Firebase login.
 
 ## Remote Config, Cloud Messaging and App Check
 

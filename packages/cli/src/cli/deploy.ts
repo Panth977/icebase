@@ -6,6 +6,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { initializeAdminApp } from '@panth977/icebase-server/admin';
 import { readEnv, resolveModes, SERVICES, type AnyConfig, type Mode, type Service } from '@panth977/icebase/config';
+import { CONSOLE_TOKEN_MIN, consoleTokenEnv } from '../console/hosted.ts';
 import { manageAppCheck, manageAuth, manageDatabase, manageFirestore, manageHosting, manageRemoteConfig, manageStorage } from '../manage.ts';
 
 export type Target = Service | 'rules' | 'indexes';
@@ -31,6 +32,14 @@ export function wiring(config: AnyConfig, env: string): { modes: Record<Service,
     for (const name of customAuthEnv(config)) if (!readEnv(name)) problems.push(`custom auth: env var ${name} is not set (config.auth.custom needs it at run time)`);
   }
   if (config.auth?.custom && modes.database !== 'firebase' && modes.auth === 'firebase') warnings.push('custom auth keeps its security store in the Realtime Database, which is not in firebase mode here');
+  // The hosted console (config.console.hosted): a function behind Hosting, opened with the console token.
+  if (config.console?.hosted && modes.functions === 'firebase') {
+    const name = consoleTokenEnv(config);
+    const t = readEnv(name);
+    if (!t) problems.push(`console.hosted: env var ${name} is not set (the hosted console opens with it)`);
+    else if (t.length < CONSOLE_TOKEN_MIN) problems.push(`console.hosted: ${name} is shorter than ${CONSOLE_TOKEN_MIN} characters`);
+    if (modes.hosting !== 'firebase') warnings.push('console.hosted: hosting is not in firebase mode, so the console is only at the icebaseConsole function\'s own URL');
+  }
   if (config.appCheck?.enforce?.includes('functions') && modes.functions === 'firebase') warnings.push('appCheck.enforce lists functions: on Firebase, callables enforce App Check with onCall({ enforceAppCheck: true })');
   if (modes.firestore !== modes.auth) warnings.push(`auth is in ${modes.auth} mode and Firestore in ${modes.firestore} mode: rules see the tokens of the auth side only`);
   return { modes, problems, warnings };
@@ -74,7 +83,8 @@ const run = (cmd: string, args: string[], cwd: string, log: Log) =>
 export async function buildFunctions(config: AnyConfig, env: string, root: string, log: Log): Promise<string | null> {
   const fnCfg = config.functions;
   const custom = !!config.auth?.custom;
-  if (!fnCfg && !custom) return null;
+  const hostedConsole = !!config.console?.hosted;
+  if (!fnCfg && !custom && !hostedConsole) return null;
   const out = resolve(root, '.icebase/functions');
   mkdirSync(out, { recursive: true });
   const sourceDir = fnCfg ? resolve(root, fnCfg.source) : null;
@@ -95,11 +105,18 @@ export async function buildFunctions(config: AnyConfig, env: string, root: strin
           `export const icebaseAuthCleanup = __icebaseAuthCleanup(__config, ${JSON.stringify(env)});`,
         ]
       : []),
+    ...(hostedConsole
+      ? [
+          `import { icebaseConsole as __icebaseConsole } from '@panth977/icebase-cli/console';`,
+          ...(custom ? [] : [`import __config from ${JSON.stringify(configFile)};`]),
+          `export const icebaseConsole = __icebaseConsole(__config, ${JSON.stringify(env)});`,
+        ]
+      : []),
   ];
   const entry = join(out, '_entry.ts');
   writeFileSync(entry, lines.join('\n') + '\n');
   // The custom-auth secrets go with the functions (firebase-tools loads .env at deploy).
-  const secrets = custom ? customAuthEnv(config).filter((n) => readEnv(n) !== undefined) : [];
+  const secrets = [...(custom ? customAuthEnv(config) : []), ...(hostedConsole ? [consoleTokenEnv(config)] : [])].filter((n) => readEnv(n) !== undefined);
   if (secrets.length) writeFileSync(join(out, '.env'), secrets.map((n) => `${n}=${JSON.stringify(readEnv(n))}`).join('\n') + '\n', { mode: 0o600 });
   const ownPkg = JSON.parse(readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url).href), 'utf8')) as { version: string; peerDependencies: Record<string, string> };
   const deps: Record<string, string> = {
@@ -124,7 +141,7 @@ export async function buildFunctions(config: AnyConfig, env: string, root: strin
     logLevel: 'warning',
   });
   writeFileSync(join(out, 'package.json'), JSON.stringify({ name: `${config.name}-functions`, private: true, type: 'module', main: 'index.js', engines: { node: (fnCfg?.runtime ?? 'nodejs22').replace('nodejs', '') }, dependencies: deps }, null, 2) + '\n');
-  log(`functions bundled → ${relative(root, out)}/index.js${custom ? ' (+ icebaseAuth, icebaseAuthCleanup)' : ''}`);
+  log(`functions bundled → ${relative(root, out)}/index.js${custom ? ' (+ icebaseAuth, icebaseAuthCleanup)' : ''}${hostedConsole ? ' (+ icebaseConsole)' : ''}`);
   return out;
 }
 

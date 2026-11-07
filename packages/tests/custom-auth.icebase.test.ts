@@ -82,7 +82,7 @@ describe('custom auth · Google with your own OAuth client · emulator mode', ()
     defineConfig({
       name: 'custom-google',
       schema: defineSchema({}),
-      auth: { providers: [], custom: { site: 'Acme', google: { clientIdEnv: 'ICE_TEST_GOOGLE_ID', clientSecretEnv: 'ICE_TEST_GOOGLE_SECRET' } } },
+      auth: { providers: [], authorizedSchemes: ['com.acme.app'], custom: { site: 'Acme', google: { clientIdEnv: 'ICE_TEST_GOOGLE_ID', clientSecretEnv: 'ICE_TEST_GOOGLE_SECRET' } } },
       firebase: { projectId: 'demo-icebase' },
       ...(port ? { emulator: { port } } : {}),
       environments: { local: { mode: 'emulator' } },
@@ -131,5 +131,16 @@ describe('custom auth · Google with your own OAuth client · emulator mode', ()
   it('refuses a return URL outside the authorized domains', async () => {
     const res = await fetch(`${emu.url}/__/icebase/auth/google/start?mode=popup&return=${encodeURIComponent('https://evil.example')}`, { redirect: 'manual' });
     expect(res.status).toBe(403);
+  });
+
+  it('checks the return URL\'s scheme, not only its host: only https, http on this machine, or a listed app scheme', async () => {
+    const start = (back: string) => fetch(`${emu.url}/__/icebase/auth/google/start?mode=redirect&return=${encodeURIComponent(back)}`, { redirect: 'manual' }).then((r) => r.status);
+    // A token handed to whichever app claims a made-up scheme, a script URL, or plain http off this machine.
+    for (const bad of ['evil-app://localhost/cb', 'javascript://localhost/%0aalert(1)', 'data://localhost/x', 'http://demo-icebase.web.app/x', 'ftp://localhost/x', 'com.acme.evil://cb']) {
+      expect(await start(bad), bad).toBe(403);
+    }
+    for (const good of ['http://localhost:5173/app', 'https://demo-icebase.web.app/login', 'com.acme.app://oauth/callback', 'COM.ACME.APP://cb']) {
+      expect(await start(good), good).toBe(302);
+    }
   });
 });

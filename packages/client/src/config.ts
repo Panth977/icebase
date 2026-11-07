@@ -138,6 +138,11 @@ export interface IceBaseConfig<C extends Record<string, AnyCollection>, E extend
   auth?: {
     providers: AuthProviderId[];
     authorizedDomains?: string[];
+    /**
+     * Custom URL schemes a sign-in may return to (a native app's callback, e.g. 'com.acme.app'):
+     * Google's `return` URL. Anything else must be https on an authorized domain (http on localhost).
+     */
+    authorizedSchemes?: string[];
     /** Custom claims, typed (SCH-6): setCustomUserClaims, getIdTokenResult().claims and request.auth.token use them. */
     claims?: K;
     /** Take over sign-in with your own senders and OAuth client (see docs/prd/custom-auth.html). */
@@ -182,6 +187,14 @@ export interface IceBaseConfig<C extends Record<string, AnyCollection>, E extend
     port?: number;
     /** OpenAPI documents the app serves, shown on the API page: a path on the app's site, or a full URL. */
     openapi?: readonly { title: string; path: string }[];
+    /**
+     * Firebase mode: also deploy the console, as the `icebaseConsole` function behind Hosting's
+     * /__/icebase/console. It opens with the token in `tokenEnv` (default ICEBASE_CONSOLE_TOKEN), the
+     * same token the IceBase server's console takes; `icebase deploy` refuses without it.
+     */
+    hosted?: boolean;
+    /** The env var holding the console token (default ICEBASE_CONSOLE_TOKEN). At least 32 characters. */
+    tokenEnv?: string;
   };
   emulator?: { dataDir?: string; port?: number; hostingPort?: number; host?: string; seed?: string; /** Sign ID tokens and refuse unsigned ones (a server others reach). */ signTokens?: boolean; /** Also take the realtime socket on this path (besides /v1/rt) — e.g. the one a proxy already upgrades. */ socketPath?: string };
 
