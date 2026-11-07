@@ -79,6 +79,26 @@ const run = (cmd: string, args: string[], cwd: string, log: Log) =>
     p.on('exit', (code) => (code === 0 ? resolveRun() : reject(new Error(`${cmd} exited with ${code}`))));
   });
 
+type PkgDeps = { peerDependencies?: Record<string, string>; dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+/** The Firebase SDKs every IceBase functions bundle needs, when nothing else names a version. */
+const FIREBASE_SDKS: Record<string, string> = { firebase: '^13.1.0', 'firebase-admin': '^14.5.0', 'firebase-functions': '^7.4.0' };
+
+/**
+ * The functions bundle's dependencies: the functions source's own, plus the Firebase SDKs at the
+ * project's versions (so the bundle runs what the project tested), else the CLI's peer range. The
+ * CLI installed from JSR has no peerDependencies (its package.json lists them as dependencies, or
+ * not at all), so each falls back in turn. IceBase itself is bundled in, never installed.
+ */
+export function functionsDeps(source: Record<string, string>, cli: PkgDeps, project: PkgDeps): Record<string, string> {
+  const deps: Record<string, string> = { ...source };
+  for (const [name, fallback] of Object.entries(FIREBASE_SDKS)) {
+    deps[name] = project.dependencies?.[name] ?? project.devDependencies?.[name] ?? cli.peerDependencies?.[name] ?? cli.dependencies?.[name] ?? fallback;
+  }
+  for (const p of ['@panth977/icebase', '@panth977/icebase-server', '@panth977/icebase-cli']) delete deps[p];
+  for (const n of Object.keys(deps)) if (n.startsWith('@jsr/panth977__icebase')) delete deps[n];
+  return deps;
+}
+
 /** Bundle the functions source (+ the icebaseAuth endpoint) into .icebase/functions for firebase-tools. */
 export async function buildFunctions(config: AnyConfig, env: string, root: string, log: Log): Promise<string | null> {
   const fnCfg = config.functions;
@@ -118,14 +138,10 @@ export async function buildFunctions(config: AnyConfig, env: string, root: strin
   // The custom-auth secrets go with the functions (firebase-tools loads .env at deploy).
   const secrets = [...(custom ? customAuthEnv(config) : []), ...(hostedConsole ? [consoleTokenEnv(config)] : [])].filter((n) => readEnv(n) !== undefined);
   if (secrets.length) writeFileSync(join(out, '.env'), secrets.map((n) => `${n}=${JSON.stringify(readEnv(n))}`).join('\n') + '\n', { mode: 0o600 });
-  const ownPkg = JSON.parse(readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url).href), 'utf8')) as { version: string; peerDependencies: Record<string, string> };
-  const deps: Record<string, string> = {
-    ...srcPkg.dependencies,
-    firebase: ownPkg.peerDependencies['firebase']!,
-    'firebase-admin': ownPkg.peerDependencies['firebase-admin']!,
-    'firebase-functions': ownPkg.peerDependencies['firebase-functions']!,
-  };
-  for (const p of ['@panth977/icebase', '@panth977/icebase-server', '@panth977/icebase-cli']) delete deps[p];
+  const ownPkg = JSON.parse(readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url).href), 'utf8')) as PkgDeps;
+  const projectPkgFile = join(root, 'package.json');
+  const projectPkg = existsSync(projectPkgFile) ? (JSON.parse(readFileSync(projectPkgFile, 'utf8')) as PkgDeps) : {};
+  const deps = functionsDeps(srcPkg.dependencies ?? {}, ownPkg, projectPkg);
   const { build } = await import('esbuild');
   await build({
     entryPoints: [entry],

@@ -256,6 +256,11 @@ export interface AuthManager {
   getConfig(): Promise<unknown>;
 }
 
+/** The authorized domains to set: the given ones plus localhost and the project's own two, once each. */
+export function withFirebaseDomains(projectId: string, domains: readonly string[]): string[] {
+  return [...new Set(['localhost', `${projectId}.firebaseapp.com`, `${projectId}.web.app`, ...domains])];
+}
+
 export function manageAuth(app: IceBaseApp): AuthManager {
   const mode = adminOnly(app, 'manageAuth', 'auth');
   const fromConfig = (): ProviderSettings => {
@@ -329,7 +334,8 @@ export function manageAuth(app: IceBaseApp): AuthManager {
       }
     },
     async setAuthorizedDomains(domains) {
-      await g.call('PATCH', `${cfgUrl}?updateMask=authorizedDomains`, { authorizedDomains: domains });
+      // The project's own domains stay: without them Firebase's auth handler and Hosting stop working.
+      await g.call('PATCH', `${cfgUrl}?updateMask=authorizedDomains`, { authorizedDomains: withFirebaseDomains(g.projectId, domains) });
     },
     getConfig: () => g.call('GET', cfgUrl),
   };

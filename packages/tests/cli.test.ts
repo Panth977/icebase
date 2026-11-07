@@ -8,7 +8,8 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { defineConfig, senders } from '@panth977/icebase/config';
 import { defineSchema } from '@panth977/icebase/schema';
 import { hostingVersionConfig } from '@panth977/icebase-cli/manage';
-import { buildFunctions, customAuthEnv, wiring } from '../cli/src/cli/deploy.ts';
+import { buildFunctions, customAuthEnv, functionsDeps, wiring } from '../cli/src/cli/deploy.ts';
+import { withFirebaseDomains } from '../cli/src/manage.ts';
 
 const CLI = resolve(import.meta.dirname, '../cli/dist/cli/index.js');
 // Inside the repository, so a project's imports of @panth977/icebase resolve to the workspace packages.
@@ -175,6 +176,19 @@ describe('deploy helpers', () => {
       for (const k of ['CLI_RESEND_KEY', 'CLI_TW_SID', 'CLI_TW_TOKEN', 'CLI_G_ID', 'CLI_G_SECRET']) delete process.env[k];
     }
   }, 120_000);
+
+  it('functionsDeps: the project\'s SDK versions, else the CLI\'s peers, else its dependencies (JSR), else a default; IceBase never installed', () => {
+    const src = { nodemailer: '^6', '@panth977/icebase': '0.6.2', '@jsr/panth977__icebase-server': '0.6.2' };
+    // Installed from JSR: no peerDependencies at all.
+    const jsr = { dependencies: { 'firebase-admin': '^14.5.0' } };
+    const d = functionsDeps(src, jsr, {});
+    expect(d).toEqual({ nodemailer: '^6', firebase: '^13.1.0', 'firebase-admin': '^14.5.0', 'firebase-functions': '^7.4.0' });
+    expect(functionsDeps({}, { peerDependencies: { firebase: '^13.9.0' } }, { devDependencies: { 'firebase-functions': '^7.9.0' } })).toMatchObject({ firebase: '^13.9.0', 'firebase-functions': '^7.9.0' });
+  });
+
+  it('withFirebaseDomains keeps localhost and the project\'s own domains', () => {
+    expect(withFirebaseDomains('p1', ['acme.com', 'p1.web.app'])).toEqual(['localhost', 'p1.firebaseapp.com', 'p1.web.app', 'acme.com']);
+  });
 
   it('Hosting gets the /__/icebase/auth/** rewrite to icebaseAuth before the SPA fallback', () => {
     const v = hostingVersionConfig(custom.hosting!, 'asia-south1', true);
