@@ -10,6 +10,8 @@ import { defineSchema } from '@panth977/icebase/schema';
 import { hostingVersionConfig } from '@panth977/icebase-cli/manage';
 import { buildFunctions, customAuthEnv, functionsDeps, wiring } from '../cli/src/cli/deploy.ts';
 import { withFirebaseDomains } from '../cli/src/manage.ts';
+import { genDart } from '../cli/src/cli/gen-dart.ts';
+import { collection, f as ff } from '@panth977/icebase/schema';
 
 const CLI = resolve(import.meta.dirname, '../cli/dist/cli/index.js');
 // Inside the repository, so a project's imports of @panth977/icebase resolve to the workspace packages.
@@ -193,6 +195,19 @@ describe('deploy helpers', () => {
     const { hello } = (await import(join(out!, 'index.js'))) as { hello: { __endpoint: { region: string[] } } };
     expect(hello.__endpoint.region).toEqual(['asia-south1']);
   }, 120_000);
+
+  it('gen dart: a nullable field is always sent (null when null); only an optional one may be left out', () => {
+    const cfg = defineConfig({
+      name: 'g',
+      schema: defineSchema({ things: collection('things', { fields: { a: ff.nullable(ff.string()), b: ff.optional(ff.string()), c: ff.string(), d: ff.nullable(ff.map({ x: ff.number() })) }, indexes: [] }) }),
+      environments: { local: { mode: 'emulator' } },
+    });
+    const dart = genDart(cfg);
+    expect(dart).toContain("'a': a,");
+    expect(dart).toContain("if (b != null) 'b': b!,");
+    expect(dart).toContain("'c': c,");
+    expect(dart).toContain("'d': d == null ? null : d!.toMap(),");
+  });
 
   it('functionsDeps: the project\'s SDK versions, else the CLI\'s peers, else its dependencies (JSR), else a default; IceBase never installed', () => {
     const src = { nodemailer: '^6', '@panth977/icebase': '0.6.2', '@jsr/panth977__icebase-server': '0.6.2' };

@@ -115,7 +115,10 @@ function toExpr(def: FieldDef, v: string): string {
 function modelClass(ctx: Ctx, cls: string, fields: FieldMap): void {
   if (ctx.made.has(cls)) return;
   ctx.made.add(cls);
-  const entries = Object.entries(fields).map(([key, f]) => ({ key, prop: camel(key), def: f.def, optional: f.optional || !!f.nullable, type: dartType(ctx, f.def, `${cls}${pascal(key)}`) }));
+  // `optional`: the key may be missing; `nullable`: the key is there and may be null. Dart has one
+  // `?` for both, but the wire must keep them apart: a nullable field that is not optional is
+  // always sent (as null when null) — leaving it out fails the schema ("expected …, got missing").
+  const entries = Object.entries(fields).map(([key, f]) => ({ key, prop: camel(key), def: f.def, optional: f.optional || !!f.nullable, omit: !!f.optional, type: dartType(ctx, f.def, `${cls}${pascal(key)}`) }));
   const lines = [`class ${cls} implements IceModel {`];
   for (const e of entries) lines.push(`  final ${e.type}${e.optional && !e.type.endsWith('?') ? '?' : ''} ${e.prop};`);
   lines.push('', `  const ${cls}({${entries.map((e) => `${e.optional ? '' : 'required '}this.${e.prop}`).join(', ')}});`, '');
@@ -123,7 +126,13 @@ function modelClass(ctx: Ctx, cls: string, fields: FieldMap): void {
   for (const e of entries) lines.push(`        ${e.prop}: ${e.optional ? `m[${str(e.key)}] == null ? null : ` : ''}${fromExpr(ctx, e.def, `${cls}${pascal(e.key)}`, `m[${str(e.key)}]`)},`);
   lines.push('      );', '');
   lines.push('  @override', '  Map<String, Object?> toMap() => {');
-  for (const e of entries) lines.push(`        ${e.optional ? `if (${e.prop} != null) ` : ''}${str(e.key)}: ${toExpr(e.def, e.optional ? `${e.prop}!` : e.prop)},`);
+  for (const e of entries) {
+    if (e.omit) lines.push(`        if (${e.prop} != null) ${str(e.key)}: ${toExpr(e.def, `${e.prop}!`)},`);
+    else if (e.optional) {
+      const conv = toExpr(e.def, `${e.prop}!`);
+      lines.push(`        ${str(e.key)}: ${conv === `${e.prop}!` ? e.prop : `${e.prop} == null ? null : ${conv}`},`);
+    } else lines.push(`        ${str(e.key)}: ${toExpr(e.def, e.prop)},`);
+  }
   lines.push('      };', '}', '');
   ctx.out.push(lines.join('\n'));
 }
