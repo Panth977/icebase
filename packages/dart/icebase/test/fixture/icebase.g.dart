@@ -178,8 +178,45 @@ class ProductByIdInput implements IceModel {
 abstract final class Products {
   static const def = CollectionDef(
     'products',
-    fields: {'name': StringField(), 'priceCents': NumberField(integer: true, min: 0), 'category': EnumField(['shoes', 'shirts', 'bags']), 'tags': ArrayField(StringField()), 'stock': NumberField(integer: true), 'active': BooleanField(), 'updatedAt': TimestampField(optional: true), 'dims': MapField({'w': NumberField(), 'h': NumberField()}, optional: true), 'rating.avg': NumberField(optional: true)},
-    indexes: [IndexDef([IndexField(['category'])]), IndexDef([IndexField(['stock'])]), IndexDef([IndexField(['active'])]), IndexDef([IndexField(['tags'])]), IndexDef([IndexField(['dims', 'w'])]), IndexDef([IndexField(['rating.avg'])]), IndexDef([IndexField(['category']), IndexField(['priceCents'])]), IndexDef([IndexField(['tags'], 'contains'), IndexField(['priceCents'], 'desc')])],
+    fields: {
+      'name': StringField(),
+      'priceCents': NumberField(integer: true, min: 0),
+      'category': EnumField(['shoes', 'shirts', 'bags']),
+      'tags': ArrayField(StringField()),
+      'stock': NumberField(integer: true),
+      'active': BooleanField(),
+      'updatedAt': TimestampField(optional: true),
+      'dims': MapField({'w': NumberField(), 'h': NumberField()}, optional: true),
+      'rating.avg': NumberField(optional: true)
+    },
+    indexes: [
+      IndexDef([
+        IndexField(['category'])
+      ]),
+      IndexDef([
+        IndexField(['stock'])
+      ]),
+      IndexDef([
+        IndexField(['active'])
+      ]),
+      IndexDef([
+        IndexField(['tags'])
+      ]),
+      IndexDef([
+        IndexField(['dims', 'w'])
+      ]),
+      IndexDef([
+        IndexField(['rating.avg'])
+      ]),
+      IndexDef([
+        IndexField(['category']),
+        IndexField(['priceCents'])
+      ]),
+      IndexDef([
+        IndexField(['tags'], 'contains'),
+        IndexField(['priceCents'], 'desc')
+      ])
+    ],
   );
   static final type = CollectionType<Product>(def, fromMap: Product.fromMap, toMap: (v) => v.toMap());
   static const name = Field<Product, String>(['name']);
@@ -200,8 +237,16 @@ abstract final class Products {
 abstract final class Orders {
   static const def = CollectionDef(
     'users/{uid}/orders',
-    fields: {'product': RefField('products'), 'qty': NumberField(integer: true, min: 1), 'status': EnumField(['pending', 'paid'])},
-    indexes: [IndexDef([IndexField(['status'])])],
+    fields: {
+      'product': RefField('products'),
+      'qty': NumberField(integer: true, min: 1),
+      'status': EnumField(['pending', 'paid'])
+    },
+    indexes: [
+      IndexDef([
+        IndexField(['status'])
+      ])
+    ],
     group: true,
   );
   static final type = CollectionType<Order>(def, fromMap: Order.fromMap, toMap: (v) => v.toMap());
@@ -233,17 +278,29 @@ abstract final class Api {
     toInput: (v) => v.toMap(),
     fromOutput: (v) => AddNumbersOutput.fromMap((v as Map).cast<String, Object?>()),
   );
+
   /// productById — GET /products/{id}
   static final productById = ApiEndpoint<ProductByIdInput, Product>(
     'productById',
     method: 'GET',
     path: '/products/{id}',
     input: MapField({'id': StringField()}),
-    output: MapField({'name': StringField(), 'priceCents': NumberField(integer: true, min: 0), 'category': EnumField(['shoes', 'shirts', 'bags']), 'tags': ArrayField(StringField()), 'stock': NumberField(integer: true), 'active': BooleanField(), 'updatedAt': TimestampField(optional: true), 'dims': MapField({'w': NumberField(), 'h': NumberField()}, optional: true), 'rating.avg': NumberField(optional: true)}),
+    output: MapField({
+      'name': StringField(),
+      'priceCents': NumberField(integer: true, min: 0),
+      'category': EnumField(['shoes', 'shirts', 'bags']),
+      'tags': ArrayField(StringField()),
+      'stock': NumberField(integer: true),
+      'active': BooleanField(),
+      'updatedAt': TimestampField(optional: true),
+      'dims': MapField({'w': NumberField(), 'h': NumberField()}, optional: true),
+      'rating.avg': NumberField(optional: true)
+    }),
     auth: 'none',
     toInput: (v) => v.toMap(),
     fromOutput: (v) => Product.fromMap((v as Map).cast<String, Object?>()),
   );
+
   /// tagCount (callable)
   static final tagCount = ApiEndpoint<List<String>, int>(
     'tagCount',
