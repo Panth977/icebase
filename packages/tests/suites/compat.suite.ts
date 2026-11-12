@@ -149,5 +149,16 @@ export function compatSuite(name: string, make: (tag: string) => Promise<IceBase
       await bw.close();
       expect((await db.collection(`boards/${ns}-4/tickets`).listDocuments()).length).toBe(6);
     });
+
+    it('the driver lists document ids, also of documents that only hold subcollections (listDocumentIds)', async () => {
+      await db.collection(`boards/${ns}-0/tickets`).doc('t1').set({ title: 'orphan', at: Timestamp.now() });
+      const d = (db as unknown as { _driver: { listDocumentIds(p: string, o?: { limit?: number; after?: string }): Promise<{ id: string; exists: boolean }[]> } })._driver;
+      const ids = (await d.listDocumentIds('boards', { after: ns, limit: 500 })).filter((x) => x.id.startsWith(`${ns}-`));
+      expect(ids[0]).toEqual({ id: `${ns}-0`, exists: false });
+      expect(ids.length).toBeGreaterThan(3);
+      expect(ids.slice(1).every((x) => x.exists)).toBe(true);
+      expect(await d.listDocumentIds('boards', { after: `${ns}-0`, limit: 1 })).toEqual([ids[1]]);
+      expect(await d.listDocumentIds(`boards/${ns}-0/tickets`)).toEqual([{ id: 't1', exists: true }]);
+    });
   });
 }

@@ -8,7 +8,8 @@
   import FieldTree from '../components/FieldTree.svelte';
   import { toast } from '../components/Toasts.svelte';
 
-  type Doc = { id: string; path: string; data: Record<string, unknown> };
+  /** missing: no fields of its own, only subcollections (listed in collections the schema does not declare). */
+  type Doc = { id: string; path: string; data: Record<string, unknown> | null; missing?: boolean };
   type Col = { path: string; id: params; fields: { name: string; type: string }[]; indexes: { code: string }[] };
   type params = string;
 
@@ -28,7 +29,9 @@
   let docsBusy = $state(false);
   let more = $state(false);
   let docFilter = $state('');
-  let doc = $state<{ exists: boolean; data: Record<string, unknown> | null } | null>(null);
+  let doc = $state<{ exists: boolean; data: Record<string, unknown> | null; undeclared?: boolean } | null>(null);
+  /** The collection on screen is not declared: read-only. leadsTo = the declared collections beneath it (an in-between collection). */
+  let undeclared = $state<{ leadsTo: string[] } | null>(null);
   let docErr = $state('');
   let draft = $state<Record<string, unknown> | null>(null);
   let mode = $state<'fields' | 'json'>('fields');
@@ -47,6 +50,8 @@
     const b = path.split('/');
     return a.length === b.length && a.every((s, i) => /^\{.+\}$/.test(s) || s === b[i]);
   }
+  /** The console writes only documents of declared collections. */
+  const readOnly = $derived(!!undeclared || !!doc?.undeclared);
   const dirty = $derived(!!draft && !!doc && JSON.stringify(draft) !== JSON.stringify(doc.data));
 
   api('schema').then((s) => (schema = s)).catch(() => {});
@@ -69,8 +74,9 @@
     docsBusy = true;
     docsErr = '';
     try {
-      const r = await api<{ docs: Doc[] }>('fs.list', { path: colPath, limit: 50, ...(after ? { after } : {}) });
+      const r = await api<{ docs: Doc[]; undeclared?: boolean; leadsTo?: string[] }>('fs.list', { path: colPath, limit: 50, ...(after ? { after } : {}) });
       docs = after ? [...docs, ...r.docs] : r.docs;
+      undeclared = r.undeclared ? { leadsTo: r.leadsTo ?? [] } : null;
       more = r.docs.length === 50;
     } catch (e) {
       docsErr = (e as Error).message;
@@ -82,6 +88,7 @@
     querying = false;
     filters = [];
     docs = [];
+    undeclared = null;
     loadDocs();
   });
 
@@ -92,7 +99,7 @@
     docErr = '';
     subs = [];
     if (!p) return;
-    api<{ exists: boolean; data: Record<string, unknown> | null }>('fs.get', { path: p })
+    api<{ exists: boolean; data: Record<string, unknown> | null; undeclared?: boolean }>('fs.get', { path: p })
       .then((r) => {
         doc = r;
         draft = r.data ? structuredClone($state.snapshot(r.data) as Record<string, unknown>) : {};
@@ -198,7 +205,7 @@
       <div class="ph">
         <h3 class="mono">{colPath.split('/').pop()}</h3>
         <div class="tools">
-          <button class="btn ghost icon sm" class:on={querying} aria-label="Query" title="Query this collection" onclick={() => { querying = !querying; if (!querying) loadDocs(); }}><Icon name="filter" size={14} /></button>
+          {#if !undeclared}<button class="btn ghost icon sm" class:on={querying} aria-label="Query" title="Query this collection" onclick={() => { querying = !querying; if (!querying) loadDocs(); }}><Icon name="filter" size={14} /></button>{/if}
           <button class="btn ghost icon sm" aria-label="Refresh" onclick={() => (querying ? runQuery() : loadDocs())}><Icon name="refresh" size={14} /></button>
         </div>
       </div>
@@ -223,20 +230,24 @@
       {:else}
         <div class="search"><Icon name="search" size={14} /><input placeholder="Filter loaded ids" bind:value={docFilter} /></div>
       {/if}
+      {#if undeclared}
+        <p class="note" title="The console reads it as stored and does not write here">{#if undeclared.leadsTo.length}in-between collection · holds <code>{undeclared.leadsTo.join(', ')}</code> · read-only{:else}not in the schema · read-only{/if}</p>
+      {/if}
       <div class="list">
         {#if docsErr}<div class="pad"><p class="err">{docsErr}</p>{#if /index/i.test(docsErr)}<p class="hint">Declare that index in the schema, then deploy it (setSchema).</p>{/if}</div>{/if}
         {#if queryNote}<p class="muted pad sm-t">{queryNote}</p>{/if}
         {#each shownDocs as d (d.path)}
-          <a class="item doc" class:on={docPath === d.path} href="#/firestore/{d.path}">
+          <a class="item doc" class:on={docPath === d.path} class:ghost={d.missing} href="#/firestore/{d.path}" title={d.missing ? 'This document does not exist itself; it holds subcollections' : undefined}>
             <span class="mono id">{d.id}</span>
-            {#if labelField && typeof d.data?.[labelField] === 'string'}<span class="lbl">{d.data[labelField]}</span>{/if}
+            {#if d.missing}<span class="lbl">no fields · holds subcollections</span>
+            {:else if labelField && typeof d.data?.[labelField] === 'string'}<span class="lbl">{d.data[labelField]}</span>{/if}
           </a>
         {/each}
         {#if !docsBusy && !docs.length && !docsErr}<Empty icon="file" title={querying ? 'Nothing matches' : 'No documents'} />{/if}
         {#if docsBusy}<p class="muted pad">Loading…</p>{/if}
         {#if more && !querying}<button class="btn ghost sm more" onclick={() => loadDocs(docs.at(-1)?.id)}>Load more</button>{/if}
       </div>
-      {#if !querying}
+      {#if !querying && !undeclared}
         <form class="new" onsubmit={(e) => { e.preventDefault(); create(); }}>
           <input class="input sm mono" placeholder="New document id (blank = auto)" bind:value={newId} />
           <button class="btn sm"><Icon name="plus" size={13} />Add</button>
@@ -258,7 +269,9 @@
       <div class="ph">
         <div class="title">
           <h3 class="mono">{docPath.split('/').pop()}</h3>
-          {#if !doc.exists}<span class="pill accent">new</span>{/if}
+          {#if !doc.exists && subs.length}<span class="pill">no fields</span>
+          {:else if !doc.exists && !readOnly}<span class="pill accent">new</span>{/if}
+          {#if readOnly}<span class="pill" title="Not a declared collection: the console only reads it">read-only</span>{/if}
           {#if declared}<span class="pill" title="Writes are checked against this declaration">{declared.path}</span>{/if}
         </div>
         <div class="tools">
@@ -266,16 +279,21 @@
             <button role="tab" aria-selected={mode === 'fields'} class:on={mode === 'fields'} onclick={() => { if (mode === 'json') { try { draft = JSON.parse(json); } catch { toast('Fix the JSON first', true); return; } } mode = 'fields'; }}>Fields</button>
             <button role="tab" aria-selected={mode === 'json'} class:on={mode === 'json'} onclick={() => { json = JSON.stringify(draft, null, 2); mode = 'json'; }}>JSON</button>
           </div>
-          {#if doc.exists}<button class="btn danger sm" onclick={remove}><Icon name="trash" size={13} />Delete</button>{/if}
-          <button class="btn primary sm" disabled={saving || (mode === 'fields' && !dirty && doc.exists)} onclick={save}>{saving ? 'Saving…' : doc.exists ? 'Save' : 'Create'}</button>
+          {#if doc.exists && !readOnly}<button class="btn danger sm" onclick={remove}><Icon name="trash" size={13} />Delete</button>{/if}
+          {#if !readOnly}<button class="btn primary sm" disabled={saving || (mode === 'fields' && !dirty && doc.exists)} onclick={save}>{saving ? 'Saving…' : doc.exists ? 'Save' : 'Create'}</button>{/if}
         </div>
       </div>
       <div class="body">
-        {#if mode === 'fields'}
-          <FieldTree value={draft} edit onchange={(v) => (draft = v as Record<string, unknown>)} onref={(p) => go('firestore', p)} />
+        {#if !doc.exists && subs.length}
+          <p class="ghostnote">This document has no fields of its own; it holds the subcollections below.{#if !readOnly} Add fields and Create to make it a document.{/if}</p>
+        {/if}
+        {#if !doc.exists && readOnly}
+          <!-- nothing to show or edit: only its subcollections -->
+        {:else if mode === 'fields'}
+          <FieldTree value={draft} edit={!readOnly} onchange={(v) => (draft = v as Record<string, unknown>)} onref={(p) => go('firestore', p)} />
           {#if dirty}<p class="hint">Unsaved changes.</p>{/if}
         {:else}
-          <textarea class="code json" spellcheck="false" bind:value={json}></textarea>
+          <textarea class="code json" spellcheck="false" readonly={readOnly} bind:value={json}></textarea>
           <p class="hint">Timestamps are <code>{'{"__ts": "…ISO…"}'}</code>, references <code>{'{"__ref": "col/doc"}'}</code>.</p>
         {/if}
         {#if subs.length}
@@ -312,6 +330,10 @@
   .item:hover { background: var(--hover); }
   .item.on { background: var(--accent-wash); color: var(--accent-ink); }
   .item.doc { justify-content: space-between; }
+  .item.ghost { color: var(--ink-3); font-style: italic; }
+  .note { margin: 4px 12px 2px; font-size: 12px; color: var(--ink-3); }
+  .note code { font: 11.5px var(--mono); }
+  .ghostnote { margin: 0 0 12px; font-size: 13px; color: var(--ink-3); font-style: italic; }
   .id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .lbl { color: var(--ink-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; }
   .pad { padding: 12px; margin: 0; }

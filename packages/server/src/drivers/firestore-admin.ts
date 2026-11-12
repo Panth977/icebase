@@ -157,6 +157,16 @@ export function createAdminDriver(db: Firestore, h: DriverHelpers): FirestoreDri
     terminate: () => ndb.terminate(),
     getAll: (paths) => guard(paths.length ? ndb.getAll(...paths.map((p) => ndb.doc(p))).then((ss) => ss.map(raw)) : Promise.resolve([])),
     listCollections: (docPath) => guard((docPath ? ndb.doc(docPath).listCollections() : ndb.listCollections()).then((cs) => cs.map((c) => c.id))),
+    listDocumentIds: (path, opts) =>
+      guard(
+        (async () => {
+          // listDocuments() also names missing documents that hold subcollections; getAll says which exist.
+          const after = opts?.after ?? '';
+          const refs = (await ndb.collection(path).listDocuments()).filter((r) => r.id > after).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).slice(0, opts?.limit ?? 100);
+          const snaps = refs.length ? await ndb.getAll(...refs) : [];
+          return refs.map((r, i) => ({ id: r.id, exists: !!snaps[i]?.exists }));
+        })(),
+      ),
     fromNative: (s) => raw(s as admin.DocumentSnapshot),
     recursiveDelete: (path) => guard(ndb.recursiveDelete(path.split('/').length % 2 ? ndb.collection(path) : ndb.doc(path))),
   };

@@ -229,6 +229,9 @@ function firestoreDatabase(ctx: EmulatorContext, dbId: string, engine: Firestore
         case 'listCollections':
           if (!caller.admin) throw new IceBaseError('permission-denied', 'listCollections is admin only');
           return json({ ids: await engine.listCollections((b.path as string | null) ?? null) });
+        case 'listDocumentIds':
+          if (!caller.admin) throw new IceBaseError('permission-denied', 'listDocumentIds is admin only');
+          return json({ docs: await engine.listDocumentIds(String(b.path ?? ''), { ...(typeof b.limit === 'number' ? { limit: b.limit } : {}), ...(typeof b.after === 'string' ? { after: b.after } : {}) }) });
         case 'recursiveDelete':
           if (!caller.admin) throw new IceBaseError('permission-denied', 'recursiveDelete is admin only');
           return json({ deleted: await engine.recursiveDelete(b.path as string) });

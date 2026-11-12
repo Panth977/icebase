@@ -568,13 +568,37 @@ export class FirestoreEngine {
     return out;
   }
 
+  /** The collections under a document (or the root) that hold any document, however deep (as Firestore lists them). */
   async listCollections(docPath: string | null): Promise<string[]> {
-    const top = this.pg ? `strpos(parent, '/') = 0` : `instr(parent, '/') = 0`;
-    const rows = docPath
-      ? await this.store.all<{ coll: string; parent: string }>(`SELECT DISTINCT coll, parent FROM docs WHERE parent LIKE ? ESCAPE '\\'`, `${docPath.replace(/[\\%_]/g, '\\$&')}/%`)
-      : await this.store.all<{ coll: string; parent: string }>(`SELECT DISTINCT coll, parent FROM docs WHERE ${top}`);
-    const want = docPath ? docPath.split('/').length + 1 : 1;
-    return [...new Set(rows.filter((r) => r.parent.split('/').length === want).map((r) => r.coll))].sort();
+    const doc = docPath ? docPath.replace(/^\/+|\/+$/g, '') : '';
+    const start = doc ? [...doc].length + 2 : 1; // SQL counts characters, not UTF-16 units
+    const rest = start > 1 ? `substr(path, ${start})` : 'path';
+    const seg = this.pg ? `(split_part(${rest}, '/', 1) COLLATE "C")` : `substr(${rest}, 1, instr(${rest}, '/') - 1)`;
+    const rows = doc
+      ? await this.store.all<{ coll: string }>(`SELECT DISTINCT ${seg} AS coll FROM docs WHERE path LIKE ? ESCAPE '\\' AND substr(path, 1, ${start - 1}) = ?`, `${doc.replace(/[\\%_]/g, '\\$&')}/%`, `${doc}/`)
+      : await this.store.all<{ coll: string }>(`SELECT DISTINCT ${seg} AS coll FROM docs`);
+    return [...new Set(rows.map((r) => r.coll).filter(Boolean))].sort();
+  }
+
+  /**
+   * The ids of a collection's documents, sorted, `limit` after `after`: every id some stored path
+   * runs through, so documents that do not exist but hold subcollections are there (exists: false).
+   */
+  async listDocumentIds(collectionPath: string, opts: { limit?: number; after?: string } = {}): Promise<{ id: string; exists: boolean }[]> {
+    const coll = collectionPath.replace(/^\/+|\/+$/g, '');
+    if (!coll || coll.split('/').length % 2 === 0) throw new IceBaseError('invalid-argument', `listDocumentIds('${collectionPath}'): a collection path has an odd number of segments`);
+    const limit = Math.max(1, Math.min(Number(opts.limit ?? 100), 1000));
+    const start = [...coll].length + 2; // SQL counts characters, not UTF-16 units
+    const rest = `substr(path, ${start})`;
+    const id = this.pg ? `(split_part(${rest}, '/', 1) COLLATE "C")` : `(CASE instr(${rest}, '/') WHEN 0 THEN ${rest} ELSE substr(${rest}, 1, instr(${rest}, '/') - 1) END)`;
+    const own = this.pg ? `bool_or(strpos(${rest}, '/') = 0)` : `MAX(instr(${rest}, '/') = 0)`;
+    const rows = await this.store.all<{ id: string; own: unknown }>(
+      `SELECT ${id} AS id, ${own} AS own FROM docs WHERE path LIKE ? ESCAPE '\\' AND substr(path, 1, ${start - 1}) = ? GROUP BY 1 HAVING ${id} > ? ORDER BY 1 LIMIT ${limit}`,
+      `${coll.replace(/[\\%_]/g, '\\$&')}/%`,
+      `${coll}/`,
+      opts.after ?? '',
+    );
+    return rows.map((r) => ({ id: r.id, exists: r.own === true || Number(r.own) === 1 }));
   }
 
   async recursiveDelete(path: string): Promise<number> {

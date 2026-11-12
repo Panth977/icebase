@@ -14,6 +14,7 @@ import { allParameters, paramToString, templateValueType } from '@panth977/iceba
 import type { RemoteConfigParams } from '@panth977/icebase/config';
 import { getAuthSecurity } from '@panth977/icebase-server/auth';
 import { getFirestore, GeoPoint, Timestamp, type Firestore } from '@panth977/icebase-server/compat';
+import type { FirestoreDriver } from '@panth977/icebase/internal';
 import { Buffer } from 'node:buffer';
 import { firestoreIndexesJson } from '../internal/firebase-indexes.ts';
 import { manageAppCheck, manageAuth, manageFirestore, manageHosting, manageRemoteConfig, manageStorage } from '../manage.ts';
@@ -63,6 +64,13 @@ const str = (v: unknown, what: string): string => {
   return v;
 };
 const segs = (p: string) => p.split('/').filter(Boolean);
+/** Driver data's references ({ type: 'document', path }) as toJson's { __ref }. */
+const fromDriverRefs = (v: unknown): unknown => {
+  if (v === null || typeof v !== 'object' || v instanceof Uint8Array || v instanceof Timestamp || v instanceof GeoPoint) return v;
+  if ((v as { type?: unknown }).type === 'document' && typeof (v as { path?: unknown }).path === 'string') return { path: (v as { path: string }).path, id: (v as { path: string }).path.split('/').pop(), firestore: null };
+  if (Array.isArray(v)) return v.map(fromDriverRefs);
+  return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, fromDriverRefs(x)]));
+};
 
 // ─── the operations ────────────────────────────────────────────────────────────
 
@@ -72,6 +80,25 @@ export function consoleApi(o: ConsoleOptions): (op: string, b: Record<string, un
   let fs: Firestore | null = null;
   const db = () => (fs ??= getFirestore(app));
   const custom = config.auth?.custom;
+  const rawDriver = (): FirestoreDriver => (db() as unknown as { _driver: FirestoreDriver })._driver;
+  /** A document the console may write: one in a declared collection. */
+  const writable = (p: string): string => {
+    const path = segs(p).join('/');
+    const coll = path.split('/').slice(0, -1).join('/');
+    if (!matchCollectionPath(config.schema, coll)) throw new IceBaseError('invalid-argument', `'${coll}' is not a collection in the schema, so the console only reads it; declare it with collection(…) to edit its documents`, { reason: 'unknown-collection', collection: coll });
+    return path;
+  };
+  /** The declared collections an undeclared collection path leads to (an in-between collection), e.g. auth → auth/{section}/emails. */
+  const leadsTo = (p: string): string[] => {
+    const a = p.split('/');
+    return Object.values(config.schema.collections)
+      .map((c) => (c as { path: string }).path)
+      .filter((t) => {
+        const b = t.split('/');
+        return b.length > a.length && a.every((s, i) => /^\{.+\}$/.test(b[i]!) || s === b[i]);
+      })
+      .sort();
+  };
 
   const ops: Record<string, (b: Record<string, unknown>) => Promise<unknown> | unknown> = {
     // ── project ──
@@ -134,25 +161,55 @@ export function consoleApi(o: ConsoleOptions): (op: string, b: Record<string, un
       return { ids: cols.map((c) => c.id).sort() };
     },
     async 'fs.list'(b) {
-      const path = str(b.path, 'path');
+      const path = segs(str(b.path, 'path')).join('/');
       const limit = Math.min(Number(b.limit ?? 50), 500);
-      let q = db().collection(path).orderBy('__name__').limit(limit);
-      if (typeof b.after === 'string' && b.after) q = q.startAfter(b.after);
-      const snap = await q.get();
+      const after = typeof b.after === 'string' && b.after ? b.after : null;
       const declared = matchCollectionPath(config.schema, path);
-      return { declared: declared?.collection.path ?? null, docs: snap.docs.map((d) => ({ id: d.id, path: d.ref.path, data: toJson(d.data()) })) };
+      if (declared) {
+        let q = db().collection(path).orderBy('__name__').limit(limit);
+        if (after) q = q.startAfter(after);
+        const snap = await q.get();
+        return { declared: declared.collection.path, docs: snap.docs.map((d) => ({ id: d.id, path: d.ref.path, data: toJson(d.data()) })) };
+      }
+      // Not declared: read it as it is stored, like the Firebase console. Every document id, also
+      // those that only hold subcollections (missing), and the data of the ones that exist; no
+      // schema check, and the console does not write here.
+      const driver = rawDriver();
+      if (!driver.listDocumentIds) throw new IceBaseError('unimplemented', `'${path}' is not in the schema, and this Firestore cannot list it`);
+      const ids = await driver.listDocumentIds(path, { limit, ...(after ? { after } : {}) });
+      const present = ids.filter((d) => d.exists).map((d) => db().doc(`${path}/${d.id}`));
+      const snaps = present.length ? await db().getAll(...present) : [];
+      const data = new Map(snaps.map((x) => [x.id, x.exists ? toJson(x.data()) : null]));
+      return {
+        declared: null,
+        undeclared: true,
+        leadsTo: leadsTo(path),
+        docs: ids.map((d) => ({ id: d.id, path: `${path}/${d.id}`, data: data.get(d.id) ?? null, missing: !d.exists || !data.has(d.id) })),
+      };
     },
     async 'fs.get'(b) {
-      const d = await db().doc(str(b.path, 'path')).get();
-      return { exists: d.exists, path: d.ref.path, data: d.exists ? toJson(d.data()) : null };
+      const path = segs(str(b.path, 'path')).join('/');
+      const declared = matchCollectionPath(config.schema, path.split('/').slice(0, -1).join('/'))?.collection.path ?? null;
+      let d: { exists: boolean; data: unknown } | null = null;
+      try {
+        const s = await db().doc(path).get();
+        d = { exists: s.exists, data: s.exists ? toJson(s.data()) : null };
+      } catch (e) {
+        if ((e as IceBaseError).details?.reason !== 'unknown-collection') throw e;
+        // Firestore wrappers that refuse undeclared paths: the raw driver reads anything.
+        const r = await rawDriver().get(path);
+        d = { exists: !!r.data, data: r.data ? toJson(fromDriverRefs(r.data)) : null };
+      }
+      return { exists: d.exists, path, data: d.data, declared, ...(declared ? {} : { undeclared: true }) };
     },
     async 'fs.set'(b) {
       // Through IceBase: the schema checks the document as it checks the app's writes.
-      await db().doc(str(b.path, 'path')).set(fromJson(db(), b.data) as Record<string, unknown>, b.merge ? { merge: true } : {});
+      const path = writable(str(b.path, 'path'));
+      await db().doc(path).set(fromJson(db(), b.data) as Record<string, unknown>, b.merge ? { merge: true } : {});
       return { ok: true };
     },
     async 'fs.delete'(b) {
-      await db().doc(str(b.path, 'path')).delete();
+      await db().doc(writable(str(b.path, 'path'))).delete();
       return { ok: true };
     },
     async 'fs.query'(b) {

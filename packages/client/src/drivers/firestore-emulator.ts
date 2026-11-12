@@ -174,6 +174,7 @@ export function createEmulatorDriver(db: Firestore, h: DriverHelpers): Firestore
     fromNative: (d) => raw(d as WireDoc),
     getAll: async (paths) => (await fsPost<{ docs: WireDoc[] }>('/v1/fs/get', { paths })).docs.map(raw),
     listCollections: async (docPath) => (await fsPost<{ ids: string[] }>('/v1/fs/listCollections', { path: docPath })).ids,
+    listDocumentIds: async (collectionPath, opts) => (await fsPost<{ docs: { id: string; exists: boolean }[] }>('/v1/fs/listDocumentIds', { path: collectionPath, ...(opts?.limit ? { limit: opts.limit } : {}), ...(opts?.after ? { after: opts.after } : {}) })).docs,
     recursiveDelete: async (path) => void (await fsPost('/v1/fs/recursiveDelete', { path })),
   };
 }

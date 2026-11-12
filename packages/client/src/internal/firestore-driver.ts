@@ -74,6 +74,11 @@ export interface FirestoreDriver {
   /** Admin only. */
   getAll?(paths: string[]): Promise<RawDoc[]>;
   listCollections?(docPath: string | null): Promise<string[]>;
+  /**
+   * Admin only: the ids of a collection's documents sorted by id, `limit` at a time after `after`,
+   * including documents that do not exist themselves but hold subcollections (`exists: false`).
+   */
+  listDocumentIds?(collectionPath: string, opts?: { limit?: number; after?: string }): Promise<{ id: string; exists: boolean }[]>;
   recursiveDelete?(path: string): Promise<void>;
   /** Admin only: an SDK snapshot (e.g. from a trigger event) as a RawDoc. */
   fromNative?(snapshot: unknown): RawDoc;
