@@ -33,6 +33,11 @@ const snap = await getDocs(q);           // snap.docs[0].data() is typed from th
   SMS / OAuth client, even in firebase mode — the session afterwards is a normal Firebase one.
   `auth.custom.brand` (logo, colours, fonts) puts its emails and its approval / reset pages in your
   app's look.
+- **Sign in with Apple, your uids, one login site for many apps.** `auth.custom.apple` (web flow
+  and native identity tokens); `newUserUid` / `signInClaims` exports decide a new user's uid and
+  what every token carries; `auth.custom.sso` turns the project's hosted sign-in page into SSO for
+  many apps (authorization code + PKCE, `startSsoSignIn` / `completeSsoSignIn` / `watchSsoSession`,
+  sessions people can see and revoke).
 - **Set a project up from code.** `@panth977/icebase-cli/manage` creates databases and buckets, deploys
   indexes and rules, enables sign-in providers, deploys hosting and connects domains.
 
@@ -336,7 +341,7 @@ on the IceBase server, so an index that works locally works on Firebase.
 serves its site on the same port).
 
 Custom auth's admin side: `getAuthSecurity(app)` (`listAttempts`, `resetLimits`, `unblock`,
-`cleanup`), `linkCustomIdentity` / `unlinkCustomIdentity`, an audit trail of starts, failures,
+`cleanup`, `listSessions`, `revokeSession`), `linkCustomIdentity` / `unlinkCustomIdentity`, an audit trail of starts, failures,
 blocks and sign-ins, cleaned daily by `icebaseAuthCleanup`.
 
 ## Status

@@ -91,6 +91,7 @@ export default defineConfig({
 <tr><td><code>signInWithEmailAndPassword</code> / <code>createUserWithEmailAndPassword</code></td><td colspan="2">Always native Firebase (no email is sent, nothing to take over). Rate limits still apply via the IceBase gateway in emulator mode.</td></tr>
 <tr><td><code>signInWithPhoneNumber(auth, phone, verifier)</code> → <code>confirm(code)</code></td><td>Firebase SMS + reCAPTCHA</td><td>IceBase <code>phone/start</code> sends the code over your WhatsApp/SMS; <code>confirm(code)</code> hits <code>phone/verify</code> → custom token. <code>verifier</code> is optional (IceBase uses its own limits; App Check later).</td></tr>
 <tr><td><code>signInWithPopup / signInWithRedirect(auth, new GoogleAuthProvider())</code></td><td>Firebase Google provider</td><td>IceBase OAuth code flow with your client id; verifies Google's id_token; finds or creates the user (by provider uid, then verified email); custom token</td></tr>
+<tr><td><code>signInWithPopup / signInWithRedirect(auth, new OAuthProvider('apple.com'))</code></td><td>Firebase Apple provider</td><td>IceBase's Sign in with Apple (§7.2)</td></tr>
 <tr><td><code>onAuthStateChanged</code>, <code>getIdToken</code>, <code>getIdTokenResult</code>, <code>signOut</code></td><td colspan="2">Native Firebase in every case — the session after login is a normal Firebase session.</td></tr>
 </table></div>
 
@@ -139,6 +140,67 @@ export const sendPhoneCode = definePhoneSender(async (m) =&gt; {
   <li>Rate limit, attempt cap, TTL and block behave as configured (tests for each), in firebase and emulator mode.</li>
   <li>Secrets never readable by a client (rules tests on the store path).</li>
 </ul></div>
+
+<h2>7. Who a user is, Sign in with Apple, hosted sign-in for many apps (0.7.0)</h2>
+<p class="sub">OCZ-112, approved by Panth 2026-11-12: a hosted login site (one Firebase project) that signs people into many apps. Every piece works in firebase and emulator mode.</p>
+
+<h3>7.1 newUserUid and signInClaims</h3>
+<div class="card"><table>
+<tr><th>Hook</th><th>What it does</th></tr>
+<tr><td><code>newUserUid(identity)</code><br><code>identity: { email?, phone?, google?, apple? }</code></td><td>The uid of a user custom auth is about to create (email, phone, Google, Apple): <code>createUser({ uid, … })</code>. Lookup order stays: identity link → by email / phone → <code>newUserUid</code> → create. If a user with that uid already exists (<code>auth/uid-already-exists</code>, or <code>getUser</code> finds it) it is that user, and the verified email / phone is set on it — for accounts an older system made with a uid derived from the email and no email on the record. Return <code>undefined</code> to let Firebase pick.</td></tr>
+<tr><td><code>signInClaims(user, { method, client?, sid? })</code><br><code>method: 'email' | 'phone' | 'google' | 'apple' | 'sso'</code></td><td>Merged into every custom token custom auth mints (<code>createCustomToken(uid, claims)</code>), so they are in the ID token — e.g. <code>{ role: 'authenticated', email }</code> for Supabase's third-party auth.</td></tr>
+</table></div>
+<pre>// functions source (config.functions.source) — icebase deploy and icebase dev pass these to the handler
+export const newUserUid = ({ email }) =&gt; (email ? uuidv5(email, NAMESPACE) : undefined);
+export const signInClaims = (user) =&gt; ({ role: 'authenticated', email: user.email ?? null });
+// or: createAuthHandler(config, env, { newUserUid, signInClaims }) / icebaseAuth(config, env, { … })</pre>
+
+<h3>7.2 Sign in with Apple</h3>
+<pre>custom: {
+  apple: {
+    clientIdEnv: 'APPLE_SERVICES_ID',   // web flow (Services ID); also an accepted audience
+    teamIdEnv: 'APPLE_TEAM_ID',
+    keyIdEnv: 'APPLE_KEY_ID',
+    privateKeyEnv: 'APPLE_PRIVATE_KEY', // the .p8, PEM (newlines may be escaped as \n)
+    audiences: ['com.acme.app'],        // native bundle ids /apple/token accepts
+  },
+}</pre>
+<div class="card"><table>
+<tr><th>Route</th><th>What happens</th></tr>
+<tr><td><code>GET /apple/start?return=&amp;mode=popup|redirect</code></td><td>The return URL is checked like Google's; state + nonce stored under <code>oauth/</code>; 302 to <code>appleid.apple.com/auth/authorize</code> (<code>response_type=code</code>, <code>response_mode=form_post</code>, <code>scope=name email</code>).</td></tr>
+<tr><td><code>POST /apple/callback</code></td><td>Apple's form post (Origin <code>https://appleid.apple.com</code>, so it skips the origin check). The code is exchanged at <code>/auth/token</code> with <code>client_secret</code> = an ES256 JWT (iss team, sub client id, aud appleid.apple.com, kid, 5 minutes); id_token claims checked (iss, aud, exp, nonce). User: link <code>identities/apple/&lt;sha(sub)&gt;</code> → verified email → <code>newUserUid</code> → create; the name (the <code>user</code> field, first time only) becomes displayName. Delivered like Google: popup <code>postMessage({ icebase: 'apple', token })</code>, redirect <code>#icebase_token=</code>.</td></tr>
+<tr><td><code>POST /apple/token { idToken, name?, nonce? }</code></td><td>A native app's identity token: RS256 signature checked against <code>appleid.apple.com/auth/keys</code> (cached an hour), iss, exp, aud ∈ <code>audiences</code> ∪ {client id} → <code>{ token }</code>.</td></tr>
+</table></div>
+<p>Client: <code>signInWithPopup / signInWithRedirect(auth, new OAuthProvider('apple.com'))</code> go to this flow when <code>auth.custom.apple</code> is set; <code>getRedirectResult</code> picks it up; <code>signInWithAppleIdToken(auth, idToken, name?)</code> for native apps. <code>createAuthHandler({ fetch })</code> replaces the fetch used to reach Google and Apple (tests).</p>
+
+<h3>7.3 Hosted sign-in for many apps (SSO, authorization code + PKCE)</h3>
+<pre>custom: {
+  sso: {
+    loginUrl: 'https://auth.acme.com/',  // /sso/authorize redirects to loginUrl?sso=&lt;request&gt;
+    clients: {
+      shop: { name: 'Acme Shop', redirectUris: ['https://shop.acme.com/sso', 'com.acme.shop://*'], iconUrl: 'https://…/shop.png' },
+    },
+  },
+}</pre>
+<div class="card"><table>
+<tr><th>Route</th><th>What happens</th></tr>
+<tr><td><code>GET /sso/authorize?client_id&amp;redirect_uri&amp;state&amp;code_challenge&amp;code_challenge_method=S256</code></td><td>Unknown client, redirect URI not registered (exact; an entry ending in <code>*</code> by prefix; custom schemes allowed) or no S256 challenge → an HTML error page, never a redirect. Else the request is stored (<code>sso/req/&lt;rid&gt;</code>, challenge TTL) and 302 to <code>loginUrl?sso=&lt;rid&gt;</code>.</td></tr>
+<tr><td><code>POST /sso/request { sso }</code></td><td><code>{ client: { id, name, iconUrl? }, expiresAt }</code> — the hosted page's "Continue to &lt;name&gt;".</td></tr>
+<tr><td><code>POST /sso/grant { sso, idToken }</code></td><td>The hosted page's user (ID token, checkRevoked) → a session <code>sessions/&lt;uid&gt;/&lt;sid&gt;</code> { client, clientName, device, ip, createdAt, lastSeenAt, revoked } → a one-time code (stored as SHA-256 under <code>sso/code/</code>, 5 minutes, single use, bound to client, redirect URI, challenge, uid, sid) → <code>{ redirect: redirect_uri?code=…&amp;state=… }</code>.</td></tr>
+<tr><td><code>POST /sso/deny { sso }</code></td><td><code>{ redirect: redirect_uri?error=access_denied&amp;state=… }</code></td></tr>
+<tr><td><code>POST /sso/token { code, code_verifier, client_id, redirect_uri }</code></td><td>Claimed in a transaction (single use, a wrong verifier burns it too); every binding must match, S256(verifier) = challenge, session not revoked → <code>{ token, uid, sid }</code>, the token carrying <code>signInClaims(user, { method: 'sso', client, sid })</code> + <code>sid</code> + <code>client</code>.</td></tr>
+<tr><td><code>POST /sso/ping { idToken }</code></td><td>The token's <code>sid</code>: live → lastSeenAt, <code>{ ok: true }</code>; revoked, gone, or the account's tokens revoked → <code>{ revoked: true }</code>.</td></tr>
+<tr><td><code>POST /sso/sessions { idToken }</code></td><td>The caller's sessions newest first (<code>current</code> marks the token's own) and <code>apps</code>: one per client with live sessions { client, clientName, iconUrl, sessions (count), lastSeenAt }.</td></tr>
+<tr><td><code>POST /sso/revoke { idToken, sid | client | all }</code></td><td>Marks the caller's matching sessions revoked (revokedAt); <code>all</code> also revokes every refresh token.</td></tr>
+</table></div>
+<p class="note">Every <code>/sso/*</code> POST answers CORS for any origin: no cookies ride on them, the code is protected by PKCE and the rest by the ID token. Every other route keeps the authorized-domain origin rule. Database rules: <code>sessions/$uid/$sid/revoked</code> is readable by <code>$uid</code> (an app may listen for its revocation); the rest of the store stays closed. Admin: <code>getAuthSecurity(app).listSessions(uid)</code>, <code>.revokeSession(uid, sid)</code>; <code>cleanup()</code> also drops expired requests and codes.</p>
+<div class="card"><table>
+<tr><th>Client (<code>@panth977/icebase/auth</code>)</th><th></th></tr>
+<tr><td><code>startSsoSignIn(auth, { clientId, redirectUri, open? })</code></td><td>Verifier + state (kept in localStorage as <code>icebase:sso:&lt;state&gt;</code>), then <code>open(url)</code> or <code>location.assign(url)</code>. <code>ssoAuthorizeUrl(auth, { clientId, redirectUri })</code> only builds <code>{ url, state, verifier }</code>.</td></tr>
+<tr><td><code>completeSsoSignIn(auth, url?, pending?)</code></td><td>On the redirect URI: exchanges the code and signs in; <code>null</code> when the URL is not an SSO return; throws <code>auth/user-cancelled</code> (access_denied) or <code>auth/invalid-sso-state</code>.</td></tr>
+<tr><td><code>watchSsoSession(auth, onRevoked?)</code></td><td>Pings on start, when the page becomes visible and every 10 minutes; once revoked, signs out and calls <code>onRevoked</code>.</td></tr>
+<tr><td>Hosted page: <code>getSsoRequest</code>, <code>grantSsoRequest</code> (→ redirect URL), <code>denySsoRequest</code>, <code>listSsoSessions</code>, <code>revokeSsoSessions(auth, { sid } | { client } | { all: true })</code></td><td></td></tr>
+</table></div>
 </main>
 </body>
 </html>

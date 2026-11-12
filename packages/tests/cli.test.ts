@@ -141,6 +141,7 @@ describe('deploy helpers', () => {
         email: { sender: senders.resend({ apiKeyEnv: 'CLI_RESEND_KEY', from: 'a@b.c' }) },
         phone: { sender: senders.twilio({ accountSidEnv: 'CLI_TW_SID', authTokenEnv: 'CLI_TW_TOKEN', from: '+1' }) },
         google: { clientIdEnv: 'CLI_G_ID', clientSecretEnv: 'CLI_G_SECRET' },
+        apple: { clientIdEnv: 'CLI_A_ID', teamIdEnv: 'CLI_A_TEAM', keyIdEnv: 'CLI_A_KEY', privateKeyEnv: 'CLI_A_P8', audiences: ['com.helpers.app'] },
       },
     },
     hosting: { public: 'public', spa: true },
@@ -149,11 +150,11 @@ describe('deploy helpers', () => {
   });
 
   it('customAuthEnv lists every secret the custom methods name; wiring refuses the missing ones', () => {
-    expect(customAuthEnv(custom).sort()).toEqual(['CLI_G_ID', 'CLI_G_SECRET', 'CLI_RESEND_KEY', 'CLI_TW_SID', 'CLI_TW_TOKEN']);
+    expect(customAuthEnv(custom).sort()).toEqual(['CLI_A_ID', 'CLI_A_KEY', 'CLI_A_P8', 'CLI_A_TEAM', 'CLI_G_ID', 'CLI_G_SECRET', 'CLI_RESEND_KEY', 'CLI_TW_SID', 'CLI_TW_TOKEN']);
     process.env.CLI_RESEND_KEY = 'x';
     try {
       const w = wiring(custom, 'prod');
-      expect(w.problems.filter((p) => p.startsWith('custom auth'))).toHaveLength(4);
+      expect(w.problems.filter((p) => p.startsWith('custom auth'))).toHaveLength(8);
       expect(w.problems.join('\n')).not.toContain('CLI_RESEND_KEY');
     } finally {
       delete process.env.CLI_RESEND_KEY;
@@ -176,6 +177,9 @@ describe('deploy helpers', () => {
       expect(statSync(join(out!, '.env')).mode & 0o777).toBe(0o600);
       const index = readFileSync(join(out!, 'index.js'), 'utf8');
       expect(index).toContain('icebaseAuthCleanup');
+      // The functions source's newUserUid / signInClaims exports reach the handler.
+      const entry = readFileSync(join(out!, '_entry.ts'), 'utf8');
+      expect(entry).toContain("newUserUid: __own['newUserUid'], signInClaims: __own['signInClaims']");
     } finally {
       for (const k of ['CLI_RESEND_KEY', 'CLI_TW_SID', 'CLI_TW_TOKEN', 'CLI_G_ID', 'CLI_G_SECRET']) delete process.env[k];
     }

@@ -33,7 +33,7 @@ export interface FirebaseWebConfig {
   measurementId?: string;
 }
 
-export type AuthProviderId = 'password' | 'anonymous' | 'emailLink' | 'phone' | 'google';
+export type AuthProviderId = 'password' | 'anonymous' | 'emailLink' | 'phone' | 'google' | 'apple';
 
 /** Where a custom-auth message is sent from. Secrets are env-var names. */
 export type EmailSender =
@@ -63,6 +63,33 @@ export interface CustomAuthConfig {
   };
   phone?: { sender: PhoneSender | 'handler'; codeLength?: number };
   google?: { clientIdEnv: string; clientSecretEnv: string };
+  /**
+   * Sign in with Apple, like custom Google: signInWithPopup / signInWithRedirect(auth, new
+   * OAuthProvider('apple.com')) on the web, signInWithAppleIdToken(auth, idToken) from a native app.
+   * Env-var names: the web flow needs all four; native apps only `audiences` (their bundle ids).
+   */
+  apple?: {
+    /** The Services ID (web flow; also accepted as an audience of native identity tokens). */
+    clientIdEnv?: string;
+    teamIdEnv?: string;
+    /** The key id of the Sign in with Apple key. */
+    keyIdEnv?: string;
+    /** The .p8 key, PEM (newlines may be escaped as \n). */
+    privateKeyEnv?: string;
+    /** Bundle ids of native apps whose identity tokens /apple/token accepts. */
+    audiences?: string[];
+  };
+  /**
+   * Hosted sign-in for many apps (OAuth-style authorization code + PKCE): an app sends the person to
+   * <endpoint>/sso/authorize, which redirects to `loginUrl?sso=<request>`; the page signs them in and
+   * grants; the app trades the code for a token (startSsoSignIn / completeSsoSignIn in icebase/auth).
+   */
+  sso?: {
+    /** The hosted sign-in page. */
+    loginUrl: string;
+    /** The apps, by client id. redirectUris match exactly; an entry ending in '*' matches by prefix; custom schemes allowed. */
+    clients: Record<string, { name: string; redirectUris: string[]; iconUrl?: string }>;
+  };
   /**
    * The look of IceBase's sign-in emails and pages (approval, reset, verify): logo (an https PNG —
    * email drops SVG), colours, fonts. Unset: IceBase's plain default.

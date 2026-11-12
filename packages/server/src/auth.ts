@@ -2,14 +2,15 @@
 // (Request → Response) that IceBase deploys as the `icebaseAuth` function in firebase mode
 // and mounts on the IceBase server in emulator mode. Everything a developer would otherwise
 // build by hand: challenges, rate limits, blocks, the approval page, the reset / verify pages,
-// the Google OAuth dance, and minting the Firebase custom token at the end.
+// the Google and Apple OAuth dances, hosted sign-in for many apps (SSO with PKCE), and minting
+// the Firebase custom token at the end.
 //
 // The design follows VardayiniDairy's sign-in (challenge.ts, limits.ts): secrets stored only
 // as SHA-256, compared in constant time, single use, short-lived, attempt-capped; approve and
 // collect are different secrets so somebody reading the mailbox can approve but not sign in.
 
-import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
-import type { Auth as AdminAuthNative, UserRecord } from 'firebase-admin/auth';
+import { createHash, createPrivateKey, createPublicKey, randomBytes, randomInt, sign as cryptoSign, timingSafeEqual, verify as cryptoVerify, type JsonWebKey } from 'node:crypto';
+import type { Auth as AdminAuthNative, CreateRequest, UpdateRequest, UserRecord } from 'firebase-admin/auth';
 import type { IceBaseApp } from '@panth977/icebase/app';
 import { readEnv, type AnyConfig, type CustomAuthConfig } from '@panth977/icebase/config';
 import { emailSender, phoneSender, type EmailMessage, type EmailSendFn, type PhoneSendFn } from './internal/custom-auth/senders.ts';
@@ -31,7 +32,25 @@ export const defineEmailSender = (fn: EmailSendFn): EmailSendFn => fn;
 export const definePhoneSender = (fn: PhoneSendFn): PhoneSendFn => fn;
 
 /** The admin Auth calls custom auth needs (firebase-admin's Auth fits). */
-export type AuthDirectory = Pick<AdminAuthNative, 'getUserByEmail' | 'getUserByPhoneNumber' | 'getUser' | 'createUser' | 'updateUser' | 'createCustomToken' | 'verifyIdToken'>;
+export type AuthDirectory = Pick<AdminAuthNative, 'getUserByEmail' | 'getUserByPhoneNumber' | 'getUser' | 'createUser' | 'updateUser' | 'createCustomToken' | 'verifyIdToken' | 'revokeRefreshTokens'>;
+
+/** Who a new user is, as custom auth proved it: the verified email / phone, or the Google / Apple subject id. */
+export interface NewUserIdentity {
+  email?: string;
+  phone?: string;
+  google?: string;
+  apple?: string;
+}
+
+/** How a custom token is being minted. */
+export type SignInMethod = 'email' | 'phone' | 'google' | 'apple' | 'sso';
+export interface SignInContext {
+  method: SignInMethod;
+  /** SSO: the app (config.auth.custom.sso.clients key) the person is signing into. */
+  client?: string;
+  /** SSO: the session id (also in the token as the `sid` claim). */
+  sid?: string;
+}
 
 export interface AuthHandlerOptions {
   /** An admin app (initializeAdminApp); used for the default directory and store. */
@@ -42,8 +61,35 @@ export interface AuthHandlerOptions {
   store?: Store;
   senders?: { email?: EmailSendFn; phone?: PhoneSendFn };
   templates?: Partial<Templates>;
+  /**
+   * The uid of a user custom auth is about to create (email, phone, Google, Apple) — e.g. one derived
+   * from the email, so people keep the uid an older system gave them. When a user with that uid
+   * already exists, it is that user: the verified email / phone is set on it. undefined: Firebase picks.
+   * The functions source's `newUserUid` export, when deployed by IceBase.
+   */
+  newUserUid?: (identity: NewUserIdentity) => string | undefined | Promise<string | undefined>;
+  /**
+   * Claims merged into every custom token custom auth mints (e.g. { role: 'authenticated', email }).
+   * The functions source's `signInClaims` export, when deployed by IceBase.
+   */
+  signInClaims?: (user: UserRecord, ctx: SignInContext) => Record<string, unknown> | undefined | Promise<Record<string, unknown> | undefined>;
+  /** The fetch used to reach Google and Apple (tests fake it). Default: the global fetch. */
+  fetch?: typeof fetch;
   /** Clock, for tests. */
   now?: () => number;
+}
+
+/** One app session made by SSO sign-in (sessions/<uid>/<sid> in the security store). */
+export interface SsoSession {
+  sid: string;
+  client: string;
+  clientName: string;
+  device: string;
+  ip: string | null;
+  createdAt: number;
+  lastSeenAt: number;
+  revoked: boolean;
+  revokedAt?: number;
 }
 
 type Purpose = 'signIn' | 'passwordReset' | 'verifyEmail';
@@ -116,10 +162,18 @@ export function describeDevice(ua: string): string {
   return `${browser} on ${os}`;
 }
 
-/** Realtime Database rules for the store path: nobody reads or writes it, except one sign-in's status word. */
+/**
+ * Realtime Database rules for the store path: nobody reads or writes it, except one sign-in's status
+ * word, and an SSO session's `revoked` flag for its own user (so an app can listen for its revocation).
+ */
 export function customAuthDatabaseRules(config: AnyConfig): Record<string, unknown> {
   const path = config.auth?.custom?.security?.store?.path ?? STORE_DEFAULT_PATH;
-  const leaf: Record<string, unknown> = { '.read': false, '.write': false, signin: { $id: { '.read': true } } };
+  const leaf: Record<string, unknown> = {
+    '.read': false,
+    '.write': false,
+    signin: { $id: { '.read': true } },
+    sessions: { $uid: { $sid: { revoked: { '.read': 'auth != null && auth.uid == $uid' } } } },
+  };
   return path
     .split('/')
     .filter(Boolean)
@@ -271,6 +325,39 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
   // ── users ──────────────────────────────────────────────────────────────────
 
   const notFound = (e: unknown) => (e as { code?: string }).code === 'auth/user-not-found';
+  const getUserOrNull = async (uid: string): Promise<UserRecord | null> => {
+    try {
+      return await (await directory()).getUser(uid);
+    } catch (e) {
+      if (!notFound(e)) throw e;
+      return null;
+    }
+  };
+  /**
+   * A new user for a proven identity — with the uid opts.newUserUid picks, if it does. That uid may
+   * already be taken by a user made before this sign-in method (an older system's uid derived from
+   * the email, with no email on the record): then it is that user, and what was just proven is set on it.
+   */
+  const createFor = async (identity: NewUserIdentity, props: CreateRequest): Promise<UserRecord> => {
+    const d = await directory();
+    const uid = opts.newUserUid ? await opts.newUserUid(identity) : undefined;
+    if (!uid) return d.createUser(props);
+    let existing = await getUserOrNull(uid);
+    if (!existing) {
+      try {
+        return await d.createUser({ ...props, uid });
+      } catch (e) {
+        if ((e as { code?: string }).code !== 'auth/uid-already-exists') throw e;
+        existing = await d.getUser(uid);
+      }
+    }
+    const patch: UpdateRequest = {};
+    if (props.email && props.emailVerified && (existing.email?.toLowerCase() !== props.email || !existing.emailVerified)) Object.assign(patch, { email: props.email, emailVerified: true });
+    if (props.phoneNumber && existing.phoneNumber !== props.phoneNumber) patch.phoneNumber = props.phoneNumber;
+    if (props.displayName && !existing.displayName) patch.displayName = props.displayName;
+    if (props.photoURL && !existing.photoURL) patch.photoURL = props.photoURL;
+    return Object.keys(patch).length ? d.updateUser(uid, patch) : existing;
+  };
   const userForEmail = async (email: string): Promise<UserRecord> => {
     const d = await directory();
     let u: UserRecord;
@@ -279,7 +366,7 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
       if (!u.emailVerified) u = await d.updateUser(u.uid, { emailVerified: true });
     } catch (e) {
       if (!notFound(e)) throw e;
-      u = await d.createUser({ email, emailVerified: true });
+      u = await createFor({ email }, { email, emailVerified: true });
     }
     return u;
   };
@@ -289,12 +376,41 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
       return await d.getUserByPhoneNumber(phone);
     } catch (e) {
       if (!notFound(e)) throw e;
-      return d.createUser({ phoneNumber: phone });
+      return createFor({ phone }, { phoneNumber: phone });
     }
   };
-  const token = async (u: UserRecord) => {
+  /** The custom token for a user: opts.signInClaims merged in, then `extra` (SSO's sid / client). */
+  const token = async (u: UserRecord, ctx: SignInContext, extra: Record<string, unknown> = {}) => {
     if (u.disabled) throw new Fail('auth/user-disabled', 'This account has been disabled.', 403);
-    return (await directory()).createCustomToken(u.uid);
+    const claims = { ...((opts.signInClaims && (await opts.signInClaims(u, ctx))) || {}), ...extra };
+    return (await directory()).createCustomToken(u.uid, Object.keys(claims).length ? claims : undefined);
+  };
+  /** Google / Apple: identity link → verified email → a new user (newUserUid). */
+  const oauthUser = async (provider: 'google' | 'apple', sub: string, p: { email?: string; emailVerified: boolean; name?: string; picture?: string }): Promise<UserRecord> => {
+    const s = await db();
+    const d = await directory();
+    const link = `${root}/identities/${provider}/${short(sub)}`;
+    const linked = await s.get<string>(link);
+    let user = linked ? await getUserOrNull(linked) : null;
+    const email = p.email?.toLowerCase();
+    if (!user && email && p.emailVerified) {
+      try {
+        user = await d.getUserByEmail(email);
+      } catch (e) {
+        if (!notFound(e)) throw e;
+      }
+    }
+    if (!user) {
+      user = await createFor(
+        { [provider]: sub, ...(email && p.emailVerified ? { email } : {}) },
+        { ...(email ? { email, emailVerified: p.emailVerified } : {}), ...(p.name ? { displayName: p.name } : {}), ...(p.picture ? { photoURL: p.picture } : {}) },
+      );
+    } else if (p.name && !user.displayName) {
+      // Apple sends the name only the first time: keep it when the account has none.
+      user = await d.updateUser(user.uid, { displayName: p.name });
+    }
+    if (linked !== user.uid) await s.set(link, user.uid);
+    return user;
   };
 
   // ── checks on input ────────────────────────────────────────────────────────
@@ -392,14 +508,14 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
       if (c.identifier !== email) throw new Fail('auth/invalid-action-code', 'This link was sent to a different email address.');
       await burn(id);
       await audit(email, 'signed-in', { channel: 'email', ip: c.ip, device: c.device });
-      return { token: await token(await userForEmail(email)) };
+      return { token: await token(await userForEmail(email), { method: 'email' }) };
     },
     async 'POST /email/code'(b) {
       const id = String(b.signinId ?? '');
       const c = await attempt(id, String(b.code ?? ''));
       await burn(id);
       await audit(c.identifier, 'signed-in', { channel: 'email', ip: c.ip, device: c.device });
-      return { token: await token(await userForEmail(c.identifier)) };
+      return { token: await token(await userForEmail(c.identifier), { method: 'email' }) };
     },
     async 'POST /email/collect'(b) {
       const id = String(b.signinId ?? '');
@@ -417,7 +533,7 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
       const claim = await (await db()).transaction<Challenge>(`${root}/challenge/${id}`, (cur) => (cur && !cur.claimed ? { ...cur, claimed: now() } : undefined));
       if (!claim.committed || !claim.value?.claimed) return { state: 'busy' };
       try {
-        const t = await token(await userForEmail(c.identifier));
+        const t = await token(await userForEmail(c.identifier), { method: 'email' });
         await burn(id);
         await audit(c.identifier, 'signed-in', { channel: 'email', ip: c.ip, device: c.device });
         return { state: 'approved', token: t };
@@ -525,11 +641,56 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
       const c = await attempt(id, String(b.code ?? ''));
       await burn(id);
       await audit(c.identifier, 'signed-in', { channel: 'phone', ip: c.ip, device: c.device });
-      return { token: await token(await userForPhone(c.identifier)) };
+      return { token: await token(await userForPhone(c.identifier), { method: 'phone' }) };
+    },
+
+    // Sign in with Apple from a native app: the identity token of Apple's sheet.
+    async 'POST /apple/token'(b) {
+      const claims = await appleIdToken(String(b.idToken ?? ''), typeof b.nonce === 'string' ? b.nonce : undefined);
+      return { token: await token(await appleUser(claims, appleName(b.name)), { method: 'apple' }) };
     },
   };
 
-  // ── Google OAuth (code flow with your own client) ──────────────────────────
+  // ── Google and Apple OAuth (code flow with your own client) ─────────────────
+
+  const http: typeof fetch = (input, init) => (opts.fetch ?? globalThis.fetch)(input, init);
+  type OAuthState = { provider?: 'google' | 'apple'; mode: 'popup' | 'redirect'; back: string; nonce: string; expiresAt: number };
+  const oauthStart = async (provider: 'google' | 'apple', url: URL): Promise<OAuthState & { state: string }> => {
+    const mode = url.searchParams.get('mode') === 'redirect' ? 'redirect' : 'popup';
+    const back = url.searchParams.get('return') ?? '';
+    if (!allowedOrigin(back)) throw new Fail('auth/unauthorized-domain', 'The return URL is not on an authorized domain (config.auth.authorizedDomains).', 403);
+    const state = secret();
+    const st: OAuthState = { provider, mode, back, nonce: secret(), expiresAt: now() + ttlMs };
+    await (await db()).set(`${root}/oauth/${short(state)}`, st);
+    return { ...st, state };
+  };
+  /** The state an OAuth callback carries, used up. */
+  const oauthState = async (provider: 'google' | 'apple', state: string): Promise<OAuthState> => {
+    const s = await db();
+    const st = await s.get<OAuthState>(`${root}/oauth/${short(state)}`);
+    if (!st || st.expiresAt <= now() || (st.provider ?? 'google') !== provider) throw new Fail('auth/invalid-action-code', 'The sign-in took too long. Start again.');
+    await s.remove(`${root}/oauth/${short(state)}`);
+    return st;
+  };
+  /** Hand the result to the page that started: postMessage to the opener (popup) or the return URL's hash (redirect). */
+  const deliver = (provider: 'google' | 'apple', st: OAuthState, payload: { token?: string; error?: { code: string; message: string } }): Response => {
+    if (st.mode === 'redirect') {
+      const u = new URL(st.back);
+      u.hash = payload.token ? `icebase_token=${payload.token}` : `icebase_error=${encodeURIComponent(payload.error!.code)}`;
+      return Response.redirect(u.toString(), 302);
+    }
+    const origin = new URL(st.back).origin;
+    return html(page('Signing in…', '<p>Signing you in…</p>', `try{window.opener.postMessage(${JSON.stringify({ icebase: provider, ...payload })},${JSON.stringify(origin)})}finally{window.close()}`));
+  };
+  const deliverUser = async (provider: 'google' | 'apple', st: OAuthState, user: () => Promise<UserRecord>): Promise<Response> => {
+    try {
+      return deliver(provider, st, { token: await token(await user(), { method: provider }) });
+    } catch (e) {
+      if (!(e instanceof Fail)) console.error('[icebase auth]', e);
+      return deliver(provider, st, { error: { code: e instanceof Fail ? e.code : 'auth/internal-error', message: e instanceof Fail ? e.message : 'Something went wrong. Try again.' } });
+    }
+  };
+  const claimsOf = <T>(jwt: string): T => JSON.parse(Buffer.from(String(jwt).split('.')[1] ?? '', 'base64url').toString()) as T;
 
   const google = () => {
     const g = custom.google;
@@ -540,71 +701,295 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
   };
   const googleStart = async (url: URL): Promise<Response> => {
     const { clientId } = google();
-    const mode = url.searchParams.get('mode') === 'redirect' ? 'redirect' : 'popup';
-    const back = url.searchParams.get('return') ?? '';
-    if (!allowedOrigin(back)) throw new Fail('auth/unauthorized-domain', 'The return URL is not on an authorized domain (config.auth.authorizedDomains).', 403);
-    const state = secret();
-    const nonce = secret();
-    await (await db()).set(`${root}/oauth/${short(state)}`, { mode, back, nonce, expiresAt: now() + ttlMs });
+    const st = await oauthStart('google', url);
     const to = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-    to.search = new URLSearchParams({ client_id: clientId, redirect_uri: `${endpoint}/google/callback`, response_type: 'code', scope: 'openid email profile', state, nonce, prompt: 'select_account' }).toString();
+    to.search = new URLSearchParams({ client_id: clientId, redirect_uri: `${endpoint}/google/callback`, response_type: 'code', scope: 'openid email profile', state: st.state, nonce: st.nonce, prompt: 'select_account' }).toString();
     return Response.redirect(to.toString(), 302);
   };
   const googleCallback = async (url: URL): Promise<Response> => {
-    const state = url.searchParams.get('state') ?? '';
-    const s = await db();
-    const st = await s.get<{ mode: 'popup' | 'redirect'; back: string; nonce: string; expiresAt: number }>(`${root}/oauth/${short(state)}`);
-    if (!st || st.expiresAt <= now()) throw new Fail('auth/invalid-action-code', 'The sign-in took too long. Start again.');
-    await s.remove(`${root}/oauth/${short(state)}`);
-    const deliver = (payload: { token?: string; error?: { code: string; message: string } }) => {
-      if (st.mode === 'redirect') {
-        const u = new URL(st.back);
-        u.hash = payload.token ? `icebase_token=${payload.token}` : `icebase_error=${encodeURIComponent(payload.error!.code)}`;
-        return Response.redirect(u.toString(), 302);
-      }
-      const origin = new URL(st.back).origin;
-      return html(page('Signing in…', '<p>Signing you in…</p>', `try{window.opener.postMessage(${JSON.stringify({ icebase: 'google', ...payload })},${JSON.stringify(origin)})}finally{window.close()}`));
-    };
-    if (url.searchParams.get('error')) return deliver({ error: { code: 'auth/popup-closed-by-user', message: url.searchParams.get('error')! } });
+    const st = await oauthState('google', url.searchParams.get('state') ?? '');
+    if (url.searchParams.get('error')) return deliver('google', st, { error: { code: 'auth/popup-closed-by-user', message: url.searchParams.get('error')! } });
     const { clientId, clientSecret } = google();
-    const res = await fetch('https://oauth2.googleapis.com/token', {
+    const res = await http('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ code: url.searchParams.get('code') ?? '', client_id: clientId, client_secret: clientSecret, redirect_uri: `${endpoint}/google/callback`, grant_type: 'authorization_code' }),
     });
-    if (!res.ok) return deliver({ error: { code: 'auth/internal-error', message: `Google token exchange failed (${res.status})` } });
+    if (!res.ok) return deliver('google', st, { error: { code: 'auth/internal-error', message: `Google token exchange failed (${res.status})` } });
     const { id_token } = (await res.json()) as { id_token?: string };
     // Received straight from Google's token endpoint over TLS (OIDC §3.1.3.7): check the claims, not the signature.
-    const claims = JSON.parse(Buffer.from(String(id_token).split('.')[1] ?? '', 'base64url').toString()) as { iss: string; aud: string; exp: number; nonce?: string; sub: string; email?: string; email_verified?: boolean; name?: string; picture?: string };
+    const claims = claimsOf<{ iss: string; aud: string; exp: number; nonce?: string; sub: string; email?: string; email_verified?: boolean; name?: string; picture?: string }>(String(id_token));
     if (!['https://accounts.google.com', 'accounts.google.com'].includes(claims.iss) || claims.aud !== clientId || claims.exp * 1000 < now() || claims.nonce !== st.nonce) {
-      return deliver({ error: { code: 'auth/invalid-id-token', message: 'Google sign-in could not be verified.' } });
+      return deliver('google', st, { error: { code: 'auth/invalid-id-token', message: 'Google sign-in could not be verified.' } });
     }
-    const d = await directory();
-    const link = `${root}/identities/google/${short(claims.sub)}`;
-    let uid = await s.get<string>(link);
-    let user: UserRecord | null = null;
-    if (uid) {
-      try {
-        user = await d.getUser(uid);
-      } catch (e) {
-        if (!notFound(e)) throw e;
-      }
+    return deliverUser('google', st, () => oauthUser('google', claims.sub, { ...(claims.email ? { email: claims.email } : {}), emailVerified: !!claims.email_verified, ...(claims.name ? { name: claims.name } : {}), ...(claims.picture ? { picture: claims.picture } : {}) }));
+  };
+
+  // Sign in with Apple. The web flow (a Services ID) posts its answer back as a form; native apps
+  // send the identity token of Apple's own sheet to /apple/token, which checks its signature.
+  const APPLE = 'https://appleid.apple.com';
+  const apple = () => {
+    const a = custom.apple;
+    if (!a) throw new Fail('auth/operation-not-allowed', 'custom Apple sign-in is not configured (config.auth.custom.apple)', 400);
+    const env = (name?: string) => (name ? readEnv(name) : undefined);
+    // A .p8 key kept in one env line has its newlines escaped.
+    return { clientId: env(a.clientIdEnv), teamId: env(a.teamIdEnv), keyId: env(a.keyIdEnv), privateKey: env(a.privateKeyEnv)?.replace(/\\n/g, '\n'), audiences: a.audiences ?? [] };
+  };
+  const appleWeb = () => {
+    const a = apple();
+    if (!a.clientId || !a.teamId || !a.keyId || !a.privateKey) throw new Fail('auth/operation-not-allowed', 'Sign in with Apple on the web needs config.auth.custom.apple clientIdEnv, teamIdEnv, keyIdEnv and privateKeyEnv (and their env vars)', 400);
+    return a as { clientId: string; teamId: string; keyId: string; privateKey: string; audiences: string[] };
+  };
+  /** Apple's client_secret: an ES256 JWT signed with the team's key, good for 5 minutes. */
+  const appleClientSecret = (a: { clientId: string; teamId: string; keyId: string; privateKey: string }) => {
+    const t = Math.floor(now() / 1000);
+    const part = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const input = `${part({ alg: 'ES256', kid: a.keyId })}.${part({ iss: a.teamId, iat: t, exp: t + 300, aud: APPLE, sub: a.clientId })}`;
+    const sig = cryptoSign('sha256', Buffer.from(input), { key: createPrivateKey(a.privateKey), dsaEncoding: 'ieee-p1363' });
+    return `${input}.${sig.toString('base64url')}`;
+  };
+  // Apple's public keys, kept an hour; an unknown kid fetches them again (at most once a minute).
+  let appleKeys: { at: number; keys: (JsonWebKey & { kid?: string })[] } | null = null;
+  const appleKey = async (kid: string) => {
+    const find = () => appleKeys?.keys.find((k) => k.kid === kid);
+    if (!appleKeys || now() - appleKeys.at > 3_600_000 || (!find() && now() - appleKeys.at > 60_000)) {
+      const res = await http(`${APPLE}/auth/keys`);
+      if (!res.ok) throw new Fail('auth/internal-error', `Could not fetch Apple's keys (${res.status})`, 502);
+      appleKeys = { at: now(), keys: ((await res.json()) as { keys: (JsonWebKey & { kid?: string })[] }).keys ?? [] };
     }
-    if (!user && claims.email && claims.email_verified) {
-      try {
-        user = await d.getUserByEmail(claims.email.toLowerCase());
-      } catch (e) {
-        if (!notFound(e)) throw e;
-      }
+    return find();
+  };
+  type AppleClaims = { iss: string; aud: string; exp: number; sub: string; nonce?: string; email?: string; email_verified?: boolean | string };
+  const appleName = (raw: unknown): string | undefined => {
+    if (typeof raw === 'string') return raw.trim().slice(0, 200) || undefined;
+    const n = raw as { firstName?: string; lastName?: string; givenName?: string; familyName?: string } | null;
+    const full = [n?.firstName ?? n?.givenName, n?.lastName ?? n?.familyName].filter(Boolean).join(' ').trim();
+    return full ? full.slice(0, 200) : undefined;
+  };
+  const appleUser = (c: AppleClaims, name?: string) => oauthUser('apple', c.sub, { ...(c.email ? { email: c.email } : {}), emailVerified: c.email_verified === true || c.email_verified === 'true', ...(name ? { name } : {}) });
+
+  const appleStart = async (url: URL): Promise<Response> => {
+    const { clientId } = appleWeb();
+    const st = await oauthStart('apple', url);
+    const to = new URL(`${APPLE}/auth/authorize`);
+    to.search = new URLSearchParams({ client_id: clientId, redirect_uri: `${endpoint}/apple/callback`, response_type: 'code', response_mode: 'form_post', scope: 'name email', state: st.state, nonce: st.nonce }).toString();
+    return Response.redirect(to.toString(), 302);
+  };
+  /** Apple posts the answer as a form (response_mode=form_post), from https://appleid.apple.com. */
+  const appleCallback = async (req: Request): Promise<Response> => {
+    const form = new URLSearchParams(await req.text());
+    const st = await oauthState('apple', form.get('state') ?? '');
+    if (form.get('error')) return deliver('apple', st, { error: { code: 'auth/popup-closed-by-user', message: form.get('error')! } });
+    const a = appleWeb();
+    const res = await http(`${APPLE}/auth/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: a.clientId, client_secret: appleClientSecret(a), code: form.get('code') ?? '', grant_type: 'authorization_code', redirect_uri: `${endpoint}/apple/callback` }),
+    });
+    if (!res.ok) return deliver('apple', st, { error: { code: 'auth/internal-error', message: `Apple token exchange failed (${res.status})` } });
+    const { id_token } = (await res.json()) as { id_token?: string };
+    // Straight from Apple's token endpoint over TLS: the claims are checked, as for Google.
+    const claims = claimsOf<AppleClaims>(String(id_token));
+    if (claims.iss !== APPLE || claims.aud !== a.clientId || claims.exp * 1000 < now() || claims.nonce !== st.nonce) {
+      return deliver('apple', st, { error: { code: 'auth/invalid-id-token', message: 'Apple sign-in could not be verified.' } });
     }
-    if (!user) user = await d.createUser({ ...(claims.email ? { email: claims.email.toLowerCase(), emailVerified: !!claims.email_verified } : {}), ...(claims.name ? { displayName: claims.name } : {}), ...(claims.picture ? { photoURL: claims.picture } : {}) });
-    if (uid !== user.uid) await s.set(link, (uid = user.uid));
+    let name: string | undefined;
     try {
-      return deliver({ token: await token(user) });
-    } catch (e) {
-      return deliver({ error: { code: e instanceof Fail ? e.code : 'auth/internal-error', message: (e as Error).message } });
+      name = appleName((JSON.parse(form.get('user') ?? 'null') as { name?: unknown } | null)?.name);
+    } catch {
+      name = undefined;
+    }
+    return deliverUser('apple', st, () => appleUser(claims, name));
+  };
+  /** A native app's identity token (Apple's sheet): its signature is checked against Apple's keys. */
+  const appleIdToken = async (raw: string, nonce?: string): Promise<AppleClaims> => {
+    const a = apple();
+    const bad = (why: string) => new Fail('auth/invalid-id-token', `The Apple identity token is not valid: ${why}.`, 401);
+    const [h, p, sig] = raw.split('.');
+    if (!h || !p || !sig) throw bad('not a JWT');
+    let header: { alg?: string; kid?: string };
+    let claims: AppleClaims;
+    try {
+      header = JSON.parse(Buffer.from(h, 'base64url').toString()) as { alg?: string; kid?: string };
+      claims = JSON.parse(Buffer.from(p, 'base64url').toString()) as AppleClaims;
+    } catch {
+      throw bad('not a JWT');
+    }
+    if (header.alg !== 'RS256' || !header.kid) throw bad('not signed with RS256');
+    const jwk = await appleKey(header.kid);
+    if (!jwk) throw bad('signed with an unknown key');
+    if (!cryptoVerify('RSA-SHA256', Buffer.from(`${h}.${p}`), createPublicKey({ key: jwk, format: 'jwk' }), Buffer.from(sig, 'base64url'))) throw bad('wrong signature');
+    if (claims.iss !== APPLE) throw bad('wrong issuer');
+    if (!claims.exp || claims.exp * 1000 < now()) throw bad('expired');
+    const audiences = [...a.audiences, ...(a.clientId ? [a.clientId] : [])];
+    if (!audiences.includes(claims.aud)) throw bad(`audience ${claims.aud} is not in config.auth.custom.apple.audiences`);
+    // The app may pass the raw nonce it gave Apple (Apple's sheet carries it, often SHA-256 hashed).
+    if (nonce !== undefined && claims.nonce !== nonce && claims.nonce !== sha(nonce)) throw bad('wrong nonce');
+    if (!claims.sub) throw bad('no subject');
+    return claims;
+  };
+
+  // ── SSO: one hosted sign-in page for many apps (authorization code + PKCE) ──
+  //
+  // An app sends the person to /sso/authorize; the hosted page (sso.loginUrl) signs them in with
+  // any method, shows "Continue to <app>" and grants; the app gets a one-time code on its own
+  // redirect URI and trades it, with the PKCE verifier only it has, for a custom token at /sso/token.
+  // Each grant is a session (sessions/<uid>/<sid>) the person can see and revoke from the hosted page.
+
+  const CODE_MS = 5 * 60_000;
+  type SsoClient = { name: string; redirectUris: string[]; iconUrl?: string };
+  type SsoRequest = { client: string; redirectUri: string; state?: string; challenge: string; expiresAt: number; createdAt: number };
+  type SsoCode = { client: string; redirectUri: string; challenge: string; uid: string; sid: string; expiresAt: number; used?: number };
+  const sso = () => {
+    if (!custom.sso) throw new Fail('auth/operation-not-allowed', 'SSO is not configured (config.auth.custom.sso)', 400);
+    return custom.sso;
+  };
+  const ssoClient = (id: string): SsoClient | undefined => (Object.prototype.hasOwnProperty.call(sso().clients, id) ? sso().clients[id] : undefined);
+  /** Exact match; an entry ending in '*' matches by prefix (custom schemes too). */
+  const redirectAllowed = (c: SsoClient, uri: string) => !!uri && c.redirectUris.some((r) => (r.endsWith('*') ? uri.startsWith(r.slice(0, -1)) : uri === r));
+  const s256 = (verifier: string) => createHash('sha256').update(verifier).digest('base64url');
+  const ssoRequest = async (rid: unknown): Promise<[string, SsoRequest]> => {
+    const id = String(rid ?? '');
+    if (!/^[A-Za-z0-9_-]{10,40}$/.test(id)) throw new Fail('auth/invalid-action-code', 'This sign-in request is not valid.');
+    const r = await (await db()).get<SsoRequest>(`${root}/sso/req/${id}`);
+    if (!r) throw new Fail('auth/invalid-action-code', 'This sign-in request is not valid or was already used.');
+    if (r.expiresAt <= now()) throw new Fail('auth/expired-action-code', 'This sign-in request has expired. Go back to the app and start again.');
+    return [id, r];
+  };
+  const caller = async (idToken: unknown) => {
+    try {
+      return await (await directory()).verifyIdToken(String(idToken ?? ''), true);
+    } catch {
+      throw new Fail('auth/invalid-id-token', 'Sign in again.', 401);
     }
   };
+  const sessionsOf = async (uid: string) => Object.entries((await (await db()).get<Record<string, Omit<SsoSession, 'sid'>>>(`${root}/sessions/${uid}`)) ?? {}).map(([sid, x]) => ({ ...x, sid, revoked: !!x.revoked }) as SsoSession);
+  const ssoAuthorize = (url: URL): Promise<Response> | Response => {
+    const refuse = (why: string) => html(page('Sign-in request not valid', `<h1>This sign-in request is not valid</h1><p>${esc(why)}</p><p class="muted">Go back to the app and try again.</p>`), 400);
+    const cfg = custom.sso;
+    if (!cfg) return refuse('Single sign-on is not set up here.');
+    const q = url.searchParams;
+    const client = ssoClient(q.get('client_id') ?? '');
+    // Never redirect to a URI that is not registered: an error page instead.
+    if (!client) return refuse('Unknown app (client_id).');
+    const redirectUri = q.get('redirect_uri') ?? '';
+    if (!redirectAllowed(client, redirectUri)) return refuse(`The redirect URI is not registered for ${client.name}.`);
+    const challenge = q.get('code_challenge') ?? '';
+    if (q.get('code_challenge_method') !== 'S256' || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) return refuse('A PKCE code_challenge with code_challenge_method=S256 is required.');
+    return (async () => {
+      const rid = randomBytes(15).toString('base64url');
+      const t = now();
+      const state = q.get('state');
+      const r: SsoRequest = { client: q.get('client_id')!, redirectUri, challenge, expiresAt: t + ttlMs, createdAt: t, ...(state ? { state } : {}) };
+      await (await db()).set(`${root}/sso/req/${rid}`, r);
+      return Response.redirect(withParam(cfg.loginUrl, { sso: rid }), 302);
+    })();
+  };
+  Object.assign(routes, {
+    async 'POST /sso/request'(b: Record<string, unknown>) {
+      const [, r] = await ssoRequest(b.sso);
+      const c = ssoClient(r.client);
+      if (!c) throw new Fail('auth/invalid-action-code', 'This app is no longer registered.');
+      return { client: { id: r.client, name: c.name, ...(c.iconUrl ? { iconUrl: c.iconUrl } : {}) }, expiresAt: r.expiresAt };
+    },
+    async 'POST /sso/grant'(b: Record<string, unknown>, ctx: Ctx) {
+      const who = await caller(b.idToken);
+      const [rid, r] = await ssoRequest(b.sso);
+      const c = ssoClient(r.client);
+      if (!c || !redirectAllowed(c, r.redirectUri)) throw new Fail('auth/invalid-action-code', 'This app is no longer registered.');
+      const s = await db();
+      await s.remove(`${root}/sso/req/${rid}`);
+      const user = await (await directory()).getUser(who.uid);
+      if (user.disabled) throw new Fail('auth/user-disabled', 'This account has been disabled.', 403);
+      const t = now();
+      const sid = randomBytes(12).toString('base64url');
+      await s.set(`${root}/sessions/${who.uid}/${sid}`, { client: r.client, clientName: c.name, device: ctx.device, ip: ctx.ip, createdAt: t, lastSeenAt: t, revoked: false });
+      const code = secret();
+      const stored: SsoCode = { client: r.client, redirectUri: r.redirectUri, challenge: r.challenge, uid: who.uid, sid, expiresAt: t + CODE_MS };
+      await s.set(`${root}/sso/code/${sha(code)}`, stored);
+      return { redirect: withParam(r.redirectUri, { code, ...(r.state ? { state: r.state } : {}) }) };
+    },
+    async 'POST /sso/deny'(b: Record<string, unknown>) {
+      const [rid, r] = await ssoRequest(b.sso);
+      await (await db()).remove(`${root}/sso/req/${rid}`);
+      return { redirect: withParam(r.redirectUri, { error: 'access_denied', ...(r.state ? { state: r.state } : {}) }) };
+    },
+    async 'POST /sso/token'(b: Record<string, unknown>) {
+      const invalid = (why: string) => new Fail('auth/invalid-action-code', `The sign-in code is not valid: ${why}.`);
+      const code = String(b.code ?? '');
+      const verifier = String(b.code_verifier ?? '');
+      if (!code || code.length > 100) throw invalid('missing');
+      if (!/^[A-Za-z0-9._~-]{43,128}$/.test(verifier)) throw invalid('bad code_verifier');
+      const s = await db();
+      const path = `${root}/sso/code/${sha(code)}`;
+      // Single use: the first exchange claims the code, whatever comes after is refused.
+      const claim = await s.transaction<SsoCode>(path, (cur) => (cur && !cur.used ? { ...cur, used: now() } : undefined));
+      const c = claim.value;
+      if (!claim.committed || !c?.used) throw invalid('unknown or already used');
+      await s.remove(path);
+      if (c.expiresAt <= now()) throw invalid('expired');
+      if (c.client !== String(b.client_id ?? '') || c.redirectUri !== String(b.redirect_uri ?? '')) throw invalid('issued to another app or redirect URI');
+      const a = Buffer.from(s256(verifier));
+      const e = Buffer.from(c.challenge);
+      if (a.length !== e.length || !timingSafeEqual(a, e)) throw invalid('wrong code_verifier');
+      const session = await s.get<Omit<SsoSession, 'sid'>>(`${root}/sessions/${c.uid}/${c.sid}`);
+      if (!session || session.revoked) throw invalid('the session was revoked');
+      const user = await (await directory()).getUser(c.uid);
+      const t = await token(user, { method: 'sso', client: c.client, sid: c.sid }, { sid: c.sid, client: c.client });
+      await s.update(`${root}/sessions/${c.uid}/${c.sid}`, { lastSeenAt: now() });
+      return { token: t, uid: c.uid, sid: c.sid };
+    },
+    async 'POST /sso/ping'(b: Record<string, unknown>) {
+      let claims: { uid: string; sid?: unknown };
+      try {
+        claims = (await (await directory()).verifyIdToken(String(b.idToken ?? ''), true)) as { uid: string; sid?: unknown };
+      } catch (e) {
+        // Revoked refresh tokens, a disabled or deleted account: this session is over too.
+        if (['auth/id-token-revoked', 'auth/user-disabled', 'auth/user-not-found'].includes((e as { code?: string }).code ?? '')) return { revoked: true };
+        throw new Fail('auth/invalid-id-token', 'Sign in again.', 401);
+      }
+      if (typeof claims.sid !== 'string') throw new Fail('auth/argument-error', 'This session did not come from SSO sign-in (no sid claim).');
+      const path = `${root}/sessions/${claims.uid}/${claims.sid}`;
+      const s = await db();
+      const cur = await s.get<Omit<SsoSession, 'sid'>>(path);
+      if (!cur || cur.revoked) return { revoked: true };
+      await s.update(path, { lastSeenAt: now() });
+      return { ok: true };
+    },
+    async 'POST /sso/sessions'(b: Record<string, unknown>) {
+      const who = await caller(b.idToken);
+      const current = typeof (who as { sid?: unknown }).sid === 'string' ? (who as { sid?: string }).sid : undefined;
+      const sessions = (await sessionsOf(who.uid)).sort((x, y) => y.createdAt - x.createdAt).map((x) => ({ ...x, current: x.sid === current }));
+      const apps = new Map<string, { client: string; clientName: string; iconUrl?: string; sessions: number; lastSeenAt: number }>();
+      for (const x of sessions) {
+        if (x.revoked) continue;
+        const a = apps.get(x.client);
+        if (a) {
+          a.sessions++;
+          a.lastSeenAt = Math.max(a.lastSeenAt, x.lastSeenAt);
+        } else {
+          const icon = custom.sso?.clients[x.client]?.iconUrl;
+          apps.set(x.client, { client: x.client, clientName: x.clientName, ...(icon ? { iconUrl: icon } : {}), sessions: 1, lastSeenAt: x.lastSeenAt });
+        }
+      }
+      return { sessions, apps: [...apps.values()].sort((x, y) => y.lastSeenAt - x.lastSeenAt) };
+    },
+    async 'POST /sso/revoke'(b: Record<string, unknown>) {
+      const who = await caller(b.idToken);
+      const all = b.all === true;
+      if (!all && typeof b.sid !== 'string' && typeof b.client !== 'string') throw new Fail('auth/argument-error', 'Say which sessions: { sid }, { client } or { all: true }.');
+      const s = await db();
+      let revoked = 0;
+      for (const x of await sessionsOf(who.uid)) {
+        if (x.revoked || !(all || x.sid === b.sid || x.client === b.client)) continue;
+        await s.update(`${root}/sessions/${who.uid}/${x.sid}`, { revoked: true, revokedAt: now() });
+        revoked++;
+      }
+      // Everywhere: also every Firebase refresh token (every other sign-in of this account).
+      if (all) await (await directory()).revokeRefreshTokens(who.uid);
+      return { revoked };
+    },
+  });
 
   // ── pages ──────────────────────────────────────────────────────────────────
 
@@ -651,9 +1036,16 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
 
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
-    const route = url.pathname.replace(/^.*?\/(email|phone|reset|verify|google|action)(\/|$)/, '/$1$2').replace(/\/$/, '');
+    const route = url.pathname.replace(/^.*?\/(email|phone|reset|verify|google|apple|sso|action)(\/|$)/, '/$1$2').replace(/\/$/, '');
     const origin = req.headers.get('origin');
-    const cors: Record<string, string> = origin && allowedOrigin(origin) ? { 'access-control-allow-origin': origin, vary: 'origin', 'access-control-allow-headers': 'content-type', 'access-control-allow-methods': 'POST, GET, OPTIONS', 'access-control-max-age': '600' } : {};
+    // /sso/* answers any origin: those calls carry no cookies, the code is bound by PKCE and the rest
+    // by the caller's ID token — and the apps signing in through it are not the login site's domains.
+    const ssoRoute = route.startsWith('/sso/');
+    const cors: Record<string, string> = ssoRoute
+      ? { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type', 'access-control-allow-methods': 'POST, GET, OPTIONS', 'access-control-max-age': '600' }
+      : origin && allowedOrigin(origin)
+        ? { 'access-control-allow-origin': origin, vary: 'origin', 'access-control-allow-headers': 'content-type', 'access-control-allow-methods': 'POST, GET, OPTIONS', 'access-control-max-age': '600' }
+        : {};
     const json = (body: unknown, status = 200, extra: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store', ...cors, ...extra } });
     try {
       if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
@@ -662,13 +1054,17 @@ export function createAuthHandler(config: AnyConfig, env: string, opts: AuthHand
         if (route === '/action') return await actionPage(url);
         if (route === '/google/start') return await googleStart(url);
         if (route === '/google/callback') return await googleCallback(url);
+        if (route === '/apple/start') return await appleStart(url);
+        if (route === '/sso/authorize') return await ssoAuthorize(url);
       }
+      // Apple posts its answer as a form from https://appleid.apple.com: not one of the app's origins.
+      if (req.method === 'POST' && route === '/apple/callback') return await appleCallback(req);
       const fn = routes[`${req.method} ${route}`];
       if (!fn) return json({ error: { code: 'auth/argument-error', message: `No route ${req.method} ${route}` } }, 404);
       // The endpoint's own pages (the approval page, the action page) post back to it from its own
       // origin — e.g. https://<region>-<project>.cloudfunctions.net — which is never in the app's list.
       const own = origin === selfOrigin || origin === url.origin;
-      if (origin && !own && !cors['access-control-allow-origin']) throw new Fail('auth/unauthorized-domain', `Origin ${origin} is not an authorized domain (config.auth.authorizedDomains).`, 403);
+      if (origin && !own && !ssoRoute && !cors['access-control-allow-origin']) throw new Fail('auth/unauthorized-domain', `Origin ${origin} is not an authorized domain (config.auth.authorizedDomains).`, 403);
       const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
       const ip = (req.headers.get('x-forwarded-for') ?? '').split(',')[0]!.trim() || null;
       const ua = req.headers.get('user-agent') ?? '';
@@ -701,11 +1097,15 @@ export interface AuthSecurity {
   listAttempts(identifier: string): Promise<IdentifierActivity>;
   /** Clear its per-identifier rate-limit counters (sends can start again at once). */
   resetLimits(identifier: string): Promise<{ removed: number }>;
-  /** Remove what has expired: challenges, counters, blocks, and audit entries older than security.auditDays (30). */
+  /** Remove what has expired: challenges, counters, blocks, SSO requests and codes, and audit entries older than security.auditDays (30). */
   cleanup(): Promise<{ removed: number }>;
+  /** A user's SSO sessions (one per app sign-in through the hosted page), newest first. */
+  listSessions(uid: string): Promise<SsoSession[]>;
+  /** Revoke one SSO session: its app's next ping (watchSsoSession) signs it out, and its code can no longer be exchanged. */
+  revokeSession(uid: string, sid: string): Promise<{ revoked: boolean }>;
 }
 
-export type CustomIdentity = { email: string } | { phone: string } | { google: string };
+export type CustomIdentity = { email: string } | { phone: string } | { google: string } | { apple: string };
 
 /** An email lower-cased, a phone number without spaces — as the handler keys them. */
 const normalizeIdentifier = (id: string) => (id.includes('@') ? id.trim().toLowerCase() : id.replace(/[\s()-]/g, ''));
@@ -713,13 +1113,13 @@ const normalizeIdentifier = (id: string) => (id.includes('@') ? id.trim().toLowe
 /** The security operations over a store (shared by firebase mode and the IceBase server). */
 export function authSecurityOps(config: AnyConfig, store: Store, directory: () => Promise<AuthDirectory>, now: () => number = Date.now): AuthSecurity & {
   link(uid: string, id: CustomIdentity): Promise<{ uid: string }>;
-  unlink(uid: string, kind: 'email' | 'phone' | 'google'): Promise<{ uid: string }>;
+  unlink(uid: string, kind: 'email' | 'phone' | 'google' | 'apple'): Promise<{ uid: string }>;
 } {
   const sec = config.auth?.custom?.security ?? {};
   const root = (sec.store?.path ?? STORE_DEFAULT_PATH).replace(/^\/|\/$/g, '');
   const auditMs = (sec.auditDays ?? 30) * 86_400_000;
   const map = async <T>(path: string) => (await store.get<Record<string, T>>(path)) ?? {};
-  const googleLinks = async (uid: string) => Object.entries(await map<string>(`${root}/identities/google`)).filter(([, u]) => u === uid).map(([k]) => k);
+  const links = async (provider: 'google' | 'apple', uid: string) => Object.entries(await map<string>(`${root}/identities/${provider}`)).filter(([, u]) => u === uid).map(([k]) => k);
   return {
     async unblock(identifier) {
       const prefix = `${short(normalizeIdentifier(identifier))}_`;
@@ -768,7 +1168,20 @@ export function authSecurityOps(config: AnyConfig, store: Store, directory: () =
       for (const [k, until] of Object.entries(await map<number>(`${root}/blocks`))) if (until <= t) await drop(`${root}/blocks/${k}`);
       for (const [who, entries] of Object.entries(await map<Record<string, AuditEntry>>(`${root}/audit`))) for (const [k, e] of Object.entries(entries ?? {})) if (e.at <= t - auditMs) await drop(`${root}/audit/${who}/${k}`);
       for (const [id, st] of Object.entries(await map<{ expiresAt?: number }>(`${root}/oauth`))) if ((st.expiresAt ?? 0) <= t) await drop(`${root}/oauth/${id}`);
+      for (const kind of ['req', 'code']) for (const [id, x] of Object.entries(await map<{ expiresAt?: number }>(`${root}/sso/${kind}`))) if ((x.expiresAt ?? 0) <= t) await drop(`${root}/sso/${kind}/${id}`);
       return { removed };
+    },
+    async listSessions(uid) {
+      return Object.entries(await map<Omit<SsoSession, 'sid'>>(`${root}/sessions/${uid}`))
+        .map(([sid, x]) => ({ ...x, sid, revoked: !!x.revoked }) as SsoSession)
+        .sort((a, b) => b.createdAt - a.createdAt);
+    },
+    async revokeSession(uid, sid) {
+      const path = `${root}/sessions/${uid}/${sid}`;
+      const cur = await store.get<Omit<SsoSession, 'sid'>>(path);
+      if (!cur) throw new Fail('auth/argument-error', 'No such session.', 404);
+      if (!cur.revoked) await store.update(path, { revoked: true, revokedAt: now() });
+      return { revoked: true };
     },
     async link(uid, id) {
       const d = await directory();
@@ -782,9 +1195,10 @@ export function authSecurityOps(config: AnyConfig, store: Store, directory: () =
         if (!E164.test(phone)) throw new Fail('auth/invalid-phone-number', 'Use the full number with country code, e.g. +919812345678.');
         await d.updateUser(uid, { phoneNumber: phone });
       } else {
-        const path = `${root}/identities/google/${short(String(id.google))}`;
+        const [provider, sub] = 'google' in id ? (['google', id.google] as const) : (['apple', id.apple] as const);
+        const path = `${root}/identities/${provider}/${short(String(sub))}`;
         const cur = await store.get<string>(path);
-        if (cur && cur !== uid) throw new Fail('auth/credential-already-in-use', 'This Google account is already linked to another user.', 409);
+        if (cur && cur !== uid) throw new Fail('auth/credential-already-in-use', `This ${provider === 'google' ? 'Google' : 'Apple'} account is already linked to another user.`, 409);
         await store.set(path, uid);
       }
       return { uid };
@@ -792,8 +1206,9 @@ export function authSecurityOps(config: AnyConfig, store: Store, directory: () =
     async unlink(uid, kind) {
       const d = await directory();
       const u = await d.getUser(uid);
-      const google = await googleLinks(uid);
-      const has = { email: !!u.email, phone: !!u.phoneNumber, google: google.length > 0 };
+      const google = await links('google', uid);
+      const apple = await links('apple', uid);
+      const has = { email: !!u.email, phone: !!u.phoneNumber, google: google.length > 0, apple: apple.length > 0 };
       if (!has[kind]) throw new Fail('auth/no-such-provider', `This account has no ${kind} to remove.`);
       // Never the last one: an account nothing can prove is an account nobody can open again.
       if (Object.entries(has).filter(([k, v]) => v && k !== kind).length === 0) {
@@ -801,7 +1216,7 @@ export function authSecurityOps(config: AnyConfig, store: Store, directory: () =
       }
       if (kind === 'email') throw new Fail('auth/operation-not-allowed', "Firebase Auth cannot remove an account's email; change it with linkCustomIdentity(uid, { email }).");
       if (kind === 'phone') await d.updateUser(uid, { phoneNumber: null as never });
-      else for (const k of google) await store.remove(`${root}/identities/google/${k}`);
+      else for (const k of kind === 'google' ? google : apple) await store.remove(`${root}/identities/${kind}/${k}`);
       return { uid };
     },
   };
@@ -823,7 +1238,7 @@ async function securityOf(app: IceBaseApp) {
   return authSecurityOps(app.config as AnyConfig, await appStore(app.config as AnyConfig, app), async () => getAdminAuth(app) as unknown as AuthDirectory);
 }
 
-/** Custom auth's security store, for an admin (docs/prd/custom-auth.html): unblock, listAttempts, resetLimits, cleanup. */
+/** Custom auth's security store, for an admin (docs/prd/custom-auth.html): unblock, listAttempts, resetLimits, cleanup, listSessions, revokeSession. */
 export function getAuthSecurity(app: IceBaseApp): AuthSecurity {
   const emu = app.modes.auth === 'emulator';
   const call = <T>(op: keyof AuthSecurity, identifier?: string): Promise<T> =>
@@ -833,17 +1248,19 @@ export function getAuthSecurity(app: IceBaseApp): AuthSecurity {
     listAttempts: (identifier) => call('listAttempts', identifier),
     resetLimits: (identifier) => call('resetLimits', identifier),
     cleanup: () => call('cleanup'),
+    listSessions: (uid) => (emu ? onServer(app, 'listSessions', { uid }) : securityOf(app).then((s) => s.listSessions(uid))),
+    revokeSession: (uid, sid) => (emu ? onServer(app, 'revokeSession', { uid, sid }) : securityOf(app).then((s) => s.revokeSession(uid, sid))),
   };
 }
 
-/** Attach a verified identity to an existing account: { email }, { phone } or { google: <Google subject id> }. */
+/** Attach a verified identity to an existing account: { email }, { phone }, { google: <Google subject id> } or { apple: <Apple subject id> }. */
 export async function linkCustomIdentity(app: IceBaseApp, uid: string, identity: CustomIdentity): Promise<{ uid: string }> {
   if (app.modes.auth === 'emulator') return onServer(app, 'link', { uid, identity });
   return (await securityOf(app)).link(uid, identity);
 }
 
 /** Take an identity off an account — never its last one. Firebase Auth cannot remove an email (change it instead). */
-export async function unlinkCustomIdentity(app: IceBaseApp, uid: string, kind: 'email' | 'phone' | 'google'): Promise<{ uid: string }> {
+export async function unlinkCustomIdentity(app: IceBaseApp, uid: string, kind: 'email' | 'phone' | 'google' | 'apple'): Promise<{ uid: string }> {
   if (app.modes.auth === 'emulator') return onServer(app, 'unlink', { uid, kind });
   return (await securityOf(app)).unlink(uid, kind);
 }

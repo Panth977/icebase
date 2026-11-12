@@ -241,7 +241,9 @@ describe('custom auth · firebase mode', () => {
   });
 
   it('generates database rules that hide the store', () => {
-    expect(customAuthDatabaseRules(link.config)).toEqual({ _icebase: { 'auth-link': { '.read': false, '.write': false, signin: { $id: { '.read': true } } } } });
+    expect(customAuthDatabaseRules(link.config)).toEqual({
+      _icebase: { 'auth-link': { '.read': false, '.write': false, signin: { $id: { '.read': true } }, sessions: { $uid: { $sid: { revoked: { '.read': 'auth != null && auth.uid == $uid' } } } } } },
+    });
   });
 });
 

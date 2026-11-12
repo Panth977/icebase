@@ -45,7 +45,7 @@ export function wiring(config: AnyConfig, env: string): { modes: Record<Service,
   return { modes, problems, warnings };
 }
 
-/** The env vars config.auth.custom names: its senders' secrets and the Google OAuth client. */
+/** The env vars config.auth.custom names: its senders' secrets, the Google OAuth client and the Sign in with Apple key. */
 export function customAuthEnv(config: AnyConfig): string[] {
   const c = config.auth?.custom;
   if (!c) return [];
@@ -60,6 +60,7 @@ export function customAuthEnv(config: AnyConfig): string[] {
     names.add(c.google.clientIdEnv);
     names.add(c.google.clientSecretEnv);
   }
+  if (c.apple) for (const n of [c.apple.clientIdEnv, c.apple.teamIdEnv, c.apple.keyIdEnv, c.apple.privateKeyEnv]) if (n) names.add(n);
   return [...names];
 }
 
@@ -123,9 +124,10 @@ export async function buildFunctions(config: AnyConfig, env: string, root: strin
           `import { icebaseAuth as __icebaseAuth, icebaseAuthCleanup as __icebaseAuthCleanup } from '@panth977/icebase-server/functions';`,
           `import __config from ${JSON.stringify(configFile)};`,
           ...(entryFile ? [`import * as __user from ${JSON.stringify(entryFile)};`] : []),
-          // sendEmail / sendPhoneCode: the senders for `sender: 'handler'`, when the functions source exports them.
+          // sendEmail / sendPhoneCode: the senders for `sender: 'handler'`; newUserUid / signInClaims: who a
+          // new user is and what every token carries — each when the functions source exports it.
           `const __own = ${entryFile ? '__user as Record<string, any>' : '{} as Record<string, any>'};`,
-          `export const icebaseAuth = __icebaseAuth(__config, ${JSON.stringify(env)}, { senders: { email: __own['sendEmail'], phone: __own['sendPhoneCode'] } });`,
+          `export const icebaseAuth = __icebaseAuth(__config, ${JSON.stringify(env)}, { senders: { email: __own['sendEmail'], phone: __own['sendPhoneCode'] }, newUserUid: __own['newUserUid'], signInClaims: __own['signInClaims'] });`,
           // Once a day: expired challenges, counters, blocks and old audit entries leave the store.
           `export const icebaseAuthCleanup = __icebaseAuthCleanup(__config, ${JSON.stringify(env)});`,
         ]

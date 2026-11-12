@@ -1,8 +1,9 @@
 // Custom auth on the IceBase server (emulator mode): the same handler `icebase deploy` ships
 // as the icebaseAuth function, at /__/icebase/auth. Users go to the emulator's auth service;
-// 'handler' senders come from the functions source (sendEmail / sendPhoneCode exports).
+// 'handler' senders come from the functions source (sendEmail / sendPhoneCode exports), and so do
+// the newUserUid / signInClaims hooks.
 
-import { authSecurityOps, createAuthHandler, outbox, type AuthDirectory, type CustomIdentity, type EmailSendFn, type PhoneSendFn } from '@panth977/icebase-server/auth';
+import { authSecurityOps, createAuthHandler, outbox, type AuthDirectory, type AuthHandlerOptions, type CustomIdentity, type EmailSendFn, type PhoneSendFn } from '@panth977/icebase-server/auth';
 import { initializeAdminApp as adminApp, getAdminAuth } from '@panth977/icebase-server/admin';
 import { resolveModes } from '@panth977/icebase/config';
 import { memoryStore } from '@panth977/icebase-server/internal';
@@ -38,7 +39,16 @@ export function customAuthService(ctx: EmulatorContext): Service {
         return f(m);
       }) as PhoneSendFn,
     };
-    return createAuthHandler(config, env, { app: app(), store, senders: { ...(config.auth?.custom?.email?.sender === 'handler' ? { email: senders.email } : {}), ...(config.auth?.custom?.phone?.sender === 'handler' ? { phone: senders.phone } : {}) } });
+    // Read at call time: the functions source reloads under `icebase dev`.
+    const newUserUid: AuthHandlerOptions['newUserUid'] = (identity) => (ctx.functionExports.newUserUid as AuthHandlerOptions['newUserUid'])?.(identity);
+    const signInClaims: AuthHandlerOptions['signInClaims'] = (user, c) => (ctx.functionExports.signInClaims as AuthHandlerOptions['signInClaims'])?.(user, c);
+    return createAuthHandler(config, env, {
+      app: app(),
+      store,
+      newUserUid,
+      signInClaims,
+      senders: { ...(config.auth?.custom?.email?.sender === 'handler' ? { email: senders.email } : {}), ...(config.auth?.custom?.phone?.sender === 'handler' ? { phone: senders.phone } : {}) },
+    });
   };
   const manageOp = async (op: string, b: Record<string, unknown>): Promise<unknown> => {
     const o = ops();
@@ -52,7 +62,11 @@ export function customAuthService(ctx: EmulatorContext): Service {
       case 'link':
         return o.link(String(b.uid ?? ''), b.identity as CustomIdentity);
       case 'unlink':
-        return o.unlink(String(b.uid ?? ''), b.kind as 'email' | 'phone' | 'google');
+        return o.unlink(String(b.uid ?? ''), b.kind as 'email' | 'phone' | 'google' | 'apple');
+      case 'listSessions':
+        return o.listSessions(String(b.uid ?? ''));
+      case 'revokeSession':
+        return o.revokeSession(String(b.uid ?? ''), String(b.sid ?? ''));
     }
     throw new IceBaseError('invalid-argument', `customAuth: no management operation '${op}'`);
   };

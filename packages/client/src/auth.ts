@@ -33,6 +33,7 @@ export interface CustomMethods {
   email: boolean;
   phone: boolean;
   google: boolean;
+  apple: boolean;
 }
 
 export class Auth<C = Record<string, unknown>> {
@@ -43,7 +44,7 @@ export class Auth<C = Record<string, unknown>> {
     /** @internal the Firebase Auth instance underneath */ readonly _native: fa.Auth,
   ) {
     const custom = app.config.auth?.custom;
-    this._custom = { email: !!custom?.email, phone: !!custom?.phone, google: !!custom?.google };
+    this._custom = { email: !!custom?.email, phone: !!custom?.phone, google: !!custom?.google, apple: !!custom?.apple };
   }
   get currentUser(): User | null {
     return this._native.currentUser;
@@ -98,6 +99,7 @@ export interface CustomFlows {
   applyActionCode(auth: Auth<unknown>, code: string): Promise<void>;
   signInWithPhoneNumber(auth: Auth<unknown>, phoneNumber: string, verifier?: ApplicationVerifier): Promise<ConfirmationResult>;
   signInWithGoogle(auth: Auth<unknown>, how: 'popup' | 'redirect', provider: fa.GoogleAuthProvider): Promise<UserCredential | never>;
+  signInWithApple(auth: Auth<unknown>, how: 'popup' | 'redirect', provider: fa.OAuthProvider): Promise<UserCredential | never>;
   getRedirectResult(auth: Auth<unknown>): Promise<UserCredential | null>;
 }
 
@@ -206,24 +208,30 @@ export function signInWithPhoneNumber(auth: Auth<unknown>, phoneNumber: string, 
   return fa.signInWithPhoneNumber(auth._native, phoneNumber, verifier);
 }
 
-// ─── Google ────────────────────────────────────────────────────────────────────
+// ─── Google and Apple ──────────────────────────────────────────────────────────
 
 export const GoogleAuthProvider = fa.GoogleAuthProvider;
 export type GoogleAuthProvider = fa.GoogleAuthProvider;
+/** new OAuthProvider('apple.com') — with config.auth.custom.apple, IceBase's own Sign in with Apple. */
+export const OAuthProvider = fa.OAuthProvider;
+export type OAuthProvider = fa.OAuthProvider;
 export type AuthProvider = fa.AuthProvider;
 
 const isGoogle = (p: AuthProvider) => p.providerId === 'google.com';
+const isApple = (p: AuthProvider) => p.providerId === 'apple.com';
 
 export function signInWithPopup(auth: Auth<unknown>, provider: AuthProvider, resolver?: fa.PopupRedirectResolver): Promise<UserCredential> {
   if (auth._custom.google && isGoogle(provider)) return custom('google').signInWithGoogle(track(auth), 'popup', provider as fa.GoogleAuthProvider) as Promise<UserCredential>;
+  if (auth._custom.apple && isApple(provider)) return custom('apple').signInWithApple(track(auth), 'popup', provider as fa.OAuthProvider) as Promise<UserCredential>;
   return fa.signInWithPopup(track(auth)._native, provider, resolver);
 }
 export function signInWithRedirect(auth: Auth<unknown>, provider: AuthProvider, resolver?: fa.PopupRedirectResolver): Promise<never> {
   if (auth._custom.google && isGoogle(provider)) return custom('google').signInWithGoogle(track(auth), 'redirect', provider as fa.GoogleAuthProvider) as Promise<never>;
+  if (auth._custom.apple && isApple(provider)) return custom('apple').signInWithApple(track(auth), 'redirect', provider as fa.OAuthProvider) as Promise<never>;
   return fa.signInWithRedirect(track(auth)._native, provider, resolver);
 }
 export function getRedirectResult(auth: Auth<unknown>, resolver?: fa.PopupRedirectResolver): Promise<UserCredential | null> {
-  if (auth._custom.google) return custom('google').getRedirectResult(track(auth));
+  if (auth._custom.google || auth._custom.apple) return custom(auth._custom.google ? 'google' : 'apple').getRedirectResult(track(auth));
   return fa.getRedirectResult(track(auth)._native, resolver);
 }
 export function signInWithCredential(auth: Auth<unknown>, credential: AuthCredential): Promise<UserCredential> {
@@ -275,7 +283,7 @@ customClient.setAuthLookup((u) => {
   return a;
 });
 
-export type { ApprovalState, PendingEmail } from './internal/custom-auth/client.ts';
+export type { ApprovalState, PendingEmail, SsoAppInfo, SsoPending, SsoRequestInfo, SsoSessionInfo } from './internal/custom-auth/client.ts';
 
 const needCustom = (auth: Auth<unknown>, m: keyof CustomMethods) => {
   if (!auth._custom[m]) throw new IceBaseError('failed-precondition', `config.auth.custom.${m} is not set`, { reason: 'config', service: 'auth' });
@@ -343,4 +351,64 @@ export function customGoogleOAuth(auth: Auth<unknown>): CustomGoogleOAuth {
     signInWithRedirect: () => customClient.googleRedirect(a),
     getRedirectResult: () => customClient.googleRedirectResult(a),
   };
+}
+
+/**
+ * Sign in with Apple from a native app: the identity token Apple's own sheet returned (and the
+ * name, which Apple gives only on the first sign-in). Needs config.auth.custom.apple; the token's
+ * audience (the app's bundle id) must be in apple.audiences.
+ */
+export function signInWithAppleIdToken(auth: Auth<unknown>, idToken: string, name?: string | { givenName?: string | null; familyName?: string | null }): Promise<UserCredential> {
+  needCustom(auth, 'apple');
+  return customClient.appleIdTokenSignIn(track(auth), idToken, name);
+}
+
+// ─── SSO: sign in through the project's hosted sign-in page ───────────────────────
+// The app: startSsoSignIn → (the hosted page) → completeSsoSignIn on the redirect URI → watchSsoSession.
+// The hosted page: getSsoRequest → sign in any way → grantSsoRequest / denySsoRequest; listSsoSessions
+// and revokeSsoSessions for "where you're signed in".
+
+/** The authorize URL for an SSO sign-in, with a fresh PKCE verifier and state (nothing is stored; pass them to completeSsoSignIn). */
+export function ssoAuthorizeUrl(auth: Auth<unknown>, opts: { clientId: string; redirectUri: string }): Promise<{ url: string; state: string; verifier: string }> {
+  return customClient.ssoAuthorizeUrl(track(auth), opts);
+}
+
+/** Send the person to the hosted sign-in page (location.assign, or `open` — e.g. a native app's browser). The verifier waits in localStorage. */
+export function startSsoSignIn(auth: Auth<unknown>, opts: { clientId: string; redirectUri: string; open?: (url: string) => void | Promise<void> }): Promise<void> {
+  return customClient.startSso(track(auth), opts);
+}
+
+/**
+ * On the redirect URI: trade the code for a session and sign in. null when the URL (default: this
+ * page's) is not an SSO return. Throws auth/user-cancelled when the person declined, and
+ * auth/invalid-sso-state when the sign-in was not started here.
+ */
+export function completeSsoSignIn(auth: Auth<unknown>, url?: string, pending?: customClient.SsoPending): Promise<UserCredential | null> {
+  return customClient.completeSso(track(auth), url, pending);
+}
+
+/** Keep an SSO session honest: pings on start, when the page becomes visible and every 10 minutes; once it is revoked, signs out and calls onRevoked. */
+export function watchSsoSession(auth: Auth<unknown>, onRevoked?: () => void): Unsubscribe {
+  return customClient.watchSso(track(auth), onRevoked);
+}
+
+/** Hosted page: which app is asking (`sso` is the page's ?sso= parameter). */
+export function getSsoRequest(auth: Auth<unknown>, sso: string): Promise<customClient.SsoRequestInfo> {
+  return customClient.ssoRequestInfo(track(auth), sso);
+}
+/** Hosted page, signed in: let the app in. Resolves to the URL to send the browser to (the app's redirect URI with the code). */
+export function grantSsoRequest(auth: Auth<unknown>, sso: string): Promise<string> {
+  return customClient.ssoGrant(track(auth), sso);
+}
+/** Hosted page: decline. Resolves to the app's redirect URI with error=access_denied. */
+export function denySsoRequest(auth: Auth<unknown>, sso: string): Promise<string> {
+  return customClient.ssoDeny(track(auth), sso);
+}
+/** The signed-in person's SSO sessions (newest first) and the apps they are signed into. */
+export function listSsoSessions(auth: Auth<unknown>): Promise<{ sessions: customClient.SsoSessionInfo[]; apps: customClient.SsoAppInfo[] }> {
+  return customClient.ssoSessions(track(auth));
+}
+/** Revoke SSO sessions: one ({ sid }), one app's ({ client }) or all ({ all: true }, which also revokes every refresh token). */
+export function revokeSsoSessions(auth: Auth<unknown>, which: { sid: string } | { client: string } | { all: true }): Promise<{ revoked: number }> {
+  return customClient.ssoRevoke(track(auth), which);
 }

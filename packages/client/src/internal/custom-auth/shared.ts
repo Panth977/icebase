@@ -34,6 +34,8 @@ export type AuthErrorCode =
   | 'auth/argument-error'
   | 'auth/internal-error'
   | 'auth/popup-closed-by-user'
-  | 'auth/popup-blocked';
+  | 'auth/popup-blocked'
+  | 'auth/user-cancelled'
+  | 'auth/invalid-sso-state';
 
 export const STORE_DEFAULT_PATH = '_icebase/auth';
