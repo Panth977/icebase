@@ -22,7 +22,7 @@ export function getFunctions(app: IceBaseApp, regionOrCustomDomain?: string): Fu
   const region = regionOrCustomDomain ?? app.config.functions?.region ?? 'us-central1';
   return service(app, `functions:${region}`, () => {
     const mode = app.modes.functions;
-    const native = fn.getFunctions(nativeWebApp(app), region);
+    const native = fn.getFunctions(nativeWebApp(app, 'functions'), region);
     if (mode === 'emulator') {
       const u = new URL(emulatorOrigin(app));
       fn.connectFunctionsEmulator(native, u.hostname, Number(u.port));

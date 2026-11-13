@@ -94,7 +94,7 @@ export async function waitForApproval(auth: Auth<unknown>, opts: { onState?: (s:
     const db = await import('firebase/database');
     const { nativeWebApp } = await import('../firebase-web-app.ts');
     const root = auth.app.config.auth?.custom?.security?.store?.path ?? STORE_DEFAULT_PATH;
-    const r = db.ref(db.getDatabase(nativeWebApp(auth.app), url), `${root}/signin/${p.signinId}/state`);
+    const r = db.ref(db.getDatabase(nativeWebApp(auth.app, 'auth'), url), `${root}/signin/${p.signinId}/state`);
     return new Promise<UserCredential>((resolve, reject) => {
       const stop = db.onValue(
         r,

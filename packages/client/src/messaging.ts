@@ -52,7 +52,7 @@ export class Messaging<Cfg extends AnyConfig = AnyConfig> {
 
 export function getMessaging<Cfg extends AnyConfig>(app: IceBaseApp<Cfg>): Messaging<Cfg> {
   if (app.kind === 'admin') throw new IceBaseError('invalid-argument', 'This is an admin app: use getAdminMessaging(app) from icebase/admin', { reason: 'config' });
-  return service(app, 'messaging', () => new Messaging(app, app.modes.messaging === 'firebase' ? fm.getMessaging(nativeWebApp(app)) : null));
+  return service(app, 'messaging', () => new Messaging(app, app.modes.messaging === 'firebase' ? fm.getMessaging(nativeWebApp(app, 'messaging')) : null));
 }
 
 /** firebase mode: whether this browser can receive pushes; the IceBase server's delivery always works. */

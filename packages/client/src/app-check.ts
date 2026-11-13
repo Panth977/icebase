@@ -66,7 +66,7 @@ export function initializeAppCheck(app: IceBaseApp, options: AppCheckOptions): A
         // Debug mode replaces attestation; a site key keeps reCAPTCHA v3 for when it is off.
         provider = provider.siteKey ? new ac.ReCaptchaV3Provider(provider.siteKey) : new ac.CustomProvider({ getToken: () => Promise.reject(new IceBaseError('failed-precondition', 'App Check DebugProvider: debug mode only (give a reCAPTCHA site key for the rest)')) });
       }
-      return new AppCheck(app, ac.initializeAppCheck(nativeWebApp(app), { ...options, provider }), null);
+      return new AppCheck(app, ac.initializeAppCheck(nativeWebApp(app, 'appCheck'), { ...options, provider }), null);
     }
     const debugToken = debugTokenOf(options.provider);
     let cached: { token: string; until: number } | null = null;
@@ -78,7 +78,7 @@ export function initializeAppCheck(app: IceBaseApp, options: AppCheckOptions): A
       return { token: j.token, expireTimeMillis: cached.until };
     };
     // The Firebase SDKs IceBase drives in this mode (storage, functions, auth) attach the token themselves.
-    const native = ac.initializeAppCheck(nativeWebApp(app), { provider: new ac.CustomProvider({ getToken: exchange }), isTokenAutoRefreshEnabled: options.isTokenAutoRefreshEnabled ?? false });
+    const native = ac.initializeAppCheck(nativeWebApp(app, 'appCheck'), { provider: new ac.CustomProvider({ getToken: exchange }), isTokenAutoRefreshEnabled: options.isTokenAutoRefreshEnabled ?? false });
     const token = async () => {
       if (cached && cached.until - 60_000 > Date.now()) return cached.token;
       return (await ac.getToken(native)).token;

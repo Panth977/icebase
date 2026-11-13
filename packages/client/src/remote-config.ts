@@ -108,7 +108,7 @@ export function getRemoteConfig<Cfg extends AnyConfig>(app: IceBaseApp<Cfg>): Re
 }
 
 function firebaseBackend(app: IceBaseApp): Backend {
-  const native = rc.getRemoteConfig(nativeWebApp(app));
+  const native = rc.getRemoteConfig(nativeWebApp(app, 'remoteConfig'));
   return {
     get settings() {
       return native.settings;

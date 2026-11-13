@@ -74,7 +74,7 @@ export function getAuth<Cfg extends AnyConfig>(app: IceBaseApp<Cfg>): Auth<Claim
   if (app.kind === 'admin') throw new IceBaseError('invalid-argument', 'This is an admin app: use getAdminAuth(app) from icebase/admin', { reason: 'config' });
   return service(app, 'auth', () => {
     const mode = app.modes.auth;
-    const native = fa.getAuth(nativeWebApp(app));
+    const native = fa.getAuth(nativeWebApp(app, 'auth'));
     if (mode === 'emulator') fa.connectAuthEmulator(native, emulatorOrigin(app), { disableWarnings: true });
     return track(new Auth<ClaimsOf<Cfg>>(app, native));
   });

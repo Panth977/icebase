@@ -38,7 +38,7 @@ export function getStorage(app: IceBaseApp, bucketUrl?: string): FirebaseStorage
   if (app.kind === 'admin') throw new IceBaseError('invalid-argument', 'This is an admin app: use getAdminStorage(app) from icebase/admin', { reason: 'config' });
   return service(app, `storage:${bucketUrl ?? ''}`, () => {
     const mode = app.modes.storage;
-    const native = st.getStorage(nativeWebApp(app), bucketUrl);
+    const native = st.getStorage(nativeWebApp(app, 'storage'), bucketUrl);
     if (mode === 'emulator') {
       const u = new URL(emulatorOrigin(app));
       st.connectStorageEmulator(native, u.hostname, Number(u.port));

@@ -29,6 +29,7 @@ const cheap = await getDocs(query(collection(db, products), where('category', '=
 - **Typed.** Documents, query values and writes are typed from the schema; writes are validated at runtime too.
 - **Indexes.** A query whose index is not declared is a compile error (`MissingIndex<"category" | "stock">`) and is refused at runtime before it leaves.
 - **Key paths.** Nested fields are key arrays (`['address', 'city']`); strings are never split on dots, so `'rating.avg'` is one key.
+- **Adopt your Firebase app.** `initializeApp(config, 'prod', { firebaseApp })` runs every firebase-mode service on a Firebase app you already created, its Auth instance included, so moving to IceBase signs nobody out (its projectId must be `config.firebase.projectId`; `deleteApp` leaves it alone; emulator / vm services ignore it).
 - **Custom auth.** Sign in with your own email / WhatsApp / SMS senders and Google OAuth client through Firebase's own function names (`sendSignInLinkToEmail`, `signInWithPhoneNumber`, `signInWithPopup`) — see `@panth977/icebase-server/auth`.
 
 Modules: `@panth977/icebase` (app, config, schema) · `/firestore` · `/auth` · `/database` · `/storage` · `/functions` · `/errors`.

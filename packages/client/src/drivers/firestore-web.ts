@@ -3,7 +3,7 @@
 import * as fs from 'firebase/firestore';
 import { IceBaseError } from '../errors.ts';
 import type { Aggregate, BatchDriver, FirestoreDriver, RawDoc, RawQueryResult, TxDriver } from '../internal/firestore-driver.ts';
-import { nativeWebApp } from '../internal/firebase-web-app.ts';
+import { isAdopted, nativeWebApp } from '../internal/firebase-web-app.ts';
 import { isName, type FilterNode, type QuerySpec } from '../internal/plan.ts';
 import { FieldValue, GeoPoint, Timestamp, isPlainObject } from '../values.ts';
 import type { DriverHelpers, Firestore } from '../firestore.ts';
@@ -21,14 +21,19 @@ export function wrapError(e: unknown): Error {
 }
 
 export function createWebDriver(db: Firestore, h: DriverHelpers): FirestoreDriver {
-  const nativeApp = nativeWebApp(db.app);
+  const nativeApp = nativeWebApp(db.app, 'firestore');
   const settings = db._settings;
-  const ndb: fs.Firestore =
-    Object.keys(settings).length > 0
-      ? fs.initializeFirestore(nativeApp, settings as fs.FirestoreSettings, db.databaseId)
-      : db.databaseId === '(default)'
-        ? fs.getFirestore(nativeApp)
-        : fs.getFirestore(nativeApp, db.databaseId);
+  const get = (): fs.Firestore => (db.databaseId === '(default)' ? fs.getFirestore(nativeApp) : fs.getFirestore(nativeApp, db.databaseId));
+  let ndb: fs.Firestore;
+  if (Object.keys(settings).length === 0) ndb = get();
+  else
+    try {
+      ndb = fs.initializeFirestore(nativeApp, settings as fs.FirestoreSettings, db.databaseId);
+    } catch (e) {
+      // An adopted app may have initialized this database already: use it with its own settings.
+      if (!isAdopted(db.app, 'firestore') || (e as { code?: string }).code !== 'failed-precondition') throw e;
+      ndb = get();
+    }
 
   const toNative = (v: unknown): unknown => {
     if (v === null || v === undefined || typeof v !== 'object') return v;

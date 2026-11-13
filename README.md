@@ -160,6 +160,33 @@ of firebase-admin cannot share an app.
 no port. Admin apps reach it with `{ emulator: { embedded: name, adminToken } }`. A single
 VM's backend uses this to keep its data in IceBase (SQLite).
 
+## Adopting an app you already have
+
+A web app that already calls Firebase's `initializeApp(webConfig)` has its users signed in on that
+Firebase app (on iOS often with `initializeAuth` and indexedDB persistence). Hand it to IceBase
+instead of letting IceBase create its own `icebase:<name>` app, and nobody is signed out:
+
+```ts
+import { initializeApp as initializeFirebase } from 'firebase/app';
+import { initializeApp } from '@panth977/icebase/app';
+
+const firebaseApp = initializeFirebase(webConfig); // the app's existing '[DEFAULT]' app
+const app = initializeApp(config, 'prod', { firebaseApp });
+getAuth(app).currentUser; // the user already signed in on firebaseApp
+```
+
+- Every service in firebase mode (auth, Firestore incl. named databases, Storage, Functions,
+  Realtime Database, Remote Config, Messaging, App Check) runs on `firebaseApp`.
+- Auth is the app's own Auth instance (`getAuth(firebaseApp)`); IceBase never calls
+  `initializeAuth` on it. A Firestore the app already initialized is used with its settings.
+- `deleteApp(app)` leaves `firebaseApp` alone.
+- `firebaseApp.options.projectId` must be `config.firebase.projectId`, or `initializeApp` throws
+  a config error.
+- Services in emulator / vm mode ignore it and keep IceBase's own app, so the emulator never
+  takes over the adopted app's Auth.
+- It must come from the same `firebase` package IceBase uses (one copy in the app; see the
+  overrides note above).
+
 ## Running a Firebase app on the IceBase server
 
 `icebase serve` is the IceBase server for production, on one port (PORT, default 8080):

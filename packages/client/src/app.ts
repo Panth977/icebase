@@ -3,12 +3,27 @@
 
 import { configError, IceBaseError } from './errors.ts';
 import { readEnv, resolveModes, type AnyConfig, type EnvOf, type FirebaseWebConfig, type IceBaseConfig, type Mode, type Service } from './config.ts';
+import type { FirebaseApp } from 'firebase/app';
 
 export interface IceBaseAppOptions {
   /** App name, like Firebase's second initializeApp argument. Default '[DEFAULT]'. */
   name?: string;
   /** Firebase web config, overriding config.firebase.webConfig / webConfigEnv. */
   firebase?: FirebaseWebConfig;
+  /**
+   * Adopt a Firebase web app you already created (`initializeApp(webConfig)` from `firebase/app`,
+   * the same `firebase` package IceBase uses) instead of IceBase creating its own `icebase:<name>`
+   * app — so the user it has signed in stays signed in when an app moves to IceBase.
+   *
+   * Every service in firebase mode (auth, Firestore incl. named databases, Storage, Functions,
+   * Realtime Database, Remote Config, Messaging, App Check) runs on this app. Auth reuses the app's
+   * Auth instance as it is (`getAuth(firebaseApp)`; IceBase never calls `initializeAuth` on it), and
+   * a Firestore the app already initialized is used with its own settings. `deleteApp(iceBaseApp)`
+   * leaves the adopted app alone. Its `options.projectId` must equal `config.firebase.projectId`
+   * (a config error otherwise). Services in emulator / vm mode ignore it and keep IceBase's own app,
+   * so an emulator never takes over the adopted app's Auth. Client apps only.
+   */
+  firebaseApp?: FirebaseApp;
   /**
    * Where the IceBase server listens (default config.emulator, then localhost:4400) — or
    * `{ embedded: name }` for one started in this process with startEmulator({ listen: false, name }).
@@ -62,7 +77,24 @@ export function createApp(config: AnyConfig, env: string, kind: 'client' | 'admi
 
 /** initializeApp(config, 'prod') — picks the mode per service from config.environments.prod. */
 export function initializeApp<Cfg extends IceBaseConfig<any, any>>(config: Cfg, env: EnvOf<Cfg>, options?: IceBaseAppOptions): IceBaseApp<Cfg> {
+  if (options?.firebaseApp) checkAdopted(config as AnyConfig, env, options);
   return createApp(config as AnyConfig, env, 'client', options) as unknown as IceBaseApp<Cfg>;
+}
+
+/** The adopted Firebase app must belong to the config's Firebase project. */
+function checkAdopted(config: AnyConfig, env: string, options: IceBaseAppOptions): void {
+  if (!config || !config.environments) return; // createApp says why
+  if (!Object.values(resolveModes(config, env)).includes('firebase')) return; // emulator / vm only: not used
+  let projectId: string | undefined;
+  try {
+    projectId = options.firebaseApp!.options.projectId;
+  } catch {
+    throw configError('initializeApp(…, { firebaseApp }): that Firebase app was deleted');
+  }
+  const want = config.firebase?.projectId;
+  if (!want) throw configError('initializeApp(…, { firebaseApp }): firebase mode needs `firebase.projectId` in icebase.config');
+  if (projectId !== want) throw configError(`initializeApp(…, { firebaseApp }): the Firebase app '${options.firebaseApp!.name}' is for project '${projectId ?? '(none)'}', but icebase.config's firebase.projectId is '${want}'`);
+  if (options.firebase?.projectId && options.firebase.projectId !== want) throw configError(`initializeApp(…, { firebase }): projectId '${options.firebase.projectId}' is not icebase.config's firebase.projectId '${want}'`);
 }
 
 export function getApp(name: string = DEFAULT): IceBaseApp {
@@ -101,6 +133,7 @@ export function service<T>(app: IceBaseApp, id: string, make: () => T): T {
 
 /** @internal the Firebase web config for a client app in firebase mode. */
 export function webConfigOf(app: IceBaseApp): FirebaseWebConfig {
+  if (app.options.firebaseApp && Object.values(app.modes).includes('firebase')) return app.options.firebaseApp.options as FirebaseWebConfig;
   if (app.options.firebase) return app.options.firebase;
   const fb = app.config.firebase;
   if (!fb) throw configError(`firebase mode needs \`firebase\` in icebase.config (projectId and webConfig or webConfigEnv)`);
