@@ -286,9 +286,14 @@ export function consoleApi(o: ConsoleOptions): (op: string, b: Record<string, un
 
     // ── Storage ──
     async 'st.buckets'() {
-      const def = config.firebase?.storageBucket ?? `${config.firebase?.projectId ?? `demo-${config.name}`}.appspot.com`;
+      const named = config.firebase?.storageBucket;
       const listed = await manageStorage(app).listBuckets().catch(() => [] as string[]);
-      return { default: def, buckets: [...new Set([def, ...listed])] };
+      // Only buckets that exist. Without a named bucket, the old <project>.appspot.com guess is used only
+      // when the project's buckets cannot be listed: projects made since late 2024 have
+      // <project>.firebasestorage.app instead, and the guess showed up as a second, empty bucket.
+      const guess = `${config.firebase?.projectId ?? `demo-${config.name}`}.appspot.com`;
+      const def = named ?? (listed.includes(guess) || !listed.length ? guess : listed.find((n) => n.endsWith('.firebasestorage.app')) ?? listed[0]!);
+      return { default: def, buckets: [...new Set(named || !listed.length ? [def, ...listed] : listed)] };
     },
     async 'st.list'(b) {
       const bucket = getAdminStorage(app).bucket(typeof b.bucket === 'string' && b.bucket ? b.bucket : undefined);
